@@ -3,12 +3,16 @@ on:
   workflow_call:
     secrets:
       VERCEL_GITHUB_TOKEN:
+        description: 'A GitHub PAT with repo scope'
         required: true
       VERCEL_TOKEN:
+        description: 'Vercel's API token, account level
         required: true
       VERCEL_ORG_ID:
+        description: "Vercel's ORG token, org level"
         required: true
       VERCEL_PROJECT_ID_DOCS_DEV:
+        description: "Vercel's PROJECT token, project level"
         required: true
   pull_request_target:
     paths:
