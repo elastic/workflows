@@ -1,5 +1,15 @@
 name: Elastic Dev Docs Builder
 on:
+  workflow_call:
+    secrets:
+      VERCEL_GITHUB_TOKEN:
+        required: true
+      VERCEL_TOKEN:
+        required: true
+      VERCEL_ORG_ID:
+        required: true
+      VERCEL_PROJECT_ID_DOCS_DEV:
+        required: true
   pull_request_target:
     paths:
       - '**.mdx'
