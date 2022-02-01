@@ -96,7 +96,7 @@ jobs:
           vercel-project-id: ${{ secrets.VERCEL_PROJECT_ID_DOCS_DEV}} #Required
           vercel-project-name: docs-elastic-dev
           working-directory: ./
-          github-token: false # Otherwise VERCEL_GITHUB_TOKEN
+          github-comment: false # Otherwise need github-token (VERCEL_GITHUB_TOKEN)
 
       - name: Portal for deploy
         if: github.event.pull_request.merged == true
