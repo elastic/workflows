@@ -60,7 +60,18 @@ jobs:
         shell: bash
         run: |
           mkdir -p ${{ github.workspace }}/wordlake-dev/${{ github.event.repository.name }}
-          rsync --ignore-missing-args -zavpm --include='*.docnav.json' --include='*.apidocs.json' --include='*.mdx' --include='*.png' --include='*.gif'  --include='*.jpg' --include='*.jpeg' --include='*.devdocs.json' --include='*/' --exclude='*' ${{ github.workspace }}/temp/ ${{ github.workspace }}/wordlake-dev/${{ github.event.repository.name }}/
+          rsync --ignore-missing-args -zavpm \
+          --include='*.docnav.json' \
+          --include='*.apidocs.json' \
+          --include='*.mdx' \
+          --include='*.png' \
+          --include='*.gif' \
+          --include='*.jpg' \
+          --include='*.jpeg' \
+          --include='*.devdocs.json' \
+          --exclude='*' \
+          ${{ github.workspace }}/temp/ \
+          ${{ github.workspace }}/wordlake-dev/${{ github.event.repository.name }}/
 
       - name: Generate preview
         if: github.event.pull_request.merged == false
