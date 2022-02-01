@@ -83,6 +83,7 @@ jobs:
           --include='*.jpg' \
           --include='*.jpeg' \
           --include='*.devdocs.json' \
+          --include='*/' \
           --exclude='*' \
           ${{ github.workspace }}/temp/ \
           ${{ github.workspace }}/wordlake-dev/${{ github.event.repository.name }}/
