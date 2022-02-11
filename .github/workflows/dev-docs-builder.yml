@@ -74,6 +74,7 @@ jobs:
         shell: bash
         run: |
           mkdir -p ${{ github.workspace }}/wordlake-dev/${{ github.event.repository.name }}
+          rm -rf ${{ github.workspace }}/wordlake-dev/${{ github.event.repository.name }}/*
           rsync --ignore-missing-args -zavpm \
           --include='*.docnav.json' \
           --include='*.apidocs.json' \
