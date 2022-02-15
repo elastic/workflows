@@ -86,7 +86,7 @@ jobs:
           --include='*.devdocs.json' \
           --include='*/' \
           --exclude='*' \
-          --exclude='cats.mdx \
+          --exclude='cats.mdx' \
           ${{ github.workspace }}/temp/ \
           ${{ github.workspace }}/wordlake-dev/${{ github.event.repository.name }}/
 
