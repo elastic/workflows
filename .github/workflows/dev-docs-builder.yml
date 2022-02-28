@@ -87,6 +87,7 @@ jobs:
           --include='*/' \
           --exclude='*' \
           --exclude='cats.mdx' \
+          --exclude='ssh.config' \
           ${{ github.workspace }}/temp/ \
           ${{ github.workspace }}/wordlake-dev/${{ github.event.repository.name }}/
 
