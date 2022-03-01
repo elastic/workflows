@@ -87,7 +87,7 @@ jobs:
           --include='*/' \
           --exclude='*' \
           --exclude='cats.mdx' \
-          --exclude='ssh.config' \
+          --exclude='infrastructure/ansible/systests/*' \
           ${{ github.workspace }}/temp/ \
           ${{ github.workspace }}/wordlake-dev/${{ github.event.repository.name }}/
 
