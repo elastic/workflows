@@ -76,6 +76,8 @@ jobs:
           mkdir -p ${{ github.workspace }}/wordlake-dev/${{ github.event.repository.name }}
           rm -rf ${{ github.workspace }}/wordlake-dev/${{ github.event.repository.name }}/*
           rsync --ignore-missing-args -zavpm \
+          --exclude='cats.mdx' \
+          --exclude='infrastructure/ansible/systests/*' \
           --include='*.docnav.json' \
           --include='*.apidocs.json' \
           --include='*.mdx' \
@@ -86,8 +88,6 @@ jobs:
           --include='*.devdocs.json' \
           --include='*/' \
           --exclude='*' \
-          --exclude='cats.mdx' \
-          --exclude='infrastructure/ansible/systests/*' \
           ${{ github.workspace }}/temp/ \
           ${{ github.workspace }}/wordlake-dev/${{ github.event.repository.name }}/
 
