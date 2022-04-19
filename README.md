@@ -55,32 +55,28 @@ jobs:
     uses: elastic/workflows/.github/workflows/co-docs-a-prepare.yml@v1
     with:
       # Prebuild is wordlake or wordlake-dev
-      prebuild: wordlake
+      prebuild: content-test
       # Repo is docs.elastic.co or docs.elastic.dev
       repo: docs.elastic.co
+    secrets:
+      VERCEL_GITHUB_TOKEN: ${{ secrets.VERCEL_GITHUB_TOKEN }}
   
   portal:
     uses: elastic/workflows/.github/workflows/co-docs-b-portal.yml@v1
     with:
       # Indicate whether prebuild is wordlake or wordlake-dev
-      prebuild: wordlake
+      prebuild: content-test
     secrets:
       token: ${{ secrets.VERCEL_GITHUB_TOKEN }}
   
   preview:
-    uses: elastic/workflows/.github/workflows/co-docs-c-portal.yml@v1
+    uses: elastic/workflows/.github/workflows/co-docs-c-preview.yml@v1
     with:
-      project-name: docs-elastic-co
+      project-name: docs-elastic-dev
     secrets:
       VERCEL_GITHUB_TOKEN: ${{ secrets.VERCEL_GITHUB_TOKEN }}
       VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
       VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
       VERCEL_PROJECT_ID_DOCS_CO: ${{ secrets.VERCEL_PROJECT_ID_DOCS_CO }}
   
-  deploy:
-    uses: elastic/workflows/.github/workflows/co-docs-d-deploy.yml@v1
-    with:
-      prebuild: wordlake
-    secrets:
-      VERCEL_GITHUB_TOKEN: ${{ secrets.VERCEL_GITHUB_TOKEN }}
 ```
