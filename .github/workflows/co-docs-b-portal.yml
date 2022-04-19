@@ -12,10 +12,10 @@ on:
 
 jobs:
   deploy:
-    name: Deploy to production
+    name: Portal
     runs-on: ubuntu-latest
     steps:
-    
+
       - name: Cache job
         uses: actions/cache@v3
         with:
