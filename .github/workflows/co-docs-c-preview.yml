@@ -22,7 +22,7 @@ on:
 
 jobs:
   preview:
-    name: Build internal docs
+    name: Preview
     runs-on: ubuntu-latest
     steps:
 
