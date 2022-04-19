@@ -19,7 +19,7 @@ jobs:
     name: Prepare build
     runs-on: ubuntu-latest
     steps:
-    
+
       - name: Setup workspace
         uses: actions/checkout@v3.0.1
 
@@ -54,5 +54,5 @@ jobs:
       - name: Cache job
         uses: actions/cache@v3
         with:
-          path: *
+          path: **
           key: ${{ github.event.pull_request.number }}-docs-${GITHUB_SHA}
