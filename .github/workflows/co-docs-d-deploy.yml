@@ -10,8 +10,9 @@ on:
       VERCEL_GITHUB_TOKEN:
         description: 'A GitHub PAT with repo scope'
         required: true
+
 jobs:
-  deploy-to-prod:
+  deploy:
     name: Deploy to production
     runs-on: ubuntu-latest
     steps:
