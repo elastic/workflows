@@ -10,6 +10,18 @@ on:
       VERCEL_GITHUB_TOKEN:
         description: 'A GitHub PAT with repo scope'
         required: true
+  pull_request_target:
+    paths:
+    # Change docs dir to your repos docs dir
+      - 'docs/**.mdx'
+      - 'docs/**.docnav.json'
+      - 'docs/**.docapi.json'
+      - 'docs/**.devdocs.json'
+      - 'docs/**.jpg'
+      - 'docs/**.jpeg'
+      - 'docs/**.png'
+      - 'docs/**.gif'
+    types: [closed, opened, synchronize, reopened]
 
 jobs:
   deploy:
