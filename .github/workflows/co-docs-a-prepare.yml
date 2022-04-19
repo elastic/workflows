@@ -9,10 +9,10 @@ on:
     inputs:
       prebuild: 
         type: string
-        require: true
+        required: true
       repo: 
         type: string
-        require: true
+        required: true
 
 jobs:
  prepare:

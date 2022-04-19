@@ -5,7 +5,7 @@ on:
     inputs:
       prebuild: 
         type: string
-        require: true
+        required: true
     secrets:
       token:
         required: true
