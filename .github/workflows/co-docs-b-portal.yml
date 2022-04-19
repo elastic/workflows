@@ -12,7 +12,6 @@ on:
 
 jobs:
  portal:
-    needs: [prepare-content]
       - name: Cache job
         uses: actions/cache@v3
         with:

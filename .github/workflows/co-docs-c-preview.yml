@@ -22,7 +22,6 @@ on:
 
 jobs:
   generate-preview:
-    needs: [prepare-content, polish-and-portal]
       - name: Cache job
         uses: actions/cache@v3
         with:
