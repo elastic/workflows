@@ -11,8 +11,11 @@ on:
         required: true
 
 jobs:
- portal:
-    needs: [prepare-content]
+  deploy:
+    name: Deploy to production
+    runs-on: ubuntu-latest
+    steps:
+    
       - name: Cache job
         uses: actions/cache@v3
         with:

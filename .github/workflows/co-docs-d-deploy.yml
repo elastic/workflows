@@ -12,7 +12,10 @@ on:
         required: true
 jobs:
   deploy-to-prod:
-    needs: [prepare-content, polish-and-portal, generate-preview]
+    name: Build internal docs
+    runs-on: ubuntu-latest
+    steps:
+
       - name: Checkout Wordlake for commit
         uses: actions/checkout@v3.0.1
         with:
