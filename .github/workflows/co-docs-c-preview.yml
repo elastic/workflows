@@ -1,0 +1,41 @@
+name: Reusable workflow example
+
+on:
+  workflow_call:
+    inputs:
+      project-name: 
+        type: string
+        require: true
+    secrets:
+      VERCEL_GITHUB_TOKEN:
+        description: 'A GitHub PAT with repo scope'
+        required: true
+      VERCEL_TOKEN:
+        description: 'Vercel API token, account level'
+        required: true
+      VERCEL_ORG_ID:
+        description: 'Vercel ORG token, org level'
+        required: true
+      VERCEL_PROJECT_ID_DOCS_CO:
+        description: 'Vercel PROJECT token, project level'
+        required: true
+
+jobs:
+  generate-preview:
+    needs: [prepare-content, polish-and-portal]
+      - name: Cache job
+        uses: actions/cache@v3
+        with:
+          path: *
+          key: ${{ github.event.pull_request.number }}-docs-${GITHUB_SHA}
+
+      - name: Generate preview
+        if: github.event.pull_request.merged == false
+        uses: elastic/builder@v21.3.0
+        with:
+          vercel-token: ${{ secrets.VERCEL_TOKEN }} # Required
+          vercel-org-id: ${{ secrets.VERCEL_ORG_ID }}  #Required
+          vercel-project-id: ${{ secrets.VERCEL_PROJECT_ID_DOCS_CO }} #Required
+          vercel-project-name: ${{ inputs.project-name }}
+          working-directory: ./
+          github-comment: false # Otherwise need github-token (VERCEL_GITHUB_TOKEN)
