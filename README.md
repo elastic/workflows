@@ -68,7 +68,7 @@ jobs:
       token: ${{ secrets.VERCEL_GITHUB_TOKEN }}
   
   preview:
-    uses: elastic/workflows/.github/workflows/co-docs-c-portal.yml@v1
+    uses: elastic/workflows/.github/workflows/co-docs-c-preview.yml@v1
     with:
       project-name: docs-elastic-co
     secrets:
