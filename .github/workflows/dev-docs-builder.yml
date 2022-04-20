@@ -92,17 +92,6 @@ jobs:
           ${{ github.workspace }}/temp/ \
           ${{ github.workspace }}/wordlake-dev/${{ github.event.repository.name }}/
 
-      - name: Generate preview
-        if: github.event.pull_request.merged == false
-        uses: elastic/builder@v21.3.0
-        with:
-          vercel-token: ${{ secrets.VERCEL_TOKEN }} # Required
-          vercel-org-id: ${{ secrets.VERCEL_ORG_ID }}  #Required
-          vercel-project-id: ${{ secrets.VERCEL_PROJECT_ID_DOCS_DEV }} #Required
-          vercel-project-name: docs-elastic-dev
-          working-directory: ./
-          github-comment: false # Otherwise need github-token (VERCEL_GITHUB_TOKEN)
-
       - name: Portal for deploy
         if: github.event.pull_request.merged == true
         shell: bash
