@@ -20,11 +20,7 @@ jobs:
         uses: actions/cache@v3
         with:
           path: ${{ github.workspace }}
-          key: ${{ github.event.pull_request.number }}-docs-${GITHUB_SHA}
-        
-      - name: Temp sources override
-        shell: bash
-        run: cp -f ${{ github.workspace }}/${{ inputs.prebuild }}/.scaffold/sources.json ${{ github.workspace }}/${{ inputs.repo }}/.
+          key: ${{ github.event.pull_request.number }}-docs-${{ GITHUB_SHA }}
 
       - name: Show workspace
         shell: bash
