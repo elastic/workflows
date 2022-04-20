@@ -22,9 +22,13 @@ jobs:
           path: .
           key: ${{ github.event.pull_request.number }}-docs
 
-      - name: Show workspace
+      - name: Show child workspace
         shell: bash
         run: ls -lat ${{ github.workspace }}
+
+      - name: Show parent workspace
+        shell: bash
+        run: ls -lat ..
 
       - name: Portal
         shell: bash
