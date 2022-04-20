@@ -52,7 +52,7 @@ on:
 
 jobs:
   preview:
-    uses: elastic/workflows/.github/workflows/co-docs-c-preview.yml@v1
+    uses: elastic/workflows/.github/workflows/co-docs-a-preview.yml@v1
     with:
       project-name: docs-elastic-dev
       prebuild: content-test
@@ -62,4 +62,13 @@ jobs:
       VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
       VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
       VERCEL_PROJECT_ID_DOCS_CO: ${{ secrets.VERCEL_PROJECT_ID_DOCS_CO }}
+
+  deploy:
+    uses: elastic/workflows/.github/workflows/co-docs-b-deploy.yml@v1
+    needs: [preview]
+    with:
+      prebuild: content-test
+      repo: docs.elastic.co
+    secrets:
+      VERCEL_GITHUB_TOKEN: ${{ secrets.VERCEL_GITHUB_TOKEN }}
 ```
