@@ -50,6 +50,18 @@ jobs:
           token: ${{ secrets.VERCEL_GITHUB_TOKEN }}
           path: ${{ github.workspace }}/${{ inputs.prebuild }}
 
+      - name: Show current workspace
+        shell: bash
+        run: ls -lat 
+
+      - name: Show child workspace
+        shell: bash
+        run: ls -lat ${{ github.workspace }}
+
+      - name: Show parent workspace
+        shell: bash
+        run: ls -lat ..
+
       - name: Cache job
         uses: actions/cache@v3
         with:
