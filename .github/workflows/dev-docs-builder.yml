@@ -51,7 +51,8 @@ jobs:
       - name: Checkout essential repos
         uses: actions/checkout@v2
         with:
-          repository: elastic/docs.elastic.dev@temp-rollback
+          repository: elastic/docs.elastic.dev
+          ref: 'temp-rollback'
           token: ${{ secrets.VERCEL_GITHUB_TOKEN }}
           path: ${{ github.workspace }}/docs.elastic.dev
 
