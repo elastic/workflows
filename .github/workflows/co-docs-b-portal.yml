@@ -19,7 +19,7 @@ jobs:
       - name: Cache job
         uses: actions/cache@v3
         with:
-          path: .
+          path: *
           key: ${{ github.event.pull_request.number }}-docs
 
       - name: Show workspace

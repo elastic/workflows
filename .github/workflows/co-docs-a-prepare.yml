@@ -53,5 +53,5 @@ jobs:
       - name: Cache job
         uses: actions/cache@v3
         with:
-          path: ${{ github.workspace }}
+          path: *
           key: ${{ github.event.pull_request.number }}-docs
