@@ -16,11 +16,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
 
-      - name: Cache job
-        uses: actions/cache@v3
+      - uses: actions/download-artifact@v2
         with:
-          path: /home/runner/work/${{ inputs.repo }}/${{ inputs.repo }}
-          key: ${{ github.event.pull_request.number }}-docs
+          name: doc-bundle
 
       - name: Show child workspace
         shell: bash

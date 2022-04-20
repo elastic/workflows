@@ -62,8 +62,7 @@ jobs:
         shell: bash
         run: ls -lat ..
 
-      - name: Cache job
-        uses: actions/cache@v3
+      - uses: actions/upload-artifact@v2
         with:
-          path: /home/runner/work/${{ inputs.repo }}/${{ inputs.repo }}
-          key: ${{ github.event.pull_request.number }}-docs
+          name: doc-bundle
+          path: .
