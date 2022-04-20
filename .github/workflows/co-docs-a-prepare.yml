@@ -65,5 +65,5 @@ jobs:
       - name: Cache job
         uses: actions/cache@v3
         with:
-          path: ~
-          key: ${{ github.event.pull_request.number }}-docs-${GITHUB_SHA}
+          path: /home/runner/work/${{ inputs.repo }}/${{ inputs.repo }}
+          key: ${{ github.event.pull_request.number }}-docs
