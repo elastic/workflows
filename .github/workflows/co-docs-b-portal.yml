@@ -19,8 +19,8 @@ jobs:
       - name: Cache job
         uses: actions/cache@v3
         with:
-          path: .
-          key: ${{ github.event.pull_request.number }}-docs
+          path: **
+          key: ${{ github.event.pull_request.number }}-docs-${GITHUB_SHA}
 
       - name: Show child workspace
         shell: bash
