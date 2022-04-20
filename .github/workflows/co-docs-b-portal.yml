@@ -6,8 +6,12 @@ on:
       prebuild: 
         type: string
         required: true
+      repo: 
+        type: string
+        required: true
     secrets:
-      token:
+      VERCEL_GITHUB_TOKEN:
+        description: 'A GitHub PAT with repo scope'
         required: true
 
 jobs:
@@ -16,9 +20,40 @@ jobs:
     runs-on: ubuntu-latest
     steps:
 
-      - uses: actions/download-artifact@v2
+      - name: Setup workspace
+        uses: actions/checkout@v3.0.1
+
+      - name: Checkout current branch into temp
+        if: github.event.pull_request.merged == false
+        uses: actions/checkout@v3.0.1
         with:
-          name: doc-bundle
+          path: 'tmp'
+          fetch-depth: 2
+          ref: refs/pull/${{ github.event.pull_request.number }}/merge
+
+      - name: Checkout current branch into temp
+        if: github.event.pull_request.merged == true
+        uses: actions/checkout@v3.0.1
+        with:
+          path: 'tmp'
+
+      - name: Checkout essential repos
+        uses: actions/checkout@v3.0.1
+        with:
+          repository: elastic/${{ inputs.repo }}
+          token: ${{ secrets.VERCEL_GITHUB_TOKEN }}
+          path: ${{ github.workspace }}/${{ inputs.repo }}
+
+      - name: Checkout Wordlake
+        uses: actions/checkout@v3.0.1
+        with:
+          repository: elastic/${{ inputs.prebuild }}
+          token: ${{ secrets.VERCEL_GITHUB_TOKEN }}
+          path: ${{ github.workspace }}/${{ inputs.prebuild }}
+
+      - name: Show current workspace
+        shell: bash
+        run: ls -lat 
 
       - name: Show child workspace
         shell: bash

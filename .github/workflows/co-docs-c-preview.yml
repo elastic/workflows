@@ -3,7 +3,13 @@ name: Reusable workflow example
 on:
   workflow_call:
     inputs:
+      prebuild: 
+        type: string
+        required: true
       project-name: 
+        type: string
+        required: true
+      repo: 
         type: string
         required: true
     secrets:
@@ -26,11 +32,68 @@ jobs:
     runs-on: ubuntu-latest
     steps:
 
-      - name: Cache job
-        uses: actions/cache@v3
+      - name: Setup workspace
+        uses: actions/checkout@v3.0.1
+
+      - name: Checkout current branch into temp
+        if: github.event.pull_request.merged == false
+        uses: actions/checkout@v3.0.1
         with:
-          path: /home/runner/work/${{ inputs.repo }}/${{ inputs.repo }}
-          key: ${{ github.event.pull_request.number }}-docs
+          path: 'tmp'
+          fetch-depth: 2
+          ref: refs/pull/${{ github.event.pull_request.number }}/merge
+
+      - name: Checkout current branch into temp
+        if: github.event.pull_request.merged == true
+        uses: actions/checkout@v3.0.1
+        with:
+          path: 'tmp'
+
+      - name: Checkout essential repos
+        uses: actions/checkout@v3.0.1
+        with:
+          repository: elastic/${{ inputs.repo }}
+          token: ${{ secrets.VERCEL_GITHUB_TOKEN }}
+          path: ${{ github.workspace }}/${{ inputs.repo }}
+
+      - name: Checkout Wordlake
+        uses: actions/checkout@v3.0.1
+        with:
+          repository: elastic/${{ inputs.prebuild }}
+          token: ${{ secrets.VERCEL_GITHUB_TOKEN }}
+          path: ${{ github.workspace }}/${{ inputs.prebuild }}
+
+      - name: Show current workspace
+        shell: bash
+        run: ls -lat 
+
+      - name: Show child workspace
+        shell: bash
+        run: ls -lat ${{ github.workspace }}
+
+      - name: Show parent workspace
+        shell: bash
+        run: ls -lat ..
+
+      - name: Portal
+        shell: bash
+        run: |
+          mkdir -p ${{ github.workspace }}/${{ inputs.prebuild }}/${{ github.event.repository.name }}
+          rm -rf ${{ github.workspace }}/${{ inputs.prebuild }}/${{ github.event.repository.name }}/*
+          rsync --ignore-missing-args -zavpm \
+          --exclude='cats.mdx' \
+          --include='*.docnav.json' \
+          --include='*.apidocs.json' \
+          --include='*.mdx' \
+          --include='*.png' \
+          --include='*.gif' \
+          --include='*.jpg' \
+          --include='*.jpeg' \
+          --include='*.devdocs.json' \
+          --include='*/' \
+          --exclude='*' \
+          ${{ github.workspace }}/tmp/ \
+          ${{ github.workspace }}/${{ inputs.prebuild }}/${{ github.event.repository.name }}/
 
       - name: Generate preview
         if: github.event.pull_request.merged == false
