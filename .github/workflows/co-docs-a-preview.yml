@@ -97,4 +97,16 @@ jobs:
           vercel-project-id: ${{ secrets.VERCEL_PROJECT_ID_DOCS_CO }} #Required
           vercel-project-name: ${{ inputs.project-name }}
           working-directory: ./
-          github-comment: false # Otherwise need github-token (VERCEL_GITHUB_TOKEN)
+          github-token: ${{ secrets.VERCEL_GITHUB_TOKEN }} #Optional 
+          github-comment: true # Otherwise need github-token (VERCEL_GITHUB_TOKEN)
+
+      - name: Deploy
+        shell: bash
+        run: |
+          cd ${{ github.workspace }}/${{ inputs.prebuild }}
+          git config user.name count-docula
+          git config user.email github-actions@github.com
+          git pull
+          git add .
+          git commit -m "New content from https://github.com/${GITHUB_REPOSITORY}/commit/${GITHUB_SHA}"
+          git push
