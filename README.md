@@ -33,8 +33,10 @@ jobs:
 ```
 
 
+## Public docs builder
+
 ```yml
-name: Preview & publish Elastic docs
+name: Elastic docs
 
 on:
   pull_request_target:
@@ -51,24 +53,18 @@ on:
     types: [closed, opened, synchronize, reopened]
 
 jobs:
-  preview:
-    uses: elastic/workflows/.github/workflows/co-docs-a-preview.yml@v1
+  publish:
+    uses: elastic/workflows/.github/workflows/docs-elastic-co-publish.yml@main
     with:
-      project-name: docs-elastic-dev
-      prebuild: content-test
+      # Refers to Vercel project
+      project-name: docs-elastic-co
+      # Which prebuild step (dev or public)
+      prebuild: wordlake
+      # Docsmobile project dir
       repo: docs.elastic.co
     secrets:
       VERCEL_GITHUB_TOKEN: ${{ secrets.VERCEL_GITHUB_TOKEN }}
       VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
       VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
       VERCEL_PROJECT_ID_DOCS_CO: ${{ secrets.VERCEL_PROJECT_ID_DOCS_CO }}
-
-  deploy:
-    uses: elastic/workflows/.github/workflows/co-docs-b-deploy.yml@v1
-    needs: [preview]
-    with:
-      prebuild: content-test
-      repo: docs.elastic.co
-    secrets:
-      VERCEL_GITHUB_TOKEN: ${{ secrets.VERCEL_GITHUB_TOKEN }}
 ```
