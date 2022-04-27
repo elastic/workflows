@@ -109,19 +109,19 @@ jobs:
           github-comment: true # Otherwise need github-token (VERCEL_GITHUB_TOKEN)
           
       - name: Vercel CLI
-        if: ${{ steps.vercel-deploy.outcome }} == failure
+        if: steps.vercel-deploy.outcome != 'success'
         shell: bash
         run: | 
             npm install vercel@24.1.0
 
       - name: Output logs
-        if: ${{ steps.vercel-deploy.outcome }} == failure
+        if: steps.vercel-deploy.outcome != 'success'
         id: vercel-log
         run: |
             echo "::set-output name=get-log::$( vercel logs ${{ steps.deploy-vercel-staging.outputs.preview-url }} --output raw )\n"
 
       - name: Find Comment
-        if: ${{ steps.vercel-deploy.outcome }} == failure
+        if: if: steps.vercel-deploy.outcome != 'success'
         uses: peter-evans/find-comment@v2
         id: fc
         with:
@@ -130,7 +130,7 @@ jobs:
           body-includes: 'Visit #next-docs in Slack'
 
       - name: Update comment
-        if: steps.fc.outputs.comment-id != '' && ${{ steps.vercel-deploy.outcome }} == failure
+        if: steps.fc.outputs.comment-id != '' && steps.vercel-deploy.outcome != 'success'
         uses: peter-evans/create-or-update-comment@v2
         with:
           comment-id: ${{ steps.fc.outputs.comment-id }}
