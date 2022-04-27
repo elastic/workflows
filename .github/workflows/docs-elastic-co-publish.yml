@@ -126,7 +126,7 @@ jobs:
         if: always() && steps.vercel-deploy.outcome != 'success'
         id: vercel-log
         run: |
-            vercel logs docs-elastic-eqcwhnyaz-elastic-dev.vercel.app --output raw --token ${{ secrets.VERCEL_TOKEN }} | tee log.txt
+            vercel logs docs-elastic-eqcwhnyaz-elastic-dev.vercel.app --output raw --token ${{ secrets.VERCEL_TOKEN }} 2>&1 | tee log.txt
             echo "::set-output name=get-log::$(cat log.txt)"
 
       - name: Find Comment
