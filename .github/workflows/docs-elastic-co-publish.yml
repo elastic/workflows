@@ -152,7 +152,9 @@ jobs:
             <details>
               <summary>Expand for recent log > </summary>
               ```bash
+
               ${{ steps.vercel-log.outputs.get-log }}
+              
               ```
             </details>
 
@@ -166,7 +168,9 @@ jobs:
               <details>
                 <summary>Expand for recent log</summary>
               ```bash
+
               ${{ steps.vercel-log.outputs.get-log }}
+              
               ```
               </details>
 
