@@ -99,6 +99,7 @@ jobs:
         if: github.event.pull_request.merged == false
         id: vercel-deploy
         uses: elastic/builder@v21.3.0
+        continue-on-error: true
         with:
           vercel-token: ${{ secrets.VERCEL_TOKEN }} # Required
           vercel-org-id: ${{ secrets.VERCEL_ORG_ID }}  #Required
