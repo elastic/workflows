@@ -151,7 +151,9 @@ jobs:
             ---
             <details>
               <summary>Expand for recent log > </summary>
+              ```
               ${{ steps.vercel-log.outputs.get-log }}
+              ```
             </details>
 
       - name: Create comment
