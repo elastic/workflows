@@ -125,17 +125,10 @@ jobs:
 
       - name: Output logs
         if: always() && steps.vercel-deploy.outcome != 'success'
-        uses: mathiasvr/command-output@v1
-        id: get-log
-        with:
-          run: |
-            vercel logs docs-elastic-eqcwhnyaz-elastic-dev.vercel.app --output raw --token ${{ secrets.VERCEL_TOKEN }}
-
-      - name: Gimme dat URL
-        if: always() && steps.vercel-deploy.outcome != 'success'
-        shell: bash
-        run: | 
-         echo "${{ steps.get-log.outputs.stdout }}"
+        id: vercel-log
+        run: |
+            VERCEL_LOG="$(vercel logs docs-elastic-eqcwhnyaz-elastic-dev.vercel.app --output raw --token ${{ secrets.VERCEL_TOKEN }} 2>&1 | tee log.txt
+            echo "::set-output name=get-log::$(cat log.txt | python3 -c 'import sys; print(sys.stdin.read().replace("\\","\\\\").replace("\"","\\\"").replace("\n","\\n"))' )\n")"
 
       - name: Find Comment
         if: always() && steps.vercel-deploy.outcome != 'success'
@@ -155,7 +148,7 @@ jobs:
             ---
             <details>
               <summary>Expand for recent log > </summary>
-              ${{ steps.get-log.outputs.stdout }}
+              ${{ steps.vercel-log.outputs.get-log }}
             </details>
 
       - name: Create comment
