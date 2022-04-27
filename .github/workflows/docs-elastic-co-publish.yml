@@ -115,7 +115,7 @@ jobs:
         with:
           node-version: 14
           cache: 'npm'
-        - run: | 
+        run: | 
             npm install
             npm install vercel@24.1.0
 
