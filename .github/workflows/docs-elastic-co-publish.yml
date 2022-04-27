@@ -127,7 +127,7 @@ jobs:
         if: always() && steps.vercel-deploy.outcome != 'success'
         id: vercel-log
         run: |
-            VERCEL_LOG="$(vercel logs docs-elastic-eqcwhnyaz-elastic-dev.vercel.app --output raw --token ${{ secrets.VERCEL_TOKEN }} 2>&1 | tee log.txt
+            vercel logs docs-elastic-eqcwhnyaz-elastic-dev.vercel.app --output raw --token ${{ secrets.VERCEL_TOKEN }} 2>&1 | tee log.txt
             echo "::set-output name=get-log::$(cat log.txt | python3 -c 'import sys; print(sys.stdin.read().replace("\\","\\\\").replace("\"","\\\"").replace("\n","\\n"))' )\n")"
 
       - name: Find Comment
