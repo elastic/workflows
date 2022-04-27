@@ -125,10 +125,11 @@ jobs:
 
       - name: Output logs
         if: always() && steps.vercel-deploy.outcome != 'success'
-        id: vercel-log
-        run: |
-            vercel logs docs-elastic-eqcwhnyaz-elastic-dev.vercel.app --output raw --token ${{ secrets.VERCEL_TOKEN }} 2>&1 | tee log.txt
-            echo "::set-output name=get-log::$(cat log.txt)"
+        uses: mathiasvr/command-output@v1
+        id: get-log
+        with:
+          run: |
+            vercel logs docs-elastic-eqcwhnyaz-elastic-dev.vercel.app --output raw --token ${{ secrets.VERCEL_TOKEN }}
 
       - name: Find Comment
         if: always() && steps.vercel-deploy.outcome != 'success'
@@ -148,7 +149,7 @@ jobs:
             ---
             <details>
               <summary>Expand for recent log > </summary>
-              ${{ steps.vercel-log.outputs.get-log }}
+              ${{ steps.get-log.outputs.stdout }}
             </details>
 
       - name: Create comment
