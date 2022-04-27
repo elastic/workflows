@@ -98,7 +98,7 @@ jobs:
       - name: Generate preview
         if: github.event.pull_request.merged == false
         id: vercel-deploy
-        uses: elastic/builder@v21.3.0
+        uses: elastic/builder@v21.4.0
         continue-on-error: true
         with:
           vercel-token: ${{ secrets.VERCEL_TOKEN }} # Required
@@ -114,10 +114,6 @@ jobs:
         shell: bash
         run: | 
             npm install vercel@24.1.0
-
-      - name: preview-url
-        run: |
-          echo ${{ steps.vercel-deploy.outputs.preview-url }}
 
       - name: Output logs
         if: always() && steps.vercel-deploy.outcome != 'success'
