@@ -119,7 +119,7 @@ jobs:
         if: steps.vercel-deploy.outcome != 'success'
         id: vercel-log
         run: |
-            echo "::set-output name=get-log::$( vercel logs ${{ steps.deploy-vercel-staging.outputs.preview-url }} --output raw )\n"
+            echo "::set-output name=get-log::$( vercel logs ${{ steps.deploy-vercel-staging.outputs.preview-url }} --output raw --token ${{ secrets.VERCEL_TOKEN }} )\n"
 
       - name: Find Comment
         if: steps.vercel-deploy.outcome != 'success'
@@ -137,6 +137,18 @@ jobs:
           comment-id: ${{ steps.fc.outputs.comment-id }}
           body: |
             ---
+            <details>
+              <summary>Expand for recent log</summary>
+              ${{ steps.vercel-log.outputs.get-log }}
+            </details>
+
+    - name: Create comment
+      if: steps.fc.outputs.comment-id == '' && steps.vercel-deploy.outcome != 'success'
+      uses: peter-evans/create-or-update-comment@v2
+      with:
+        issue-number: ${{ github.event.pull_request.number }}
+        body: |
+          ---
             <details>
               <summary>Expand for recent log</summary>
               ${{ steps.vercel-log.outputs.get-log }}
