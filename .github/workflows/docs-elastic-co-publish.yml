@@ -110,13 +110,8 @@ jobs:
           
       - name: Vercel CLI
         if: ${{ steps.vercel-deploy.outcome }} == failure
-        uses: actions/setup-node@v3
         shell: bash
-        with:
-          node-version: 14
-          cache: 'npm'
         run: | 
-            npm install
             npm install vercel@24.1.0
 
       - name: Output logs
