@@ -115,6 +115,10 @@ jobs:
         run: | 
             npm install vercel@24.1.0
 
+      - name: preview-url
+        run: |
+          echo ${{ steps.vercel-deploy.outputs.preview-url }}
+
       - name: Output logs
         if: always() && steps.vercel-deploy.outcome != 'success'
         id: vercel-log
