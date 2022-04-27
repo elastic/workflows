@@ -119,7 +119,7 @@ jobs:
         if: always() && steps.vercel-deploy.outcome != 'success'
         id: vercel-log
         run: |
-            echo "::set-output name=get-log::$(vercel logs ${{ steps.vercel-deploy.outputs.preview-url }} --token ${{ secrets.VERCEL_TOKEN }} )"
+            echo "::set-output name=get-log::vercel logs ${{ steps.vercel-deploy.outputs.preview-url }} --token ${{ secrets.VERCEL_TOKEN }}"
 
       - name: Find Comment
         if: always() && steps.vercel-deploy.outcome != 'success'
