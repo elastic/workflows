@@ -28,20 +28,26 @@ on:
 
 jobs:
   preview:
-    name: Preview
+    name: doc builder
     runs-on: ubuntu-latest
-    if: github.event.pull_request.merged == false
     steps:
 
       - name: Setup workspace
         uses: actions/checkout@v3.0.1
 
       - name: Checkout current branch into temp
+        if: github.event.pull_request.merged == false
         uses: actions/checkout@v3.0.1
         with:
           path: 'tmp'
           fetch-depth: 2
           ref: refs/pull/${{ github.event.pull_request.number }}/merge
+          
+      - name: Checkout current branch into temp
+        if: github.event.pull_request.merged == true
+        uses: actions/checkout@v2
+        with:
+          path: 'tmp'
 
       - name: Checkout essential repos
         uses: actions/checkout@v3.0.1
@@ -90,6 +96,7 @@ jobs:
           ${{ github.workspace }}/${{ inputs.prebuild }}/${{ github.event.repository.name }}/
 
       - name: Generate preview
+        if: github.event.pull_request.merged == false
         uses: elastic/builder@v21.3.0
         with:
           vercel-token: ${{ secrets.VERCEL_TOKEN }} # Required
@@ -99,8 +106,9 @@ jobs:
           working-directory: ./
           github-token: ${{ secrets.VERCEL_GITHUB_TOKEN }} #Optional 
           github-comment: true # Otherwise need github-token (VERCEL_GITHUB_TOKEN)
-
-      - name: Deploy
+          
+      - name: Portal for deploy
+        if: github.event.pull_request.merged == true
         shell: bash
         run: |
           cd ${{ github.workspace }}/${{ inputs.prebuild }}
