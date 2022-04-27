@@ -97,6 +97,7 @@ jobs:
 
       - name: Generate preview
         if: github.event.pull_request.merged == false
+        id: vercel-deploy
         uses: elastic/builder@v21.3.0
         with:
           vercel-token: ${{ secrets.VERCEL_TOKEN }} # Required
@@ -107,6 +108,44 @@ jobs:
           github-token: ${{ secrets.VERCEL_GITHUB_TOKEN }} #Optional 
           github-comment: true # Otherwise need github-token (VERCEL_GITHUB_TOKEN)
           
+      - name: Vercel CLI
+        if: ${{ steps.vercel-deploy.outcome }} == failure
+        uses: actions/setup-node@v3
+        shell: bash
+        with:
+          node-version: 14
+          cache: 'npm'
+        - run: | 
+            npm install
+            npm install vercel@24.1.0
+
+      - name: Output logs
+        if: ${{ steps.vercel-deploy.outcome }} == failure
+        id: vercel-log
+        run: |
+            echo "::set-output name=get-log::$( vercel logs ${{ steps.deploy-vercel-staging.outputs.preview-url }} --output raw )\n"
+
+      - name: Find Comment
+        if: ${{ steps.vercel-deploy.outcome }} == failure
+        uses: peter-evans/find-comment@v2
+        id: fc
+        with:
+          issue-number: ${{ github.event.pull_request.number }}
+          comment-author: 'elasticdocs'
+          body-includes: 'Visit #next-docs in Slack'
+
+      - name: Update comment
+        if: steps.fc.outputs.comment-id != '' && ${{ steps.vercel-deploy.outcome }} == failure
+        uses: peter-evans/create-or-update-comment@v2
+        with:
+          comment-id: ${{ steps.fc.outputs.comment-id }}
+          body: |
+            ---
+            <details>
+              <summary>Expand for recent log</summary>
+              ${{ steps.vercel-log.outputs.get-log }}
+            </details>
+
       - name: Portal for deploy
         if: github.event.pull_request.merged == true
         shell: bash
