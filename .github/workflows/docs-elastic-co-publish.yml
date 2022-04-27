@@ -115,11 +115,18 @@ jobs:
         run: | 
             npm install vercel@24.1.0
 
+      - name: Gimme dat URL
+        if: always() && steps.vercel-deploy.outcome != 'success'
+        shell: bash
+        run: | 
+            echo ${{ steps.vercel-deploy.outputs.preview-url }}
+            echo steps.vercel-deploy.outputs.preview-url
+
       - name: Output logs
         if: always() && steps.vercel-deploy.outcome != 'success'
         id: vercel-log
         run: |
-            vercel logs ${{ steps.vercel-deploy.outputs.preview-url }} --output raw --token ${{ secrets.VERCEL_TOKEN }} | tee log.txt
+            vercel logs docs-elastic-eqcwhnyaz-elastic-dev.vercel.app --output raw --token ${{ secrets.VERCEL_TOKEN }} | tee log.txt
             echo "::set-output name=get-log::$(cat log.txt)"
 
       - name: Find Comment
