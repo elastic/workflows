@@ -12,6 +12,13 @@ on:
       repo: 
         type: string
         required: true
+    outputs:
+      vercel-url:
+        description: "The Vercel deploys preview URL"
+        value: ${{ steps.vercel-deploy.outputs.preview-url }}
+      get-log:
+        description: "The Vercel deployments log"
+        value: ${{ steps.vercel-log.outputs.get-log }}
     secrets:
       VERCEL_GITHUB_TOKEN:
         description: 'A GitHub PAT with repo scope'
@@ -25,6 +32,17 @@ on:
       VERCEL_PROJECT_ID_DOCS_CO:
         description: 'Vercel PROJECT token, project level'
         required: true
+
+outputs:
+  random-number:
+    description: "Random number"
+    value: ${{ steps.random-number-generator.outputs.random-id }}
+runs:
+  using: "composite"
+  steps:
+    - id: random-number-generator
+      run: echo "::set-output name=random-id::$(echo $RANDOM)"
+      shell: bash
 
 jobs:
   preview:
