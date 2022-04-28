@@ -179,10 +179,12 @@ jobs:
             ---
 
               <details>
-                <summary>_Click to expand most recent error log_ >> </summary>
+                <summary>Click to expand most recent error log >> </summary>
 
               ```bash
+
               ${{ steps.vercel-log.outputs.get-log }}
+              
               ```
               
               </details>
