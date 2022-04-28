@@ -113,14 +113,14 @@ jobs:
           github-token: ${{ secrets.VERCEL_GITHUB_TOKEN }} #Optional 
           github-comment: true # Otherwise need github-token (VERCEL_GITHUB_TOKEN)
           
-      - name: Gimme dat URL
+      - name: Get Vercel deploy URL
         if: always() && steps.vercel-deploy.outcome != 'success'
         shell: bash
         id: vercel-url
         run: | 
            echo "::set-output name=get-url::$(vercel list --token ${{ secrets.VERCEL_TOKEN }} --scope ${{ secrets.VERCEL_ORG_ID }} | grep ERROR | sed -n 1p | sed -e 's/.*${{ inputs.project-name }}\(.*\)ERROR.*/\1/' | awk '{$1=$1};1')"
 
-      - name: Output logs
+      - name: Process Vercel log
         if: always() && steps.vercel-deploy.outcome != 'success'
         id: vercel-log
         run: |
@@ -130,7 +130,7 @@ jobs:
             VERCEL_LOG="${VERCEL_LOG//$'\r'/'%0D'}"
             echo "::set-output name=get-log::$VERCEL_LOG"
 
-      - name: Find Comment
+      - name: Find existing bot comment
         if: always() && steps.vercel-deploy.outcome != 'success'
         uses: peter-evans/find-comment@v2
         id: fc
@@ -139,7 +139,7 @@ jobs:
           comment-author: 'elasticdocs'
           body-includes: 'Visit #next-docs in Slack'
 
-      - name: Update comment
+      - name: Update existing bot comment
         if: always() && steps.fc.outputs.comment-id != '' && steps.vercel-deploy.outcome != 'success'
         uses: peter-evans/create-or-update-comment@v2
         with:
@@ -155,15 +155,23 @@ jobs:
               
               </details>
 
-      - name: Create comment
+      - name: Create new bot comment
         if: always() && steps.fc.outputs.comment-id == '' && steps.vercel-deploy.outcome != 'success'
         uses: peter-evans/create-or-update-comment@v2
         with:
           issue-number: ${{ github.event.pull_request.number }}
           body: |
+            :exploding-head: _Error!_
+
+            The docs build failed.
+
+            Check below to see the log and troubleshoot.
+
+            Stuck? Visit #next-docs in Slack.
+
             ---
               <details>
-                <summary>Expand for recent log</summary>
+                <summary>Click to expand most recent error log >> </summary>
 
               ```bash
               ${{ steps.vercel-log.outputs.get-log }}
