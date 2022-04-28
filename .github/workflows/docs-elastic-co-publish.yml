@@ -161,7 +161,7 @@ jobs:
         with:
           issue-number: ${{ github.event.pull_request.number }}
           body: |
-            :exploding-head: _Error!_
+            :exploding_head: _Error!_
 
             The docs build failed.
 
@@ -170,8 +170,9 @@ jobs:
             Stuck? Visit #next-docs in Slack.
 
             ---
+
               <details>
-                <summary>Click to expand most recent error log >> </summary>
+                <summary>_Click to expand most recent error log_ >> </summary>
 
               ```bash
               ${{ steps.vercel-log.outputs.get-log }}
