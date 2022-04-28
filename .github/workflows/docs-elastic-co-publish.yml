@@ -13,10 +13,10 @@ on:
         type: string
         required: true
     outputs:
-      vercel-url:
+      vercel-preview-url:
         description: "The Vercel deploys preview URL"
         value: ${{ steps.vercel-deploy.outputs.preview-url }}
-      get-log:
+      get-vercel-log:
         description: "The Vercel deployments log"
         value: ${{ steps.vercel-log.outputs.get-log }}
     secrets:
