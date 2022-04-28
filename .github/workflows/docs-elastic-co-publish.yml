@@ -95,6 +95,13 @@ jobs:
           ${{ github.workspace }}/tmp/ \
           ${{ github.workspace }}/${{ inputs.prebuild }}/${{ github.event.repository.name }}/
 
+      - name: Trim short commit SHA
+        id: vars
+        run: echo "::set-output name=sha_short::$(git rev-parse --short HEAD)"
+      
+      - name: check short commit SHA
+        run: echo ${{ steps.vars.outputs.sha_short }}
+
       - name: Generate preview
         if: github.event.pull_request.merged == false
         id: vercel-deploy
@@ -108,6 +115,8 @@ jobs:
           working-directory: ./
           github-token: ${{ secrets.VERCEL_GITHUB_TOKEN }} #Optional 
           github-comment: true # Otherwise need github-token (VERCEL_GITHUB_TOKEN)
+          aliases: |
+            ${{ steps.vars.outputs.sha_short }}-docs-elastic-dev-staging.vercel.app
           
       - name: Vercel CLI
         if: always() && steps.vercel-deploy.outcome != 'success'
@@ -119,13 +128,13 @@ jobs:
         if: always() && steps.vercel-deploy.outcome != 'success'
         shell: bash
         run: | 
-            echo "${GITHUB_SHA}"
+           echo ${{ steps.vars.outputs.sha_short }}-docs-elastic-dev-staging.vercel.app
 
       - name: Output logs
         if: always() && steps.vercel-deploy.outcome != 'success'
         id: vercel-log
         run: |
-            VERCEL_LOG=$(vercel logs docs-elastic-eqcwhnyaz-elastic-dev.vercel.app --output raw --token ${{ secrets.VERCEL_TOKEN }})
+            VERCEL_LOG=$(vercel logs ${{ steps.vars.outputs.sha_short }}-docs-elastic-dev-staging.vercel.app --output raw --token ${{ secrets.VERCEL_TOKEN }})
             VERCEL_LOG="${VERCEL_LOG//'%'/'%25'}"
             VERCEL_LOG="${VERCEL_LOG//$'\n'/'%0A'}"
             VERCEL_LOG="${VERCEL_LOG//$'\r'/'%0D'}"
