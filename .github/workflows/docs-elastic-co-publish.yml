@@ -112,7 +112,14 @@ jobs:
           working-directory: ./
           github-token: ${{ secrets.VERCEL_GITHUB_TOKEN }} #Optional 
           github-comment: true # Otherwise need github-token (VERCEL_GITHUB_TOKEN)
-          
+
+      - name: Declare Vercel failure
+        if: steps.vercel-deploy.outcome != 'success'
+        uses: actions/github-script@v3
+        with:
+          script: |
+              core.setFailed('Deploy failed, see log')
+
       - name: Get Vercel deploy URL
         if: always() && steps.vercel-deploy.outcome != 'success'
         shell: bash
