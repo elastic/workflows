@@ -118,7 +118,7 @@ jobs:
         uses: actions/github-script@v3
         with:
           script: |
-              core.setFailed('Deploy failed, see log')
+              core.setFailed('Deploy failed, see log in PR')
 
       - name: Get Vercel deploy URL
         if: always() && steps.vercel-deploy.outcome != 'success'
@@ -143,7 +143,7 @@ jobs:
         id: fc
         with:
           issue-number: ${{ github.event.pull_request.number }}
-          comment-author: 'github-actions'
+          comment-author: 'github-actions[bot]'
           body-includes: 'Visit #next-docs in Slack'
 
       - name: Update existing bot comment
