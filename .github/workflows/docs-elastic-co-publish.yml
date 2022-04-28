@@ -81,7 +81,6 @@ jobs:
           mkdir -p ${{ github.workspace }}/${{ inputs.prebuild }}/${{ github.event.repository.name }}
           rm -rf ${{ github.workspace }}/${{ inputs.prebuild }}/${{ github.event.repository.name }}/*
           rsync --ignore-missing-args -zavpm \
-          --exclude='cats.mdx' \
           --include='*.docnav.json' \
           --include='*.apidocs.json' \
           --include='*.mdx' \
@@ -115,7 +114,7 @@ jobs:
           working-directory: ./
           github-token: ${{ secrets.VERCEL_GITHUB_TOKEN }} #Optional 
           github-comment: true # Otherwise need github-token (VERCEL_GITHUB_TOKEN)
-          aliases: |
+          alias-domains: |
             ${{ steps.vars.outputs.sha_short }}-docs-elastic-dev-staging.vercel.app
           
       - name: Vercel CLI
