@@ -12,13 +12,6 @@ on:
       repo: 
         type: string
         required: true
-    outputs:
-      vercel-preview-url:
-        description: "The Vercel deploys preview URL"
-        value: ${{ steps.vercel-deploy.outputs.preview-url }}
-      get-vercel-log:
-        description: "The Vercel deployments log"
-        value: ${{ steps.vercel-log.outputs.get-log }}
     secrets:
       VERCEL_GITHUB_TOKEN:
         description: 'A GitHub PAT with repo scope'
@@ -125,13 +118,8 @@ jobs:
       - name: Gimme dat URL
         if: always() && steps.vercel-deploy.outcome != 'success'
         shell: bash
-        env:
-          VERCEL_URL: ${{ steps.vercel-deploy.outputs.preview-url }}
         run: | 
-            echo "string: ${{ steps.vercel-deploy.outputs.preview-url }}"
-            echo "object: ${{ steps.vercel-deploy.outputs }}"
-            echo "no operators: steps.vercel-deploy.outputs.preview-url"
-            echo "env: $VERCEL_URL"
+            vercel list --meta key1=$GITHUB_SHA --token ${{ secrets.VERCEL_TOKEN }}
 
       - name: Output logs
         if: always() && steps.vercel-deploy.outcome != 'success'
