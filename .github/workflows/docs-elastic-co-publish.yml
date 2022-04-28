@@ -154,7 +154,7 @@ jobs:
           body: |
             ---
               <details>
-                <summary>Log for ${{ github.event.pull_request.head.sha }} </summary>
+                <summary>Click to see error log for ${{ github.event.pull_request.head.sha }} >> </summary>
 
               ```bash
 
@@ -181,7 +181,7 @@ jobs:
             ---
 
               <details>
-                <summary>Click to expand most recent error log >> </summary>
+                <summary>Click to see error log for ${{ github.event.pull_request.head.sha }} >> </summary>
 
               ```bash
 
