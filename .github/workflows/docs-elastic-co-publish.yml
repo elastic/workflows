@@ -116,15 +116,15 @@ jobs:
       - name: Gimme dat URL
         if: always() && steps.vercel-deploy.outcome != 'success'
         shell: bash
-        id: get-vercel-log
+        id: get-vercel-url
         run: | 
-           echo "::set-output name=vercel-log::$(vercel list --token ${{ secrets.VERCEL_TOKEN }} --scope ${{ secrets.VERCEL_ORG_ID }} | sed -n 2p | sed -e 's/.*${{ inputs.project-name }}\(.*\)ERROR.*/\1/' | awk '{$1=$1};1')"
+           echo "::set-output name=vercel-url::$(vercel list --token ${{ secrets.VERCEL_TOKEN }} --scope ${{ secrets.VERCEL_ORG_ID }} | grep ERROR | sed -n 1p | sed -e 's/.*${{ inputs.project-name }}\(.*\)ERROR.*/\1/' | awk '{$1=$1};1')"
 
       - name: Output logs
         if: always() && steps.vercel-deploy.outcome != 'success'
         id: vercel-log
         run: |
-            VERCEL_LOG=$(vercel logs ${{ steps.get-vercel-log.outputs.vercel-log }} --output raw --token ${{ secrets.VERCEL_TOKEN }})
+            VERCEL_LOG=$(vercel logs ${{ steps.get-vercel-url.outputs.vercel-url }} --output raw --token ${{ secrets.VERCEL_TOKEN }})
             VERCEL_LOG="${VERCEL_LOG//'%'/'%25'}"
             VERCEL_LOG="${VERCEL_LOG//$'\n'/'%0A'}"
             VERCEL_LOG="${VERCEL_LOG//$'\r'/'%0D'}"
