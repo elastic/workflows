@@ -118,10 +118,13 @@ jobs:
       - name: Gimme dat URL
         if: always() && steps.vercel-deploy.outcome != 'success'
         shell: bash
+        env:
+          VERCEL_URL: ${{ steps.vercel-deploy.outputs.preview-url }}
         run: | 
-            echo ${{ steps.vercel-deploy.outputs.preview }}
-            echo ${{ steps.vercel-deploy.outputs }}
-            echo steps.vercel-deploy.outputs.preview-url
+            echo "string: ${{ steps.vercel-deploy.outputs.preview-url }}"
+            echo "object: ${{ steps.vercel-deploy.outputs }}"
+            echo "no operators: steps.vercel-deploy.outputs.preview-url"
+            echo "env: $VERCEL_URL"
 
       - name: Output logs
         if: always() && steps.vercel-deploy.outcome != 'success'
