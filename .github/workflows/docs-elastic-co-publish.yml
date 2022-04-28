@@ -149,14 +149,14 @@ jobs:
           comment-id: ${{ steps.fc.outputs.comment-id }}
           body: |
             ---
-            <details>
-              <summary>Expand for recent log > </summary>
+              <details>
+                <summary>Expand for recent log</summary>
+
               ```bash
-
               ${{ steps.vercel-log.outputs.get-log }}
-
               ```
-            </details>
+              
+              </details>
 
       - name: Create comment
         if: always() && steps.fc.outputs.comment-id == '' && steps.vercel-deploy.outcome != 'success'
