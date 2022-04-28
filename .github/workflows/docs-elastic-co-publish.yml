@@ -119,7 +119,7 @@ jobs:
         if: always() && steps.vercel-deploy.outcome != 'success'
         shell: bash
         run: | 
-            vercel list --meta key1=$GITHUB_SHA --token ${{ secrets.VERCEL_TOKEN }}
+            vercel list --meta key1=${GITHUB_SHA} --token ${{ secrets.VERCEL_TOKEN }}
 
       - name: Output logs
         if: always() && steps.vercel-deploy.outcome != 'success'
