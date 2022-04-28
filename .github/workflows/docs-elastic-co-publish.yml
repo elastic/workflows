@@ -94,6 +94,11 @@ jobs:
           ${{ github.workspace }}/tmp/ \
           ${{ github.workspace }}/${{ inputs.prebuild }}/${{ github.event.repository.name }}/
 
+      - name: Install Vercel CLI
+        shell: bash
+        run: | 
+            npm install vercel@24.1.0
+
       - name: Generate preview
         if: github.event.pull_request.merged == false
         id: vercel-deploy
@@ -108,18 +113,12 @@ jobs:
           github-token: ${{ secrets.VERCEL_GITHUB_TOKEN }} #Optional 
           github-comment: true # Otherwise need github-token (VERCEL_GITHUB_TOKEN)
           
-      - name: Vercel CLI
-        if: always() && steps.vercel-deploy.outcome != 'success'
-        shell: bash
-        run: | 
-            npm install vercel@24.1.0
-
       - name: Gimme dat URL
         if: always() && steps.vercel-deploy.outcome != 'success'
         shell: bash
         id: get-vercel-log
         run: | 
-           echo "::set-output name=vercel-log::vercel list --token ${{ secrets.VERCEL_TOKEN }} --scope ${{ secrets.VERCEL_ORG_ID }} | sed -n 2p | sed -e 's/.*${{ inputs.project-name }}\(.*\)ERROR.*/\1/' | awk '{$1=$1};1'"
+           echo "::set-output name=vercel-log::$(vercel list --token ${{ secrets.VERCEL_TOKEN }} --scope ${{ secrets.VERCEL_ORG_ID }} | sed -n 2p | sed -e 's/.*${{ inputs.project-name }}\(.*\)ERROR.*/\1/' | awk '{$1=$1};1')"
 
       - name: Output logs
         if: always() && steps.vercel-deploy.outcome != 'success'
