@@ -118,7 +118,7 @@ jobs:
         if: always() && steps.vercel-deploy.outcome != 'success'
         shell: bash
         run: | 
-           vercel list --token ${{ secrets.VERCEL_TOKEN }} --scope ${{ secrets.VERCEL_ORG_ID }} | sed -n 2p | grep vercel.app
+           vercel list --token ${{ secrets.VERCEL_TOKEN }} --scope ${{ secrets.VERCEL_ORG_ID }} | sed -n 2p | grep -o -P '(?<=dev).*(?=error)'
 
       - name: Output logs
         if: always() && steps.vercel-deploy.outcome != 'success'
