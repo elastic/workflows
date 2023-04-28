@@ -97,7 +97,7 @@ jobs:
       - name: Generate preview
         if: github.event.pull_request.merged != true && github.event.pull_request.closed != true
         id: vercel-deploy
-        uses: elastic/builder@v21.5.0
+        uses: elastic/builder@v21.6.0
         continue-on-error: false
         with:
           vercel-token: ${{ secrets.VERCEL_TOKEN }} # Required
