@@ -121,8 +121,8 @@ jobs:
         shell: bash
         run: |
           cd ${{ github.workspace }}/wordlake-dev
-          git config user.name count-docula
-          git config user.email github-actions@github.com
+          git config user.name elasticdocs
+          git config user.email docs-eng+elasticdocs@elastic.co
           git pull
           git add .
           git commit -m "New content from https://github.com/${GITHUB_REPOSITORY}/commit/${GITHUB_SHA}"
