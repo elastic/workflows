@@ -59,7 +59,10 @@ jobs:
           persist-credentials: false
 
       - name: Checkout branch into temp
-        if: ${{ needs.check_file_type_changes.outputs.changed_files }} && github.event.action != 'closed' && github.event.pull_request.merged != true
+        if: |
+          needs.check_file_type_changes.outputs.changed_files &&
+          github.event.action != 'closed' &&
+          github.event.pull_request.merged != true
         uses: actions/checkout@v3
         with:
           path: 'tmp'
@@ -68,7 +71,9 @@ jobs:
           persist-credentials: false
 
       - name: Prepare content for deploy
-        if: ${{ needs.check_file_type_changes.outputs.changed_files }} && ${{ github.event.pull_request.merged }}
+        if: |
+          needs.check_file_type_changes.outputs.changed_files &&
+          github.event.pull_request.merged
         uses: actions/checkout@v3
         with:
           path: 'tmp'
@@ -121,7 +126,10 @@ jobs:
           ${{ github.workspace }}/wordlake-staging/${{ github.event.repository.name }}/
 
       - name: Tidy before Vercel CLI run
-        if: ${{ needs.check_file_type_changes.outputs.changed_files }} && github.event.pull_request.merged != true && github.event.pull_request.closed != true
+        if: |
+          needs.check_file_type_changes.outputs.changed_files &&
+          github.event.pull_request.merged != true &&
+          github.event.pull_request.closed != true
         shell: bash
         run: |
             mkdir ${{ github.workspace }}/build/ 
@@ -129,7 +137,10 @@ jobs:
             mv ${{ github.workspace }}/docs.elastic.co ${{ github.workspace }}/build/
 
       - name: Generate preview
-        if: ${{ needs.check_file_type_changes.outputs.changed_files }} && github.event.pull_request.merged != true && github.event.pull_request.closed != true
+        if: |
+          needs.check_file_type_changes.outputs.changed_files &&
+          github.event.pull_request.merged != true &&
+          github.event.pull_request.closed != true
         id: vercel-deploy
         uses: elastic/builder@v25.2.0
         continue-on-error: false
@@ -143,7 +154,10 @@ jobs:
           github-comment: true # Otherwise need github-token (VERCEL_GITHUB_TOKEN)
 
       - name: Portal for deploy
-        if: ${{ needs.check_file_type_changes.outputs.changed_files }} && github.event.pull_request.merged == true && github.event.pull_request.base.ref == github.event.pull_request.base.repo.default_branch
+        if: |
+          needs.check_file_type_changes.outputs.changed_files &&
+          github.event.pull_request.merged == true &&
+          github.event.pull_request.base.ref == github.event.pull_request.base.repo.default_branch
         shell: bash
         run: |
           cd ${{ github.workspace }}/wordlake-staging
