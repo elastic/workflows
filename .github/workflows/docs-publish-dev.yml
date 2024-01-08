@@ -1,0 +1,180 @@
+name: builder
+
+on:
+  workflow_call:
+    inputs:
+      prebuild:
+        type: string
+      project-name:
+        type: string
+      repo:
+        type: string
+    secrets:
+      VERCEL_GITHUB_TOKEN:
+        description: 'A GitHub PAT with repo scope'
+        required: true
+      VERCEL_TOKEN:
+        description: 'Vercel API token, account level'
+        required: true
+      VERCEL_ORG_ID:
+        description: 'Vercel ORG token, org level'
+        required: true
+      VERCEL_PROJECT_ID_DOCS_DEV:
+        description: 'Vercel PROJECT token, project level (deprecated)'
+      VERCEL_PROJECT_ID_DEV_PREVIEW_DOCS:
+        description: 'Vercel PROJECT token, project level'
+
+jobs:
+  check_file_type_changes:
+    name: Check file types
+    runs-on: ubuntu-latest
+    outputs:
+      changed_files: ${{ steps.changed_files.outputs.changed_files }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          # Need to iterate on this. We likely don't need the fetch-depth to be this deep.
+          fetch-depth: 0
+
+      - name: Find changed files
+        id: changed_files
+        run: |
+          echo "Finding changed files..."
+          file_extensions="mdx|gif|jpg|jpeg|png|svg|devdocs\.json|docnav\.json|docapi\.json"
+          changed_files=$(git diff --name-only ${{ github.event.before }} ${{ github.event.pull_request.base.sha }} | grep -E "\.($file_extensions)$") || true
+          echo "changed_files=$changed_files" >> $GITHUB_OUTPUT
+          echo "file_extensions=$file_extensions" >> $GITHUB_OUTPUT
+  preview:
+    name: doc builder
+    runs-on: ubuntu-latest
+    needs: check_file_type_changes
+    steps:
+
+      - name: Check changed file types
+        run: |
+          if [[ -n "${{ needs.check_file_type_changes.outputs.changed_files }}" ]]; then
+            echo "It looks like this PR updates documentation. Proceeding to build the Docsmobile preview."
+          else
+            echo "No files with documentation extensions have changed. The Docsmobile build step will be skipped."
+          fi
+
+      - name: Setup workspace
+        if: ${{ needs.check_file_type_changes.outputs.changed_files }}
+        uses: actions/checkout@v3
+        with:
+          persist-credentials: false
+
+      - name: Checkout branch into temp
+        if: |
+          needs.check_file_type_changes.outputs.changed_files &&
+          github.event.action != 'closed' &&
+          github.event.pull_request.merged != true
+        uses: actions/checkout@v3
+        with:
+          path: 'tmp'
+          fetch-depth: 2
+          ref: refs/pull/${{ github.event.number }}/head
+          persist-credentials: false
+
+      - name: Prepare content for deploy
+        if: |
+          needs.check_file_type_changes.outputs.changed_files &&
+          github.event.pull_request.merged
+        uses: actions/checkout@v3
+        with:
+          path: 'tmp'
+          persist-credentials: false
+
+      - name: Checkout dev doc docsmobile app
+        if: ${{ needs.check_file_type_changes.outputs.changed_files }}
+        uses: actions/checkout@v3
+        with:
+          repository: elastic/docs.elastic.dev
+          token: ${{ secrets.VERCEL_GITHUB_TOKEN }}
+          path: ${{ github.workspace }}/docs.elastic.dev
+          persist-credentials: false
+
+      - name: Checkout Wordlake
+        if: ${{ needs.check_file_type_changes.outputs.changed_files }}
+        uses: actions/checkout@v3
+        with:
+          repository: elastic/wordlake-dev
+          token: ${{ secrets.VERCEL_GITHUB_TOKEN }}
+          path: ${{ github.workspace }}/wordlake-dev
+
+      - name: Temp sources override
+        if: ${{ needs.check_file_type_changes.outputs.changed_files }}
+        shell: bash
+        run: cp -f ${{ github.workspace }}/wordlake-dev/.scaffold/content.js ${{ github.workspace }}/docs.elastic.dev/config/.
+
+      - name: Portal
+        if: |
+          needs.check_file_type_changes.outputs.changed_files &&
+          github.event.action != 'closed' ||
+          github.event.pull_request.merged == true
+        shell: bash
+        run: |
+          mkdir -p ${{ github.workspace }}/wordlake-dev/${{ github.event.repository.name }}
+          rm -rf ${{ github.workspace }}/wordlake-dev/${{ github.event.repository.name }}/*
+          rsync --ignore-missing-args -zavpm --no-l \
+          --exclude='cats.mdx' \
+          --exclude='infrastructure/ansible/systests/*' \
+          --include='*.docnav.json' \
+          --include='*.apidocs.json' \
+          --include='*.mdx' \
+          --include='*.png' \
+          --include='*.gif' \
+          --include='*.jpg' \
+          --include='*.svg' \
+          --include='*.jpeg' \
+          --include='*.webp' \
+          --include='*.devdocs.json' \
+          --include='*/' \
+          --exclude='*' \
+          ${{ github.workspace }}/tmp/ \
+          ${{ github.workspace }}/wordlake-dev/${{ github.event.repository.name }}/
+
+      - name: Tidy before Vercel CLI run
+        if: |
+          needs.check_file_type_changes.outputs.changed_files &&
+          github.event.pull_request.merged != true &&
+          github.event.pull_request.closed != true
+        shell: bash
+        run: |
+            mkdir ${{ github.workspace }}/build/
+            mv ${{ github.workspace }}/wordlake-dev ${{ github.workspace }}/build/
+            mv ${{ github.workspace }}/docs.elastic.dev ${{ github.workspace }}/build/
+
+      - name: Generate preview
+        if: |
+          needs.check_file_type_changes.outputs.changed_files &&
+          github.event.pull_request.merged != true &&
+          github.event.pull_request.closed != true
+        id: vercel-deploy
+        uses: elastic/builder@v25.2.0
+        continue-on-error: false
+        with:
+          vercel-token: ${{ secrets.VERCEL_TOKEN }} # Required
+          vercel-org-id: ${{ secrets.VERCEL_ORG_ID }}  #Required
+          vercel-project-id: ${{ secrets.VERCEL_PROJECT_ID_DOCS_DEV || secrets.VERCEL_PROJECT_ID_DEV_PREVIEW_DOCS }} #Fallback in place for migration
+          vercel-project-name: ${{ inputs.project-name || 'dev-preview-docs' }} #Fallback in place for migration
+          working-directory: ${{ github.workspace }}/build/
+          github-token: ${{ secrets.VERCEL_GITHUB_TOKEN }} #Optional
+          github-comment: true # Otherwise need github-token (VERCEL_GITHUB_TOKEN)
+
+      - name: Portal for deploy
+        if: |
+          needs.check_file_type_changes.outputs.changed_files &&
+          github.event.pull_request.merged == true &&
+          github.event.pull_request.base.ref == github.event.pull_request.base.repo.default_branch
+        shell: bash
+        run: |
+          cd ${{ github.workspace }}/wordlake-dev
+          git config user.name elasticdocs
+          git config user.email docs-eng+elasticdocs@elastic.co
+          git pull
+          git add .
+          git commit -m "New content from https://github.com/${GITHUB_REPOSITORY}/commit/${GITHUB_SHA}"
+          git push https://${{ secrets.VERCEL_GITHUB_TOKEN }}@github.com/elastic/wordlake-dev
