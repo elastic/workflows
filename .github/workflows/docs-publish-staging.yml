@@ -14,7 +14,7 @@ on:
         required: true
       VERCEL_PROJECT_ID_DOCS_CO:
         description: 'Vercel PROJECT token, project level'
-        required: true        
+        required: true
 
 jobs:
   check_file_type_changes:
@@ -43,7 +43,7 @@ jobs:
     runs-on: ubuntu-latest
     needs: check_file_type_changes
     steps:
-      
+
       - name: Check changed file types
         run: |
           if [[ -n "${{ needs.check_file_type_changes.outputs.changed_files }}" ]]; then
@@ -102,7 +102,10 @@ jobs:
         run: cp -f ${{ github.workspace }}/wordlake-staging/.scaffold/content.js ${{ github.workspace }}/docs.elastic.co/config/.
 
       - name: Portal
-        if: ${{ needs.check_file_type_changes.outputs.changed_files }}
+        if: |
+          needs.check_file_type_changes.outputs.changed_files &&
+          github.event.action != 'closed' ||
+          github.event.pull_request.merged == true
         shell: bash
         run: |
           mkdir -p ${{ github.workspace }}/wordlake-staging/${{ github.event.repository.name }}
@@ -132,7 +135,7 @@ jobs:
           github.event.pull_request.closed != true
         shell: bash
         run: |
-            mkdir ${{ github.workspace }}/build/ 
+            mkdir ${{ github.workspace }}/build/
             mv ${{ github.workspace }}/wordlake-staging ${{ github.workspace }}/build/
             mv ${{ github.workspace }}/docs.elastic.co ${{ github.workspace }}/build/
 
@@ -150,7 +153,7 @@ jobs:
           vercel-project-id: ${{ secrets.VERCEL_PROJECT_ID_DOCS_CO }} #Required
           vercel-project-name: co-preview-docs
           working-directory: ${{ github.workspace }}/build/
-          github-token: ${{ secrets.VERCEL_GITHUB_TOKEN }} #Optional 
+          github-token: ${{ secrets.VERCEL_GITHUB_TOKEN }} #Optional
           github-comment: true # Otherwise need github-token (VERCEL_GITHUB_TOKEN)
 
       - name: Portal for deploy
