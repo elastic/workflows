@@ -86,6 +86,7 @@ jobs:
           --include='*.png' \
           --include='*.gif' \
           --include='*.jpg' \
+          --include='*.svg' \
           --include='*.jpeg' \
           --include='*.webp' \
           --include='*.devdocs.json' \
