@@ -33,13 +33,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Setup workspace
-        uses: actions/checkout@v2
+        uses: actions/checkout@v4
         with:
           persist-credentials: false
 
       - name: Checkout current branch into temp
         if: github.event.pull_request.merged == false
-        uses: actions/checkout@v2
+        uses: actions/checkout@v4
         with:
           path: 'temp'
           fetch-depth: 2
@@ -48,13 +48,13 @@ jobs:
 
       - name: Checkout current branch into temp
         if: github.event.pull_request.merged == true
-        uses: actions/checkout@v2
+        uses: actions/checkout@v4
         with:
           path: 'temp'
           persist-credentials: false
 
       - name: Checkout essential repos
-        uses: actions/checkout@v2
+        uses: actions/checkout@v4
         with:
           repository: elastic/docs.elastic.dev
           token: ${{ secrets.VERCEL_GITHUB_TOKEN }}
@@ -62,7 +62,7 @@ jobs:
           persist-credentials: false
 
       - name: Checkout Wordlake
-        uses: actions/checkout@v2
+        uses: actions/checkout@v4
         with:
           repository: elastic/wordlake-dev
           token: ${{ secrets.VERCEL_GITHUB_TOKEN }}

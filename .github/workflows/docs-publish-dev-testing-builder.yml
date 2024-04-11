@@ -62,7 +62,7 @@ jobs:
 
       - name: Setup workspace
         if: ${{ needs.check_file_type_changes.outputs.changed_files }}
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
         with:
           persist-credentials: false
 
@@ -71,7 +71,7 @@ jobs:
           needs.check_file_type_changes.outputs.changed_files &&
           github.event.action != 'closed' &&
           github.event.pull_request.merged != true
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
         with:
           path: 'tmp'
           fetch-depth: 2
@@ -82,14 +82,14 @@ jobs:
         if: |
           needs.check_file_type_changes.outputs.changed_files &&
           github.event.pull_request.merged
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
         with:
           path: 'tmp'
           persist-credentials: false
 
       - name: Checkout dev doc docsmobile app
         if: ${{ needs.check_file_type_changes.outputs.changed_files }}
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
         with:
           repository: elastic/docs.elastic.dev
           token: ${{ secrets.VERCEL_GITHUB_TOKEN }}
@@ -98,7 +98,7 @@ jobs:
 
       - name: Checkout Wordlake
         if: ${{ needs.check_file_type_changes.outputs.changed_files }}
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
         with:
           repository: elastic/wordlake-dev
           token: ${{ secrets.VERCEL_GITHUB_TOKEN }}

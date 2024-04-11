@@ -31,13 +31,13 @@ jobs:
     steps:
 
       - name: Setup workspace
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
         with:
           persist-credentials: false
 
       - name: Checkout branch into temp
         if: github.event.action != 'closed' && github.event.pull_request.merged != true
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
         with:
           path: 'tmp'
           fetch-depth: 2
@@ -46,13 +46,13 @@ jobs:
 
       - name: Prepare content for deploy
         if: ${{ github.event.pull_request.merged }}
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
         with:
           path: 'tmp'
           persist-credentials: false
 
       - name: Checkout dev doc docsmobile app
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
         with:
           repository: elastic/docs.elastic.dev
           token: ${{ secrets.VERCEL_GITHUB_TOKEN }}
@@ -60,7 +60,7 @@ jobs:
           persist-credentials: false
 
       - name: Checkout Wordlake
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
         with:
           repository: elastic/wordlake-dev
           token: ${{ secrets.VERCEL_GITHUB_TOKEN }}
