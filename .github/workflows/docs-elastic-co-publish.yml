@@ -83,17 +83,17 @@ jobs:
           mkdir -p ${{ github.workspace }}/wordlake/${{ github.event.repository.name }}
           rm -rf ${{ github.workspace }}/wordlake/${{ github.event.repository.name }}/*
           rsync --ignore-missing-args -zavpm --no-l \
-          --include='*.docnav.json' \
-          --include='*.apidocs.json' \
-          --include='*.mdx' \
-          --include='*.png' \
-          --include='*.gif' \
-          --include='*.jpg' \
-          --include='*.svg' \
-          --include='*.jpeg' \
-          --include='*.webp' \
-          --include='*.devdocs.json' \
-          --include='*/' \
+          --include='${{ inputs.subdirectory }}/*.docnav.json' \
+          --include='${{ inputs.subdirectory }}/*.apidocs.json' \
+          --include='${{ inputs.subdirectory }}/*.mdx' \
+          --include='${{ inputs.subdirectory }}/*.png' \
+          --include='${{ inputs.subdirectory }}/*.gif' \
+          --include='${{ inputs.subdirectory }}/*.jpg' \
+          --include='${{ inputs.subdirectory }}/*.svg' \
+          --include='${{ inputs.subdirectory }}/*.jpeg' \
+          --include='${{ inputs.subdirectory }}/*.webp' \
+          --include='${{ inputs.subdirectory }}/*.devdocs.json' \
+          --include='${{ inputs.subdirectory }}/*/' \
           --exclude='*' \
           ${{ github.workspace }}/tmp/ \
           ${{ github.workspace }}/wordlake/${{ github.event.repository.name }}/
