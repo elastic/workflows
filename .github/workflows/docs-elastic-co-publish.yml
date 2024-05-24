@@ -3,15 +3,15 @@ name: builder
 on:
   workflow_call:
     inputs:
-      prebuild:
+      prebuild: 
         type: string
-      project-name:
+      project-name: 
         type: string
-      repo:
+      repo: 
         type: string
       subdirectory:
         type: string
-        default: ''
+        default: '.'
     secrets:
       VERCEL_GITHUB_TOKEN:
         description: 'A GitHub PAT with repo scope'
@@ -70,36 +70,14 @@ jobs:
 
       - name: Show current workspace
         shell: bash
-        run: ls -lat
-
+        run: ls -lat 
+       
       - name: Temp sources override
         shell: bash
-        run: cp -f ${{ github.workspace }}/wordlake/.scaffold/content.js ${{ github.workspace }}/docs.elastic.co/config/.
+        run: cp -f ${{ github.workspace }}/wordlake/.scaffold/content.js ${{ github.workspace }}/docs.elastic.co/config/. 
 
-      - name: Portal (subdirectory)
-        if: (inputs.subdirectory != '') && (github.event.action != 'closed' || github.event.pull_request.merged == true)
-        shell: bash
-        run: |
-          mkdir -p ${{ github.workspace }}/wordlake/${{ github.event.repository.name }}
-          rm -rf ${{ github.workspace }}/wordlake/${{ github.event.repository.name }}/*
-          rsync --ignore-missing-args -zavpm --no-l \
-          --include='${{ inputs.subdirectory }}' \
-          --include='${{ inputs.subdirectory }}**' \
-          --include='${{ inputs.subdirectory }}**/*.docnav.json' \
-          --include='${{ inputs.subdirectory }}**/*.mdx' \
-          --include='${{ inputs.subdirectory }}**/*.png' \
-          --include='${{ inputs.subdirectory }}**/*.gif' \
-          --include='${{ inputs.subdirectory }}**/*.jpg' \
-          --include='${{ inputs.subdirectory }}**/*.svg' \
-          --include='${{ inputs.subdirectory }}**/*.jpeg' \
-          --include='${{ inputs.subdirectory }}**/*.webp' \
-          --include='${{ inputs.subdirectory }}**/*.devdocs.json' \
-          --exclude='*' \
-          ${{ github.workspace }}/tmp/ \
-          ${{ github.workspace }}/wordlake/${{ github.event.repository.name }}/
-
-      - name: Portal (root)
-        if: (inputs.subdirectory == '') && (github.event.action != 'closed' || github.event.pull_request.merged == true)
+      - name: Portal
+        if: github.event.action != 'closed' || github.event.pull_request.merged == true
         shell: bash
         run: |
           mkdir -p ${{ github.workspace }}/wordlake/${{ github.event.repository.name }}
@@ -131,7 +109,7 @@ jobs:
           vercel-project-id: ${{ secrets.VERCEL_PROJECT_ID_DOCS_CO }} #Required
           vercel-project-name: co-preview-docs
           working-directory: ./
-          github-token: ${{ secrets.VERCEL_GITHUB_TOKEN }} #Optional
+          github-token: ${{ secrets.VERCEL_GITHUB_TOKEN }} #Optional 
           github-comment: true # Otherwise need github-token (VERCEL_GITHUB_TOKEN)
 
       - name: Portal for deploy
