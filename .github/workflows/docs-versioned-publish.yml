@@ -1,0 +1,118 @@
+name: builder
+
+on:
+  workflow_call:
+    inputs:
+      prebuild:
+        type: string
+      project-name:
+        type: string
+      repo:
+        type: string
+    secrets:
+      VERCEL_GITHUB_TOKEN:
+        description: 'A GitHub PAT with repo scope'
+        required: true
+      VERCEL_TOKEN:
+        description: 'Vercel API token, account level'
+        required: true
+      VERCEL_ORG_ID:
+        description: 'Vercel ORG token, org level'
+        required: true
+      VERCEL_PROJECT_ID:
+        description: 'Vercel PROJECT token, project level'
+        required: true
+
+jobs:
+  preview:
+    name: doc builder
+    runs-on: ubuntu-latest
+    env:
+      VERSIONS: null
+    steps:
+
+      - name: Setup workspace
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Checkout branch into temp
+        if: github.event.action != 'closed' && github.event.pull_request.merged != true
+        uses: actions/checkout@v4
+        with:
+          path: 'tmp'
+          fetch-depth: 2
+          ref: refs/pull/${{ github.event.number }}/head
+          persist-credentials: false
+
+      - name: Prepare content for deploy
+        if: ${{ github.event.pull_request.merged }}
+        uses: actions/checkout@v4
+        with:
+          path: 'tmp'
+          persist-credentials: false
+
+      - name: Checkout essential repos
+        uses: actions/checkout@v4
+        with:
+          repository: elastic/${{ inputs.repo }}
+          token: ${{ secrets.VERCEL_GITHUB_TOKEN }}
+          path: ${{ github.workspace }}/${{ inputs.repo }}
+          persist-credentials: false
+
+      - name: Checkout ${{ inputs.prebuild }}
+        uses: actions/checkout@v4
+        with:
+          repository: elastic/${{ inputs.prebuild }}
+          token: ${{ secrets.VERCEL_GITHUB_TOKEN }}
+          path: ${{ github.workspace }}/${{ inputs.prebuild }}
+
+      - name: Checkout versioning action
+        uses: actions/checkout@v4
+        with:
+          repository: elastic/workflows
+          path: workflows
+
+      - name: Insert PR changes into prebuild
+        id: prebuild
+        uses: ./workflows/.github/actions/version-content
+        with:
+          prebuild: ${{ inputs.prebuild }}
+          site-repo: ${{ inputs.repo }}
+          content-repo: ${{ github.repository }}
+          base-ref: ${{ github.base_ref }}
+          workspace: ${{ github.workspace }}
+
+      - name: Tidy before Vercel CLI run
+        if: github.event.pull_request.merged != true && github.event.pull_request.closed != true
+        shell: bash
+        run: |
+            mkdir ${{ github.workspace }}/build/
+            mv ${{ github.workspace }}/${{ inputs.prebuild }} ${{ github.workspace }}/build/
+            mv ${{ github.workspace }}/${{ inputs.repo }} ${{ github.workspace }}/build/
+
+      - name: Generate preview
+        if: github.event.pull_request.merged != true && github.event.pull_request.closed != true
+        id: vercel-deploy
+        uses: elastic/builder@v25.2.0
+        continue-on-error: false
+        with:
+          vercel-token: ${{ secrets.VERCEL_TOKEN }} # Required
+          vercel-org-id: ${{ secrets.VERCEL_ORG_ID }}  #Required
+          vercel-project-id: ${{ secrets.VERCEL_PROJECT_ID }} #Required
+          vercel-project-name: ${{ inputs.project-name }}
+          working-directory: ${{ github.workspace }}/build/
+          github-token: ${{ secrets.VERCEL_GITHUB_TOKEN }} #Optional
+          github-comment: true # Otherwise need github-token (VERCEL_GITHUB_TOKEN)
+
+      - name: Portal for deploy
+        if: github.event.pull_request.merged == true && contains(fromJson(env.VERSIONS), github.event.pull_request.base.ref)
+        shell: bash
+        run: |
+          cd ${{ github.workspace }}/${{ inputs.prebuild }}
+          git config user.name elasticdocs
+          git config user.email docs-eng+elasticdocs@elastic.co
+          git pull
+          git add .
+          git commit -m "New content from https://github.com/${GITHUB_REPOSITORY}/commit/${GITHUB_SHA}"
+          git push https://${{ secrets.VERCEL_GITHUB_TOKEN }}@github.com/elastic/${{ inputs.prebuild }}
