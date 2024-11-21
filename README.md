@@ -87,6 +87,15 @@ jobs:
 
 Change values as needed.
 
+You can optionally pass a `subdirectory` to this workflow from a content repo if you only want to grab files from a specific subdirectory in the content repo. If you do not specify a `subdirectoy`, the workflow will grab all relevant files from the entire repo.
+
+>[!IMPORTANT]
+>Always include a trailing slash when defining a `subdirectory`. For example:
+>```
+>  with:
+>    subdirectory: 'docs/en/serverless/'
+>```
+
 Install as `.github/workflows/co-docs-builder.yml` in content source.
 
 #### Private repos
