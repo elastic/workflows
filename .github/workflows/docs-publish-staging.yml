@@ -113,6 +113,7 @@ jobs:
           rsync --ignore-missing-args -zavpm --no-l \
           --exclude='cats.mdx' \
           --exclude='infrastructure/ansible/systests/*' \
+          --exclude='*.kibana.dev/*' \
           --include='*.docnav.json' \
           --include='*.apidocs.json' \
           --include='*.mdx' \
