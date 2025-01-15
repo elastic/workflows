@@ -83,7 +83,6 @@ jobs:
           mkdir -p ${{ github.workspace }}/wordlake/${{ github.event.repository.name }}
           rm -rf ${{ github.workspace }}/wordlake/${{ github.event.repository.name }}/*
           rsync --ignore-missing-args -zavpm --no-l \
-          --exclude='*.kibana.dev/*' \
           --include='*.docnav.json' \
           --include='*.apidocs.json' \
           --include='*.mdx' \
