@@ -9,6 +9,17 @@ on:
         type: string
       repo: 
         type: string
+      #
+      # Pass a `subdirectory` to this workflow from a content repo if you
+      # only want to grab files from a specific subdirectory in the
+      # content repo. If you do not specify a `subdirectoy`, the workflow
+      # will grab all relevant files from the entire repo.
+      #
+      # IMPORTANT: Always include a trailing slash when defining a
+      # subdirectory. For example:
+      #   with:
+      #     subdirectory: 'docs/en/serverless/'
+      #
       subdirectory:
         type: string
         default: '.'
