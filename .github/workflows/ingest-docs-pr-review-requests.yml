@@ -1,0 +1,14 @@
+name: Ingest Docs review reminder
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 14 * * 2,4' #07:00 PT
+jobs:
+  notify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-python@v5
+      - run: python .github/scripts/review_notify.py
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
