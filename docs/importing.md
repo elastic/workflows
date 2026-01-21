@@ -24,7 +24,7 @@ Before importing workflows, ensure you have:
 - Kibana 9.3 or later with Workflows feature enabled (Via Advanced Settings)
 - User with appropriate permissions:
 
-<img width="575" height="560" alt="image" src="https://github.com/user-attachments/assets/df43598c-e6a1-4458-8c1e-e8e659cf4bd5" />
+<img width="575" height="560" alt="image" src="https://github.com/user-attachments/assets/c4ed0461-3b39-453e-8d0b-19464e329d4b" />
 
 
   - Access to relevant data indices
