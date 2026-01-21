@@ -1,0 +1,143 @@
+# =============================================================================
+# Workflow: 🔲 Save Emulation Results
+# Category: utilities
+#
+# The workflow YAML titled "Save Emulation Results" is designed to manually
+# save emulation data into an Elasticsearch database. It includes various
+# input parameters such as emulation ID, conversation ID, status, and details
+# about the emulation plan, target hosts, and tactics. The workflow consists
+# of a single step that sends a POST request to store the provided data in
+# the specified Elasticsearch index.
+#
+# Author: Elastic
+# Created: 2025-12-04
+# =============================================================================
+name: 🔲 Save Emulation Results
+enabled: true
+
+# ---------------------------------------------------------------------------
+# TRIGGERS
+# ---------------------------------------------------------------------------
+# Defines how and when this workflow is executed. Supported trigger types:
+#   - manual: Run on-demand from the Kibana UI or API
+#   - scheduled: Run on a recurring schedule (every: "5m" or rrule)
+#   - alert: Run automatically when a security alert is triggered
+# ---------------------------------------------------------------------------
+triggers:
+  - type: manual
+
+# ---------------------------------------------------------------------------
+# TAGS
+# ---------------------------------------------------------------------------
+# Categories and labels for organizing, filtering, and discovering workflows
+# in the Kibana UI. Tags help with:
+#   - Categorizing workflows by use case (security, observability, etc.)
+#   - Filtering in the workflow library
+#   - Grouping related workflows together
+# ---------------------------------------------------------------------------
+tags: []
+inputs:
+  - name: emulation_id
+    type: string
+    default: emul-2025-11-14-001
+  - name: conversation_id
+    type: string
+    default: f4fea889-bee5-4aa1-8576-f28d90b34508
+  - name: created_at
+    type: string
+    default: "2025-11-14T20:00:00Z"
+  - name: status
+    type: string
+    default: planned
+  - name: created_by
+    type: string
+    default: elastic
+  - name: emulation_content
+    type: string
+    default: testing
+  - name: plan_text
+    type: string
+    default: |
+      ## EMULATION_PLAN-testing!
+
+      ### METADATA
+      - Hosts: 3
+      - Rules: 3
+      ...
+  - name: target_hosts
+    type: array
+    default:
+      - srv-win-defend-ab-01
+      - srv-win-defend-ab-04
+      - srv-win-defend-ab-07
+  - name: target_rules
+    type: array
+    default:
+      - rule-id-1
+      - rule-id-2
+      - rule-id-3
+  - name: tactics
+    type: array
+    default:
+      - Lateral Movement
+      - Credential Access
+      - Execution
+  - name: techniques
+    type: array
+    default:
+      - T1003
+      - T1021
+      - T1059.001
+  - name: estimated_duration
+    type: string
+    default: "15 minutes"
+  - name: phase_count
+    type: number
+    default: 3
+  - name: phases_total
+    type: number
+    default: 3
+
+# ---------------------------------------------------------------------------
+# STEPS
+# ---------------------------------------------------------------------------
+# The sequence of actions this workflow performs. Each step executes an
+# action and can reference outputs from previous steps. Key properties:
+#   - name: Unique identifier for referencing this step's output
+#   - type: The action to perform (http, elasticsearch.search, foreach, etc.)
+#   - with: Parameters passed to the action
+#   - condition: Optional expression to conditionally run the step
+#   - on-failure: Error handling configuration (retry, continue, etc.)
+# Access step outputs using {{ steps.step_name.output.field }} syntax
+# ---------------------------------------------------------------------------
+steps:
+
+  # -------------------------------------------------------------------------
+  # STEP 1: elasticsearch_request_step
+  # -------------------------------------------------------------------------
+  # Executes a search query against one or more Elasticsearch indices.
+  # Output: {{ steps.elasticsearch_request_step.output.hits }} contains
+  # matching documents.
+  # Liquid syntax used:
+  # - References workflow input parameter(s)
+  # -------------------------------------------------------------------------
+  - name: elasticsearch_request_step
+    type: elasticsearch.request
+    with:
+      method: "POST"
+      path: "smeagol-emulation-history/_doc"
+      body:
+        "emulation_id": "{{inputs.emulation_id}}"
+        "conversation_id": "{{inputs.conversation_id}}"
+        "created_at": "{{inputs.created_at}}"
+        "status": "{{inputs.status}}"
+        "created_by": "{{inputs.created_by}}"
+        "emulation_content": "{{inputs.emulation_content}}"
+        "plan_text": "{{inputs.plan_text}}"
+        "target_hosts": ${{inputs.target_hosts}}
+        "target_rules": ${{inputs.target_rules}}
+        "tactics": ${{inputs.tactics}}
+        "techniques": ${{inputs.techniques}}
+        "estimated_duration": "{{inputs.estimated_duration}}"
+        "phase_count": "{{inputs.phase_count}}"
+        "phases_total": "{{inputs.phases_total}}"

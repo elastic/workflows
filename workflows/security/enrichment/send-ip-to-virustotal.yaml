@@ -1,0 +1,91 @@
+# =============================================================================
+# Workflow: 🛜 Send IP to Virustotal
+# Category: security/enrichment
+#
+# This workflow YAML defines a manual trigger for sending an IP address to
+# the VirusTotal API for analysis. It includes an input for the IP address, a
+# constant for the API key, and a single HTTP step that performs a GET
+# request to the VirusTotal API with the specified IP address and API key.
+# The workflow is enabled and has a timeout of 30 seconds for the API
+# request.
+#
+# Author: Elastic
+# Created: 2025-11-07
+# =============================================================================
+version: '1'
+name: 🛜 Send IP to Virustotal
+enabled: true
+
+# ---------------------------------------------------------------------------
+# TRIGGERS
+# ---------------------------------------------------------------------------
+# Defines how and when this workflow is executed. Supported trigger types:
+#   - manual: Run on-demand from the Kibana UI or API
+#   - scheduled: Run on a recurring schedule (every: "5m" or rrule)
+#   - alert: Run automatically when a security alert is triggered
+# ---------------------------------------------------------------------------
+triggers:
+  - type: manual
+
+# ---------------------------------------------------------------------------
+# INPUTS
+# ---------------------------------------------------------------------------
+# Runtime parameters provided when the workflow is triggered. Each input
+# can specify:
+#   - name: Unique identifier for the input
+#   - type: Data type (string, number, boolean, array, object)
+#   - required: Whether the input must be provided (default: false)
+#   - default: Default value if not provided
+# Reference inputs in steps using {{ inputs.input_name }} syntax
+# ---------------------------------------------------------------------------
+inputs:
+  - name: vt_ip
+    default: 1.1.1.1
+    type: string
+
+# ---------------------------------------------------------------------------
+# CONSTANTS
+# ---------------------------------------------------------------------------
+# Reusable configuration values defined once and referenced throughout the
+# workflow using {{ consts.key_name }} syntax. Use constants for:
+#   - API endpoints and URLs
+#   - API keys and authentication tokens (use secrets in production)
+#   - Environment-specific configuration
+#   - Values that may need to change across environments
+# ---------------------------------------------------------------------------
+consts:
+  vtkey: secret
+
+# ---------------------------------------------------------------------------
+# STEPS
+# ---------------------------------------------------------------------------
+# The sequence of actions this workflow performs. Each step executes an
+# action and can reference outputs from previous steps. Key properties:
+#   - name: Unique identifier for referencing this step's output
+#   - type: The action to perform (http, elasticsearch.search, foreach, etc.)
+#   - with: Parameters passed to the action
+#   - condition: Optional expression to conditionally run the step
+#   - on-failure: Error handling configuration (retry, continue, etc.)
+# Access step outputs using {{ steps.step_name.output.field }} syntax
+# ---------------------------------------------------------------------------
+steps:
+
+  # -------------------------------------------------------------------------
+  # STEP 1: ip-lookup-vt
+  # -------------------------------------------------------------------------
+  # Makes an API call to VirusTotal to check for malicious indicators.
+  # Returns threat intelligence data including detection results and
+  # reputation scores.
+  # Liquid syntax used:
+  # - References workflow input parameter(s)
+  # - References workflow constant(s)
+  # -------------------------------------------------------------------------
+  - name: ip-lookup-vt
+    type: http
+    with:
+      url: https://www.virustotal.com/api/v3/ip_addresses/{{inputs.vt_ip}}
+      method: GET
+      headers:
+        Content-Type: application/json
+        x-apikey: '{{ consts.vtkey }}'
+      timeout: 30s

@@ -1,0 +1,472 @@
+# =============================================================================
+# Workflow: 📁 Traditional Triage
+# Category: security/response
+#
+# The "Traditional Triage" workflow automates the response to security
+# alerts, particularly focusing on malware detection. It initiates either
+# manually or through alerts, scanning file hashes with VirusTotal and
+# creating cases in Kibana if malicious activity is confirmed. The workflow
+# includes steps for isolating affected hosts, conducting historical
+# searches, notifying on-call analysts via Slack, and assigning cases to the
+# appropriate personnel, while also handling false positives by closing
+# alerts.
+#
+# Author: Elastic
+# Created: 2026-01-16
+# =============================================================================
+version: '1'
+name: 📁 Traditional Triage
+enabled: true
+
+# ---------------------------------------------------------------------------
+# TRIGGERS
+# ---------------------------------------------------------------------------
+# Defines how and when this workflow is executed. Supported trigger types:
+#   - manual: Run on-demand from the Kibana UI or API
+#   - scheduled: Run on a recurring schedule (every: "5m" or rrule)
+#   - alert: Run automatically when a security alert is triggered
+# ---------------------------------------------------------------------------
+triggers:
+  - type: manual
+  - type: alert
+
+# ---------------------------------------------------------------------------
+# INPUTS
+# ---------------------------------------------------------------------------
+# Runtime parameters provided when the workflow is triggered. Each input
+# can specify:
+#   - name: Unique identifier for the input
+#   - type: Data type (string, number, boolean, array, object)
+#   - required: Whether the input must be provided (default: false)
+#   - default: Default value if not provided
+# Reference inputs in steps using {{ inputs.input_name }} syntax
+# ---------------------------------------------------------------------------
+inputs:
+  - name: description
+    type: string
+    default: this is a test case
+  - name: title
+    type: string
+    default: Test Case
+  - name: tags
+    type: array
+    default:
+      - automation
+      - test
+  - name: severity
+    type: string
+
+# ---------------------------------------------------------------------------
+# CONSTANTS
+# ---------------------------------------------------------------------------
+# Reusable configuration values defined once and referenced throughout the
+# workflow using {{ consts.key_name }} syntax. Use constants for:
+#   - API endpoints and URLs
+#   - API keys and authentication tokens (use secrets in production)
+#   - Environment-specific configuration
+#   - Values that may need to change across environments
+# ---------------------------------------------------------------------------
+consts:
+  slack_token: "YOUR-SECRET-HERE"
+
+# ---------------------------------------------------------------------------
+# STEPS
+# ---------------------------------------------------------------------------
+# The sequence of actions this workflow performs. Each step executes an
+# action and can reference outputs from previous steps. Key properties:
+#   - name: Unique identifier for referencing this step's output
+#   - type: The action to perform (http, elasticsearch.search, foreach, etc.)
+#   - with: Parameters passed to the action
+#   - condition: Optional expression to conditionally run the step
+#   - on-failure: Error handling configuration (retry, continue, etc.)
+# Access step outputs using {{ steps.step_name.output.field }} syntax
+# ---------------------------------------------------------------------------
+steps:
+
+  # -------------------------------------------------------------------------
+  # STEP 1: SendHashtoVT
+  # -------------------------------------------------------------------------
+  # Executes the virustotal.scanFileHash action with the configured
+  # parameters.
+  # Liquid syntax used:
+  # - References trigger event data (e.g., alert details)
+  # -------------------------------------------------------------------------
+  - name: SendHashtoVT
+    type: virustotal.scanFileHash
+    connector-id: cfe97ee5-d881-4dc0-9a83-1ca39d9bc218
+    with:
+      hash: '{{event.alerts[0].file.hash.sha256}}'
+
+  # -------------------------------------------------------------------------
+  # STEP 2: if_step
+  # -------------------------------------------------------------------------
+  # Evaluates a condition and executes different steps based on the result.
+  # Enables dynamic workflow behavior based on runtime data.
+  # -------------------------------------------------------------------------
+  - name: if_step
+    type: if
+    condition: steps.SendHashtoVT.output.stats.malicious > 10
+    steps:
+
+      # -------------------------------------------------------------------------
+      # STEP 3: createCase
+      # -------------------------------------------------------------------------
+      # Creates a new case using the Kibana Cases API (POST /api/cases).
+      # Cases provide a workspace for investigating and tracking security
+      # incidents.
+      # Required: title, description, owner (e.g., "securitySolution"), tags,
+      # severity.
+      # Output: {{ steps.createCase.output.id }} contains the new case ID.
+      # Liquid syntax used:
+      # - References trigger event data (e.g., alert details)
+      # -------------------------------------------------------------------------
+      - name: createCase
+        type: kibana.createCaseDefaultSpace
+        with:
+          connector:
+            fields: null
+            id: none
+            name: none
+            type: .none
+          description: This case is automatically being created due to a confirmed malicious file being detected.
+          owner: securitySolution
+          settings:
+            syncAlerts: false
+          severity: high
+          tags:
+            - automation
+          title: 'Malware Detected with SHA256 Hash: {{event.alerts[0].file.hash.sha256}}'
+
+      # -------------------------------------------------------------------------
+      # STEP 4: create_alert_comment
+      # -------------------------------------------------------------------------
+      # Attaches a security alert to a case via POST
+      # /api/cases/{caseId}/comments.
+      # Links the alert to the case for consolidated investigation tracking.
+      # Required fields: alertId, index, rule (id and name), owner, type:
+      # "alert".
+      # Liquid syntax used:
+      # - References output from previous step(s)
+      # - References trigger event data (e.g., alert details)
+      # -------------------------------------------------------------------------
+      - name: create_alert_comment
+        type: kibana.request
+        with:
+          method: POST
+          path: /api/cases/{{steps.createCase.output.id}}/comments
+          body:
+            type: alert
+            alertId: '{{event.alerts[0]._id}}'
+            index: '{{event.alerts[0]._index}}'
+            rule:
+              id: '{{event.rule.id}}'
+              name: '{{event.rule.name}}'
+            owner: securitySolution
+
+      # -------------------------------------------------------------------------
+      # STEP 5: isolate_host
+      # -------------------------------------------------------------------------
+      # Isolates an endpoint from the network via Elastic Defend.
+      # Isolated hosts can only communicate with Fleet Server for management.
+      # Required: endpoint_ids array. Optional: comment, case_ids for linking.
+      # Liquid syntax used:
+      # - References output from previous step(s)
+      # - References trigger event data (e.g., alert details)
+      # -------------------------------------------------------------------------
+      - name: isolate_host
+        type: kibana.request
+        with:
+          method: POST
+          path: /api/endpoint/action/isolate
+          body:
+            endpoint_ids:
+              - '{{event.alerts[0].elastic.agent.id}}'
+            comment: Automated Isolation due to Malware Infection - Case ID {{steps.createCase.output.id}}
+            case_ids:
+              - '{{steps.createCase.output.id}}'
+            alert_ids:
+              - '{{event.alerts[0]._id}}'
+
+      # -------------------------------------------------------------------------
+      # STEP 6: Historical_search
+      # -------------------------------------------------------------------------
+      # Executes an ES|QL query against Elasticsearch.
+      # ES|QL is a piped query language for filtering, aggregating, and
+      # transforming data.
+      # This query aggregates data using STATS to compute metrics like COUNT,
+      # AVG, SUM.
+      # Filters results using WHERE clauses to match specific conditions.
+      # Output: {{ steps.Historical_search.output.values }} contains the result
+      # rows.
+      # Liquid syntax used:
+      # - References trigger event data (e.g., alert details)
+      # -------------------------------------------------------------------------
+      - name: Historical_search
+        type: elasticsearch.esql.query
+        with:
+          query: >-
+            FROM logs-* | WHERE file.hash.sha256 == "{{event.alerts[0].file.hash.sha256}}" | stats history_count =
+            count() | LIMIT 100
+          format: json
+
+      # -------------------------------------------------------------------------
+      # STEP 7: add_history_search_comment
+      # -------------------------------------------------------------------------
+      # Adds a comment to a case via POST /api/cases/{caseId}/comments.
+      # Comments document investigation findings, analyst notes, or action
+      # summaries.
+      # Liquid syntax used:
+      # - References output from previous step(s)
+      # - References trigger event data (e.g., alert details)
+      # -------------------------------------------------------------------------
+      - name: add_history_search_comment
+        type: kibana.request
+        with:
+          method: POST
+          path: /api/cases/{{steps.createCase.output.id}}/comments
+          body:
+            type: user
+            owner: securitySolution
+            comment: >
+              This hash is present {{steps.Historical_search.output.values[0][0]}} times in our logs. Run the following
+              query to get more details:
+
+                ```
+                FROM logs-* | WHERE file.hash.sha256 == "{{event.alerts[0].file.hash.sha256}}" | KEEP @timestamp,process.name,process.parent.name,host.name,user.name,file.hash.sha256 | LIMIT 1000
+
+               ```
+
+      # -------------------------------------------------------------------------
+      # STEP 8: get_on_call
+      # -------------------------------------------------------------------------
+      # Executes an ES|QL query against Elasticsearch.
+      # ES|QL is a piped query language for filtering, aggregating, and
+      # transforming data.
+      # Filters results using WHERE clauses to match specific conditions.
+      # Output: {{ steps.get_on_call.output.values }} contains the result rows.
+      # -------------------------------------------------------------------------
+      - name: get_on_call
+        type: elasticsearch.esql.query
+        with:
+          query: FROM on-call-schedule | WHERE user.name IS NOT NULL
+          format: json
+
+      # -------------------------------------------------------------------------
+      # STEP 9: create-slack-channel
+      # -------------------------------------------------------------------------
+      # Creates a new Slack channel using the Slack API.
+      # Liquid syntax used:
+      # - `date` - Formats date/time value
+      # - References workflow constant(s)
+      # -------------------------------------------------------------------------
+      - name: create-slack-channel
+        type: http
+        with:
+          url: https://slack.com/api/conversations.create
+          method: POST
+          headers:
+            Content-Type: application/json; charset=utf-8
+            Authorization: Bearer {{ consts.slack_token }}
+          body:
+            name: 'malware-incident-{{ ''now'' | date: ''%Y-%m-%d'' }}'
+            is_private: false
+          timeout: 30s
+
+      # -------------------------------------------------------------------------
+      # STEP 10: lookup_user_by_email
+      # -------------------------------------------------------------------------
+      # Looks up a Slack user by their email address.
+      # Liquid syntax used:
+      # - References output from previous step(s)
+      # - References workflow constant(s)
+      # -------------------------------------------------------------------------
+      - name: lookup_user_by_email
+        type: http
+        with:
+          url: https://slack.com/api/users.lookupByEmail?email={{ steps.get_on_call.output.values[0][0] }}
+          method: GET
+          headers:
+            Authorization: Bearer {{ consts.slack_token }}
+          timeout: 30s
+
+      # -------------------------------------------------------------------------
+      # STEP 11: invite-users-to-channel
+      # -------------------------------------------------------------------------
+      # Invites users to a Slack channel.
+      # Liquid syntax used:
+      # - References output from previous step(s)
+      # - References workflow constant(s)
+      # -------------------------------------------------------------------------
+      - name: invite-users-to-channel
+        type: http
+        with:
+          url: https://slack.com/api/conversations.invite
+          method: POST
+          headers:
+            Content-Type: application/json; charset=utf-8
+            Authorization: Bearer {{ consts.slack_token }}
+          body:
+            channel: '{{steps.create-slack-channel.output.data.channel.id}}'
+            users: '{{ steps.lookup_user_by_email.output.data.user.id }}'
+          timeout: 30s
+
+      # -------------------------------------------------------------------------
+      # STEP 12: post-welcome-message
+      # -------------------------------------------------------------------------
+      # Sends a message to a Slack channel using the Slack API.
+      # Liquid syntax used:
+      # - `replace` - Replaces substring occurrences
+      # - References output from previous step(s)
+      # - References workflow constant(s)
+      # -------------------------------------------------------------------------
+      - name: post-welcome-message
+        type: http
+        with:
+          url: https://slack.com/api/chat.postMessage
+          method: POST
+          headers:
+            Content-Type: application/json; charset=utf-8
+            Authorization: Bearer {{ consts.slack_token }}
+          body:
+            channel: '{{steps.create-slack-channel.output.data.channel.id}}'
+            text: >-
+              <@{{ steps.lookup_user_by_email.output.data.user.id | replace: ',', '> <@' }}>  You have been added to
+              this channel to deal with an <{{kibanaUrl}}/app/security/cases/{{steps.createCase.output.id}}|Elastic
+              Security Case>
+          timeout: 30s
+
+      # -------------------------------------------------------------------------
+      # STEP 13: post_slack_message_rich_dynamic
+      # -------------------------------------------------------------------------
+      # Makes an API call to VirusTotal to check for malicious indicators.
+      # Returns threat intelligence data including detection results and
+      # reputation scores.
+      # Liquid syntax used:
+      # - References output from previous step(s)
+      # - References workflow constant(s)
+      # - References trigger event data (e.g., alert details)
+      # -------------------------------------------------------------------------
+      - name: post_slack_message_rich_dynamic
+        type: http
+        with:
+          url: https://slack.com/api/chat.postMessage
+          method: POST
+          headers:
+            Content-Type: application/json; charset=utf-8
+            Authorization: Bearer {{ consts.slack_token }}
+          body:
+            channel: '{{steps.create-slack-channel.output.data.channel.id}}'
+            text: Details
+            blocks: >-
+              [{"type":"header","text":{"type":"plain_text","text":"🚨 Malware Detected – Host
+              Isolated","emoji":true}},{"type":"section","text":{"type":"mrkdwn","text":"*A malicious file was confirmed
+              and automated containment actions were
+              taken.*"}},{"type":"section","fields":[{"type":"mrkdwn","text":"*Severity*\nHigh"},{"type":"mrkdwn","text":"*Status*\nHost
+              Isolated"},{"type":"mrkdwn","text":"*SHA256*\n`{{event.alerts[0].file.hash.sha256}}`"},{"type":"mrkdwn","text":"*Malicious
+              Detections*\n{{steps.SendHashtoVT.output.stats.malicious}}
+              engines"}]},{"type":"section","text":{"type":"mrkdwn","text":"*Automated Actions Taken:*\n• Elastic
+              Security case created\n• Endpoint isolated\n• Historical hash search executed\n• On-call analyst
+              notified"}},{"type":"actions","elements":[{"type":"button","text":{"type":"plain_text","text":"View
+              Elastic
+              Case","emoji":true},"style":"primary","url":"{{kibanaUrl}}/app/security/cases/{{steps.createCase.output.id}}"},{"type":"button","text":{"type":"plain_text","text":"View
+              VirusTotal
+              Report","emoji":true},"url":"https://www.virustotal.com/gui/file/{{event.alerts[0].file.hash.sha256}}"}]},{"type":"context","elements":[{"type":"mrkdwn","text":"⏱️
+              Detected via Elastic Security | Automated Traditional Triage workflow"}]}]
+          timeout: 30s
+
+      # -------------------------------------------------------------------------
+      # STEP 14: suggest_oncall_user_profile
+      # -------------------------------------------------------------------------
+      # Executes a search query against one or more Elasticsearch indices.
+      # Output: {{ steps.suggest_oncall_user_profile.output.hits }} contains
+      # matching documents.
+      # Liquid syntax used:
+      # - References output from previous step(s)
+      # -------------------------------------------------------------------------
+      - name: suggest_oncall_user_profile
+        type: elasticsearch.request
+        with:
+          method: POST
+          path: /_security/profile/_suggest
+          body:
+            name: '{{ steps.get_on_call.output.values[0][0] }}'
+            size: 1
+
+      # -------------------------------------------------------------------------
+      # STEP 15: get_latest_case_version
+      # -------------------------------------------------------------------------
+      # Retrieves case details via GET /api/cases/{caseId}.
+      # Returns the full case object including status, comments, and linked
+      # alerts.
+      # Liquid syntax used:
+      # - References output from previous step(s)
+      # -------------------------------------------------------------------------
+      - name: get_latest_case_version
+        type: kibana.request
+        with:
+          method: GET
+          path: /api/cases/{{steps.createCase.output.id}}
+
+      # -------------------------------------------------------------------------
+      # STEP 16: assign_case_to_oncall
+      # -------------------------------------------------------------------------
+      # Updates an existing case via PATCH /api/cases.
+      # Can modify status, severity, title, description, assignees, or tags.
+      # Liquid syntax used:
+      # - References output from previous step(s)
+      # -------------------------------------------------------------------------
+      - name: assign_case_to_oncall
+        type: kibana.request
+        with:
+          method: PATCH
+          path: /api/cases
+          body:
+            cases:
+              - id: '{{steps.createCase.output.id}}'
+                version: '{{steps.get_latest_case_version.output.version}}'
+                assignees:
+                  - uid: '{{steps.suggest_oncall_user_profile.output.profiles[0].uid}}'
+
+      # -------------------------------------------------------------------------
+      # STEP 17: add_comment
+      # -------------------------------------------------------------------------
+      # Adds a comment to a case via POST /api/cases/{caseId}/comments.
+      # Comments document investigation findings, analyst notes, or action
+      # summaries.
+      # Liquid syntax used:
+      # - `date` - Formats date/time value
+      # - References output from previous step(s)
+      # -------------------------------------------------------------------------
+      - name: add_comment
+        type: kibana.request
+        with:
+          method: POST
+          path: /api/cases/{{steps.createCase.output.id}}/comments
+          body:
+            type: user
+            owner: securitySolution
+            comment: >
+              {{steps.lookup_user_by_email.output.data.user.real_name}} is currently on call. Slack Channel
+              [malware-incident-{{ 'now' | date: '%Y-%m-%d'
+              }}](https://swiftcrypto.slack.com/archives/{{steps.create-slack-channel.output.data.channel.id}}) has been
+              created, and *{{steps.lookup_user_by_email.output.data.user.real_name}}* added. They have also been
+              assigned to this case.
+    else:
+
+      # -------------------------------------------------------------------------
+      # STEP 18: close_alert_false_positive
+      # -------------------------------------------------------------------------
+      # Updates alert status using the Security Detection Engine API.
+      # Valid statuses: "open" (new), "acknowledged" (in progress), "closed"
+      # (resolved).
+      # Status changes are audited and visible in the alert timeline.
+      # Liquid syntax used:
+      # - References trigger event data (e.g., alert details)
+      # -------------------------------------------------------------------------
+      - name: close_alert_false_positive
+        type: kibana.SetAlertsStatus
+        with:
+          status: closed
+          reason: false_positive
+          signal_ids:
+            - '{{event.alerts[0]._id}}'

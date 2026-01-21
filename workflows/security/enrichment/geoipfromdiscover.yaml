@@ -1,0 +1,118 @@
+# =============================================================================
+# Workflow: geoIPFromDiscover
+# Category: security/enrichment
+#
+# The `geoIPFromDiscover` workflow enriches a client's IP address with
+# geographic and reverse DNS information. It is manually triggered and
+# requires an index and document ID as inputs. The workflow consists of three
+# steps: performing a geoIP lookup using an external API, conducting a
+# reverse DNS query, and updating the specified Elasticsearch document with
+# the retrieved data.
+#
+# Author: Elastic
+# Created: 2025-11-19
+# =============================================================================
+name: geoIPFromDiscover
+description: Enriches clientIP with geoIP
+enabled: true
+
+# ---------------------------------------------------------------------------
+# TRIGGERS
+# ---------------------------------------------------------------------------
+# Defines how and when this workflow is executed. Supported trigger types:
+#   - manual: Run on-demand from the Kibana UI or API
+#   - scheduled: Run on a recurring schedule (every: "5m" or rrule)
+#   - alert: Run automatically when a security alert is triggered
+# ---------------------------------------------------------------------------
+triggers:
+  - type: manual
+
+# ---------------------------------------------------------------------------
+# INPUTS
+# ---------------------------------------------------------------------------
+# Runtime parameters provided when the workflow is triggered. Each input
+# can specify:
+#   - name: Unique identifier for the input
+#   - type: Data type (string, number, boolean, array, object)
+#   - required: Whether the input must be provided (default: false)
+#   - default: Default value if not provided
+# Reference inputs in steps using {{ inputs.input_name }} syntax
+# ---------------------------------------------------------------------------
+inputs:
+  - name: _index
+    type: string
+    required: true
+  - name: _id
+    type: string
+    required: true
+
+
+# ---------------------------------------------------------------------------
+# STEPS
+# ---------------------------------------------------------------------------
+# The sequence of actions this workflow performs. Each step executes an
+# action and can reference outputs from previous steps. Key properties:
+#   - name: Unique identifier for referencing this step's output
+#   - type: The action to perform (http, elasticsearch.search, foreach, etc.)
+#   - with: Parameters passed to the action
+#   - condition: Optional expression to conditionally run the step
+#   - on-failure: Error handling configuration (retry, continue, etc.)
+# Access step outputs using {{ steps.step_name.output.field }} syntax
+# ---------------------------------------------------------------------------
+steps:
+
+  # -------------------------------------------------------------------------
+  # STEP 1: geoIpLookup
+  # -------------------------------------------------------------------------
+  # Retrieves geolocation data for an IP address including country, city, and
+  # ISP.
+  # Liquid syntax used:
+  # - References workflow input parameter(s)
+  # -------------------------------------------------------------------------
+  - name: geoIpLookup
+    type: http
+    with:
+      url: "https://ipapi.co/{{ inputs.fields.clientIp[0] }}/json"
+      method: GET
+      headers:
+        Accept: application/json
+
+
+  # -------------------------------------------------------------------------
+  # STEP 2: reverseDns
+  # -------------------------------------------------------------------------
+  # Retrieves data from an external API endpoint via HTTP GET request.
+  # Liquid syntax used:
+  # - `join` - Joins array elements into string
+  # - `split` - Splits string into array
+  # - `reverse` - Reverses array order
+  # - References workflow input parameter(s)
+  # -------------------------------------------------------------------------
+  - name: reverseDns
+    type: http
+    with:
+      url: "https://dns.google/resolve?name={{ inputs.fields.clientIp[0] | split: '.' | reverse | join: '.' }}.in-addr.arpa&type=PTR"
+      method: GET
+      headers:
+        Accept: application/json
+
+
+  # -------------------------------------------------------------------------
+  # STEP 3: enrich
+  # -------------------------------------------------------------------------
+  # Executes a search query against one or more Elasticsearch indices.
+  # Output: {{ steps.enrich.output.hits }} contains matching documents.
+  # Liquid syntax used:
+  # - References output from previous step(s)
+  # - References workflow input parameter(s)
+  # -------------------------------------------------------------------------
+  - name: enrich
+    type: elasticsearch.update
+    with:
+      index: "{{ inputs._index }}"
+      id: "{{ inputs._id }}"
+      doc_as_upsert: true
+      doc:
+        attributes:
+          geoIP: ${{ steps.geoIpLookup.output.data }}
+          reverseDns: ${{ steps.reverseDns.output.data }}

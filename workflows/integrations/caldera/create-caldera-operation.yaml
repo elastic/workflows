@@ -1,0 +1,134 @@
+# =============================================================================
+# Workflow: Create Caldera Operation
+# Category: integrations/caldera
+#
+# The workflow YAML defines a process for creating and executing a Caldera
+# attack simulation operation using a specified adversary profile. It
+# includes constants for the Caldera API URL and key, as well as default
+# parameters for the operation. The workflow requires inputs for the
+# operation name and adversary ID, and it triggers manually. It consists of
+# two main steps: creating the operation via an HTTP POST request and
+# formatting the output for display in the console.
+#
+# Author: Elastic
+# Created: 2025-11-13
+# =============================================================================
+name: Create Caldera Operation
+enabled: true
+description: Creates and executes a Caldera attack simulation operation using a specified adversary profile
+
+# ---------------------------------------------------------------------------
+# CONSTANTS
+# ---------------------------------------------------------------------------
+# Reusable configuration values defined once and referenced throughout the
+# workflow using {{ consts.key_name }} syntax. Use constants for:
+#   - API endpoints and URLs
+#   - API keys and authentication tokens (use secrets in production)
+#   - Environment-specific configuration
+#   - Values that may need to change across environments
+# ---------------------------------------------------------------------------
+consts:
+  caldera_base_url: https://example.com:8888
+  caldera_api_key: API-KEY
+  default_source_id: ""
+  default_planner_id: atomic
+  default_group: red
+  default_jitter: 2/8
+  default_obsfucator: base64
+
+# ---------------------------------------------------------------------------
+# INPUTS
+# ---------------------------------------------------------------------------
+# Runtime parameters provided when the workflow is triggered. Each input
+# can specify:
+#   - name: Unique identifier for the input
+#   - type: Data type (string, number, boolean, array, object)
+#   - required: Whether the input must be provided (default: false)
+#   - default: Default value if not provided
+# Reference inputs in steps using {{ inputs.input_name }} syntax
+# ---------------------------------------------------------------------------
+inputs:
+  - name: operation_name
+    type: string
+    description: The name of the operation to create
+    required: true
+  - name: adversary_id
+    type: string
+    description: The ID of the adversary profile to use for this operation
+    required: true
+
+# ---------------------------------------------------------------------------
+# TRIGGERS
+# ---------------------------------------------------------------------------
+# Defines how and when this workflow is executed. Supported trigger types:
+#   - manual: Run on-demand from the Kibana UI or API
+#   - scheduled: Run on a recurring schedule (every: "5m" or rrule)
+#   - alert: Run automatically when a security alert is triggered
+# ---------------------------------------------------------------------------
+triggers:
+  - type: manual
+
+# ---------------------------------------------------------------------------
+# STEPS
+# ---------------------------------------------------------------------------
+# The sequence of actions this workflow performs. Each step executes an
+# action and can reference outputs from previous steps. Key properties:
+#   - name: Unique identifier for referencing this step's output
+#   - type: The action to perform (http, elasticsearch.search, foreach, etc.)
+#   - with: Parameters passed to the action
+#   - condition: Optional expression to conditionally run the step
+#   - on-failure: Error handling configuration (retry, continue, etc.)
+# Access step outputs using {{ steps.step_name.output.field }} syntax
+# ---------------------------------------------------------------------------
+steps:
+
+  # -------------------------------------------------------------------------
+  # STEP 1: create_operation
+  # -------------------------------------------------------------------------
+  # Interacts with MITRE Caldera to create or manage adversary operations.
+  # Includes retry logic to handle transient failures gracefully.
+  # Liquid syntax used:
+  # - References workflow input parameter(s)
+  # - References workflow constant(s)
+  # -------------------------------------------------------------------------
+  - name: create_operation
+    type: http
+    with:
+      url: "{{ consts.caldera_base_url }}/api/v2/operations"
+      method: POST
+      headers:
+        KEY: "{{ consts.caldera_api_key }}"
+        Content-Type: application/json
+      body:
+        name: "{{ inputs.operation_name }}"
+        adversary:
+          adversary_id: "{{ inputs.adversary_id }}"
+        state: running
+        group: "{{ consts.default_group }}"
+        planner:
+          id: "{{ consts.default_planner_id }}"
+        source:
+          id: "{{ consts.default_source_id }}"
+        jitter: "{{ consts.default_jitter }}"
+        autonomous: 1
+        auto_close: true
+        visibility: 50
+        obfuscator: "{{ consts.default_obsfucator }}"
+        use_learning_parsers: true
+    on-failure:
+      retry:
+        max-attempts: 2
+        delay: 3s
+
+  # -------------------------------------------------------------------------
+  # STEP 2: format_output
+  # -------------------------------------------------------------------------
+  # Formats and displays the results in a human-readable report format.
+  # This output is visible in the workflow execution logs.
+  # Liquid syntax used:
+  # - References output from previous step(s)
+  # -------------------------------------------------------------------------
+  - name: format_output
+    type: console
+    with:
+      message: ${{ steps.create_operation.output.data }}

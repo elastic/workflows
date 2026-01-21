@@ -1,0 +1,106 @@
+# =============================================================================
+# Workflow: 📮 Post to Slack Channel with blocks format
+# Category: integrations/slack
+#
+# This workflow YAML defines a manual trigger for posting a formatted message
+# to a specified Slack channel using the Slack API. It includes inputs for
+# the channel ID, a JSON string for message blocks, and fallback text. The
+# workflow utilizes an HTTP step to send a POST request to the Slack API,
+# including necessary headers and a message body that incorporates the
+# provided inputs. The workflow is enabled and designed to facilitate rich
+# message formatting in Slack.
+#
+# Author: Elastic
+# Created: 2025-11-07
+# =============================================================================
+version: '1'
+name: 📮 Post to Slack Channel with blocks format
+enabled: true
+
+# ---------------------------------------------------------------------------
+# TRIGGERS
+# ---------------------------------------------------------------------------
+# Defines how and when this workflow is executed. Supported trigger types:
+#   - manual: Run on-demand from the Kibana UI or API
+#   - scheduled: Run on a recurring schedule (every: "5m" or rrule)
+#   - alert: Run automatically when a security alert is triggered
+# ---------------------------------------------------------------------------
+triggers:
+  - type: manual
+
+# ---------------------------------------------------------------------------
+# INPUTS
+# ---------------------------------------------------------------------------
+# Runtime parameters provided when the workflow is triggered. Each input
+# can specify:
+#   - name: Unique identifier for the input
+#   - type: Data type (string, number, boolean, array, object)
+#   - required: Whether the input must be provided (default: false)
+#   - default: Default value if not provided
+# Reference inputs in steps using {{ inputs.input_name }} syntax
+# ---------------------------------------------------------------------------
+inputs:
+  - name: channel_id
+    default: C09H7L6JK7T
+    type: string
+  - name: blocks_json
+    type: string
+    default: >-
+      {"type":"section","text":{"type":"mrkdwn","text":"*This is a Cool test message!* :wave:\nHere’s a richer Slack
+      block test with multiple
+      sections."},"fields":[{"type":"mrkdwn","text":"*Status:*\nRunning"},{"type":"mrkdwn","text":"*Priority:*\nHigh"}]},{"type":"context","elements":[{"type":"mrkdwn","text":"Updated:
+      <!date^1672531200^{date_num}
+      {time_secs}|fallback>"},{"type":"image","image_url":"https://api.slack.com/img/blocks/bkb_template_images/profile_1.png","alt_text":"profile"}]},{"type":"actions","elements":[{"type":"button","text":{"type":"plain_text","text":"View
+      Details"},"style":"primary","url":"https://example.com/details"},{"type":"button","text":{"type":"plain_text","text":"Dismiss"},"style":"danger","value":"dismiss"}]}
+  - name: fallback_text
+    type: string
+    default: '1234'
+
+# ---------------------------------------------------------------------------
+# CONSTANTS
+# ---------------------------------------------------------------------------
+# Reusable configuration values defined once and referenced throughout the
+# workflow using {{ consts.key_name }} syntax. Use constants for:
+#   - API endpoints and URLs
+#   - API keys and authentication tokens (use secrets in production)
+#   - Environment-specific configuration
+#   - Values that may need to change across environments
+# ---------------------------------------------------------------------------
+consts:
+  slack_token: "YOUR-SECRET-HERE"
+
+# ---------------------------------------------------------------------------
+# STEPS
+# ---------------------------------------------------------------------------
+# The sequence of actions this workflow performs. Each step executes an
+# action and can reference outputs from previous steps. Key properties:
+#   - name: Unique identifier for referencing this step's output
+#   - type: The action to perform (http, elasticsearch.search, foreach, etc.)
+#   - with: Parameters passed to the action
+#   - condition: Optional expression to conditionally run the step
+#   - on-failure: Error handling configuration (retry, continue, etc.)
+# Access step outputs using {{ steps.step_name.output.field }} syntax
+# ---------------------------------------------------------------------------
+steps:
+
+  # -------------------------------------------------------------------------
+  # STEP 1: post_slack_message_rich_dynamic
+  # -------------------------------------------------------------------------
+  # Sends a message to a Slack channel using the Slack API.
+  # Liquid syntax used:
+  # - References workflow input parameter(s)
+  # - References workflow constant(s)
+  # -------------------------------------------------------------------------
+  - name: post_slack_message_rich_dynamic
+    type: http
+    with:
+      url: https://slack.com/api/chat.postMessage
+      method: POST
+      headers:
+        Content-Type: application/json; charset=utf-8
+        Authorization: Bearer {{ consts.slack_token }}
+      body:
+        channel: '{{ inputs.channel_id }}'
+        text: '{{ inputs.fallback_text }}'
+        blocks: '[{{ inputs.blocks_json }}]'
+      timeout: 30s

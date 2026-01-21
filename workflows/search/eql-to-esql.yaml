@@ -1,0 +1,108 @@
+# =============================================================================
+# Workflow: EQL-to-ESQL
+# Category: search
+#
+# The workflow YAML defines a manual trigger for an EQL-to-ESQL process that
+# searches for sequences of deposit and withdrawal events within a specified
+# index related to potential fraud. It first performs an EQL search to
+# identify sequences of events by account name, filtering for specific
+# deposit and withdrawal amounts. Then, it iterates through the identified
+# sequences and executes an ESQL query to calculate the net amount of
+# transactions for each account, adjusting for withdrawals. The workflow is
+# currently disabled.
+#
+# Author: Elastic
+# Created: 2025-12-20
+# =============================================================================
+name: EQL-to-ESQL
+enabled: false
+
+# ---------------------------------------------------------------------------
+# TRIGGERS
+# ---------------------------------------------------------------------------
+# Defines how and when this workflow is executed. Supported trigger types:
+#   - manual: Run on-demand from the Kibana UI or API
+#   - scheduled: Run on a recurring schedule (every: "5m" or rrule)
+#   - alert: Run automatically when a security alert is triggered
+# ---------------------------------------------------------------------------
+triggers:
+  - type: manual
+
+# ---------------------------------------------------------------------------
+# STEPS
+# ---------------------------------------------------------------------------
+# The sequence of actions this workflow performs. Each step executes an
+# action and can reference outputs from previous steps. Key properties:
+#   - name: Unique identifier for referencing this step's output
+#   - type: The action to perform (http, elasticsearch.search, foreach, etc.)
+#   - with: Parameters passed to the action
+#   - condition: Optional expression to conditionally run the step
+#   - on-failure: Error handling configuration (retry, continue, etc.)
+# Access step outputs using {{ steps.step_name.output.field }} syntax
+# ---------------------------------------------------------------------------
+steps:
+
+  # -------------------------------------------------------------------------
+  # STEP 1: eql-search
+  # -------------------------------------------------------------------------
+  # Executes a search query against one or more Elasticsearch indices.
+  # Uses the Query DSL to define match criteria for documents.
+  # Output: {{ steps.eql-search.output.hits }} contains matching documents.
+  # -------------------------------------------------------------------------
+  - name: eql-search
+    type: elasticsearch.eql.search
+    with:
+      index: fraud-workshop-smurfing
+      query: >
+        sequence by account.name with maxspan=1d
+          [any where account.event == "deposit" and event.amount >= 1 and event.amount <= 1000] 
+          [any where account.event == "withdrawal" and event.amount >= 1 and event.amount <= 1000] 
+          [any where account.event == "deposit" and event.amount >= 1 and event.amount <= 1000]
+          
+
+
+  # -------------------------------------------------------------------------
+  # STEP 2: foreach-sequence
+  # -------------------------------------------------------------------------
+  # Iterates over a collection of items, executing the nested steps for each.
+  # Access the current item via {{ item }} within the loop body.
+  # -------------------------------------------------------------------------
+  - name: foreach-sequence
+    type: foreach
+    foreach: "{{steps.eql-search.output.hits.sequences }}"
+    steps:
+
+      # -------------------------------------------------------------------------
+      # STEP 3: foreach-sequence-event
+      # -------------------------------------------------------------------------
+      # Iterates over a collection of items, executing the nested steps for each.
+      # Access the current item via {{ item }} within the loop body.
+      # Liquid syntax used:
+      # - `json` - Converts object to JSON string
+      # - References current item in foreach loop
+      # -------------------------------------------------------------------------
+      - name: foreach-sequence-event
+        type: foreach
+        foreach: "{{foreach.item.events | json}}"
+        steps:
+
+          # -------------------------------------------------------------------------
+          # STEP 4: esql-search
+          # -------------------------------------------------------------------------
+          # Executes an ES|QL query against Elasticsearch.
+          # ES|QL is a piped query language for filtering, aggregating, and
+          # transforming data.
+          # This query aggregates data using STATS to compute metrics like COUNT,
+          # AVG, SUM.
+          # Output: {{ steps.esql-search.output.values }} contains the result rows.
+          # Liquid syntax used:
+          # - References current item in foreach loop
+          # -------------------------------------------------------------------------
+          - name: esql-search
+            type: elasticsearch.esql.query
+            with:
+              query: >
+                ROW name = "{{foreach.item._source.account.name}}", amount = "{{foreach.item._source.event.amount}}", event = "{{foreach.item._source.account.event}}"
+                | EVAL amount = TO_LONG(amount)
+                | EVAL amount = CASE(event == "withdrawal", -1 * amount, amount)
+                | STATS SUM(amount) BY name, event

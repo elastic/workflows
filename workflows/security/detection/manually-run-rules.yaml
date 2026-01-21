@@ -1,0 +1,109 @@
+# =============================================================================
+# Workflow: 🔲 Manually Run Rules
+# Category: security/detection
+#
+# This YAML workflow defines a manual trigger for running security rules,
+# allowing users to specify rule IDs as input. It iterates over each rule ID,
+# logging the ID to the console and making an HTTP POST request to a
+# specified URL to schedule the rule execution. The request includes
+# authorization headers and a time range for the rule execution, set to the
+# last 15 minutes.
+#
+# Author: Elastic
+# Created: 2025-12-04
+# =============================================================================
+version: '1'
+name: 🔲 Manually Run Rules
+enabled: true
+
+# ---------------------------------------------------------------------------
+# TRIGGERS
+# ---------------------------------------------------------------------------
+# Defines how and when this workflow is executed. Supported trigger types:
+#   - manual: Run on-demand from the Kibana UI or API
+#   - scheduled: Run on a recurring schedule (every: "5m" or rrule)
+#   - alert: Run automatically when a security alert is triggered
+# ---------------------------------------------------------------------------
+triggers:
+  - type: manual
+
+# ---------------------------------------------------------------------------
+# TAGS
+# ---------------------------------------------------------------------------
+# Categories and labels for organizing, filtering, and discovering workflows
+# in the Kibana UI. Tags help with:
+#   - Categorizing workflows by use case (security, observability, etc.)
+#   - Filtering in the workflow library
+#   - Grouping related workflows together
+# ---------------------------------------------------------------------------
+tags: []
+inputs:
+  - name: ruleids
+    default:
+      - 0cf84558-943e-4739-b469-9c504b168f51
+    type: array
+
+# ---------------------------------------------------------------------------
+# STEPS
+# ---------------------------------------------------------------------------
+# The sequence of actions this workflow performs. Each step executes an
+# action and can reference outputs from previous steps. Key properties:
+#   - name: Unique identifier for referencing this step's output
+#   - type: The action to perform (http, elasticsearch.search, foreach, etc.)
+#   - with: Parameters passed to the action
+#   - condition: Optional expression to conditionally run the step
+#   - on-failure: Error handling configuration (retry, continue, etc.)
+# Access step outputs using {{ steps.step_name.output.field }} syntax
+# ---------------------------------------------------------------------------
+steps:
+
+  # -------------------------------------------------------------------------
+  # STEP 1: foreachrule
+  # -------------------------------------------------------------------------
+  # Iterates over a collection of items, executing the nested steps for each.
+  # Access the current item via {{ item }} within the loop body.
+  # Liquid syntax used:
+  # - References workflow input parameter(s)
+  # -------------------------------------------------------------------------
+  - name: foreachrule
+    type: foreach
+    foreach: '{{inputs.ruleids}}'
+    steps:
+
+      # -------------------------------------------------------------------------
+      # STEP 2: process-item
+      # -------------------------------------------------------------------------
+      # Outputs a message to the workflow execution log for visibility.
+      # Liquid syntax used:
+      # - References current item in foreach loop
+      # -------------------------------------------------------------------------
+      - name: process-item
+        type: console
+        with:
+          message: '{{foreach.item}}'
+
+      # -------------------------------------------------------------------------
+      # STEP 3: run_rule_manually
+      # -------------------------------------------------------------------------
+      # Sends data to an external API endpoint via HTTP POST request.
+      # Liquid syntax used:
+      # - `date` - Formats date/time value
+      # - `minus` - Subtracts number
+      # - References current item in foreach loop
+      # -------------------------------------------------------------------------
+      - name: run_rule_manually
+        type: http
+        with:
+          url: >-
+            https://your-deployment.elastic-cloud.com
+          method: POST
+          headers:
+            Authorization: secret
+            kbn-xsrf: kibana
+            x-elastic-internal-origin: Kibana
+          timeout: 30s
+          body:
+            - rule_id: '{{foreach.item}}'
+              ranges:
+                - start: '{{ ''now'' | date: ''%s'' | minus: 900 | date: ''%Y-%m-%dT%H:%M:%S'' }}.000Z'
+                  end: '{{ ''now'' | date: ''%s'' | minus: 60 | date: ''%Y-%m-%dT%H:%M:%S'' }}.000Z'

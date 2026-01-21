@@ -1,0 +1,66 @@
+# =============================================================================
+# Workflow: ⌚️ Get Time
+# Category: utilities
+#
+# This workflow YAML defines a manual trigger named "Get Time" that retrieves
+# the current time in two formats. The first step outputs the current time in
+# UTC, while the second step provides the current time in the Europe/Rome
+# timezone. Both steps utilize console messages to display the formatted date
+# and time.
+#
+# Author: Elastic
+# Created: 2025-11-07
+# =============================================================================
+version: "1"
+name: ⌚️ Get Time
+enabled: true
+
+# ---------------------------------------------------------------------------
+# TRIGGERS
+# ---------------------------------------------------------------------------
+# Defines how and when this workflow is executed. Supported trigger types:
+#   - manual: Run on-demand from the Kibana UI or API
+#   - scheduled: Run on a recurring schedule (every: "5m" or rrule)
+#   - alert: Run automatically when a security alert is triggered
+# ---------------------------------------------------------------------------
+triggers:
+  - type: manual
+
+# ---------------------------------------------------------------------------
+# STEPS
+# ---------------------------------------------------------------------------
+# The sequence of actions this workflow performs. Each step executes an
+# action and can reference outputs from previous steps. Key properties:
+#   - name: Unique identifier for referencing this step's output
+#   - type: The action to perform (http, elasticsearch.search, foreach, etc.)
+#   - with: Parameters passed to the action
+#   - condition: Optional expression to conditionally run the step
+#   - on-failure: Error handling configuration (retry, continue, etc.)
+# Access step outputs using {{ steps.step_name.output.field }} syntax
+# ---------------------------------------------------------------------------
+steps:
+
+  # -------------------------------------------------------------------------
+  # STEP 1: get_current_time_utc
+  # -------------------------------------------------------------------------
+  # Outputs a message to the workflow execution log for visibility.
+  # Liquid syntax used:
+  # - `date` - Formats date/time value
+  # -------------------------------------------------------------------------
+  - name: get_current_time_utc
+    type: console
+    with:
+      message: "{{ 'now' | date: '%Y-%m-%dT%H:%M:%S' }}"
+
+  # -------------------------------------------------------------------------
+  # STEP 2: get_current_time
+  # -------------------------------------------------------------------------
+  # Outputs a message to the workflow execution log for visibility.
+  # Liquid syntax used:
+  # - `date` - Formats date/time value
+  # -------------------------------------------------------------------------
+  - name: get_current_time
+    type: console
+    with:
+      message: "{{ 'now' | date: '%Y-%m-%d %H:%M', 'europe/rome' }}"
+    

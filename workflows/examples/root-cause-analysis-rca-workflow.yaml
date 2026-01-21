@@ -1,0 +1,303 @@
+# =============================================================================
+# Workflow: Root Cause Analysis (RCA) Workflow 🚨
+# Category: examples
+#
+# The Root Cause Analysis (RCA) Workflow is designed to automate the
+# investigation of alerts using AI agents, facilitating the identification of
+# root causes and the creation of case documentation. It consists of multiple
+# phases, including RCA analysis, generating a case title and description,
+# and creating a case in the system. The workflow also incorporates adding
+# relevant alerts and AI-generated summaries as comments to the case,
+# ensuring comprehensive documentation of the investigation process.
+#
+# Author: Elastic
+# Created: 2026-01-14
+# Tags: RCA, DEMO
+# =============================================================================
+version: "1"
+name: Root Cause Analysis (RCA) Workflow 🚨
+description: an example to demonstrate the application of AI agents and workflows to enable root cause analysis in observability.
+enabled: true
+
+# ---------------------------------------------------------------------------
+# TAGS
+# ---------------------------------------------------------------------------
+# Categories and labels for organizing, filtering, and discovering workflows
+# in the Kibana UI. Tags help with:
+#   - Categorizing workflows by use case (security, observability, etc.)
+#   - Filtering in the workflow library
+#   - Grouping related workflows together
+# ---------------------------------------------------------------------------
+tags: []
+  - RCA
+  - DEMO
+
+# ---------------------------------------------------------------------------
+# TRIGGERS
+# ---------------------------------------------------------------------------
+# Defines how and when this workflow is executed. Supported trigger types:
+#   - manual: Run on-demand from the Kibana UI or API
+#   - scheduled: Run on a recurring schedule (every: "5m" or rrule)
+#   - alert: Run automatically when a security alert is triggered
+# ---------------------------------------------------------------------------
+triggers:
+  - type: alert
+
+# ---------------------------------------------------------------------------
+# STEPS
+# ---------------------------------------------------------------------------
+# The sequence of actions this workflow performs. Each step executes an
+# action and can reference outputs from previous steps. Key properties:
+#   - name: Unique identifier for referencing this step's output
+#   - type: The action to perform (http, elasticsearch.search, foreach, etc.)
+#   - with: Parameters passed to the action
+#   - condition: Optional expression to conditionally run the step
+#   - on-failure: Error handling configuration (retry, continue, etc.)
+# Access step outputs using {{ steps.step_name.output.field }} syntax
+# ---------------------------------------------------------------------------
+steps:
+# Phase 1: RCA analysis
+
+  # -------------------------------------------------------------------------
+  # STEP 1: rca_analysis
+  # -------------------------------------------------------------------------
+  # Sends a message to an AI agent via the Agent Builder API.
+  # The agent analyzes the input and responds using its configured tools.
+  # Returns conversation_id and response.message with the agent's reply.
+  # Liquid syntax used:
+  # - `json` - Converts object to JSON string
+  # -------------------------------------------------------------------------
+  - name: rca_analysis
+    type: kibana.request
+    with:
+      method: "POST"
+      path: "/api/agent_builder/converse"
+      headers:
+        kbn-xsrf: "true"
+      body:
+        agent_id: sre-agent
+        input: |
+          Investigate the following alerts: {{ event | json }} and provide possible root causes. 
+          To not blow up your context window please keep your analysis and data exploration brief.
+
+          You may use emojis in your response.
+    timeout: 10m
+
+  # Phase 2: generate case title
+
+  # -------------------------------------------------------------------------
+  # STEP 2: create_case_title
+  # -------------------------------------------------------------------------
+  # Sends a message to an AI agent via the Agent Builder API.
+  # The agent analyzes the input and responds using its configured tools.
+  # Returns conversation_id and response.message with the agent's reply.
+  # Liquid syntax used:
+  # - References output from previous step(s)
+  # -------------------------------------------------------------------------
+  - name: create_case_title
+    type: kibana.request
+    with:
+      method: "POST"
+      path: "/api/agent_builder/converse"
+      headers:
+        kbn-xsrf: "true"
+      body:
+        agent_id: sre-agent
+        conversation_id: "{{ steps.rca_analysis.output.conversation_id }}"
+        input: |
+          based on this analysis i am going to create a case. please come up with a case title for me that is clear and informative. only return the case title NOTHING ELSE.
+    timeout: 10m
+
+  # Phase 3: generate case description
+
+  # -------------------------------------------------------------------------
+  # STEP 3: create_case_description
+  # -------------------------------------------------------------------------
+  # Sends a message to an AI agent via the Agent Builder API.
+  # The agent analyzes the input and responds using its configured tools.
+  # Returns conversation_id and response.message with the agent's reply.
+  # Liquid syntax used:
+  # - References output from previous step(s)
+  # -------------------------------------------------------------------------
+  - name: create_case_description
+    type: kibana.request
+    with:
+      method: "POST"
+      path: "/api/agent_builder/converse"
+      headers:
+        kbn-xsrf: "true"
+      body:
+        agent_id: sre-agent
+        conversation_id: "{{ steps.rca_analysis.output.conversation_id }}"
+        input: |
+          based on this analysis i am going to create a case. please come up with a case description for me that is clear and informative. only return the case description NOTHING ELSE.
+    timeout: 10m
+  
+
+
+  # -------------------------------------------------------------------------
+  # STEP 4: create_case
+  # -------------------------------------------------------------------------
+  # Creates a new case using the Kibana Cases API (POST /api/cases).
+  # Cases provide a workspace for investigating and tracking security
+  # incidents.
+  # Required: title, description, owner (e.g., "securitySolution"), tags,
+  # severity.
+  # Output: {{ steps.create_case.output.id }} contains the new case ID.
+  # Liquid syntax used:
+  # - References output from previous step(s)
+  # -------------------------------------------------------------------------
+  - name: create_case
+    type: kibana.createCaseDefaultSpace
+    with:
+      connector:
+        fields: null
+        id: none
+        name: none
+        type: .none
+      description: "{{ steps.create_case_description.output.response.message }}"
+      owner: observability
+      settings:
+        syncAlerts: false
+      severity: low
+      tags:
+        - Example
+      title: "{{ steps.create_case_title.output.response.message }}"
+   
+
+  # -------------------------------------------------------------------------
+  # STEP 5: add_alert_to_case
+  # -------------------------------------------------------------------------
+  # Attaches a security alert to a case via POST
+  # /api/cases/{caseId}/comments.
+  # Links the alert to the case for consolidated investigation tracking.
+  # Required fields: alertId, index, rule (id and name), owner, type:
+  # "alert".
+  # Liquid syntax used:
+  # - References output from previous step(s)
+  # - References trigger event data (e.g., alert details)
+  # -------------------------------------------------------------------------
+  - name: add_alert_to_case
+    type: kibana.request
+    with:
+      method: "POST"
+      path: "/api/cases/{{ steps.create_case.output.id }}/comments"
+      headers:
+        kbn-xsrf: "true"
+      body:
+        type: alert
+        owner: observability
+        alertId: "{{event.alerts[0]._id}}"
+        index: "{{event.alerts[0]._index}}"
+        rule:
+          id: "{{event.rule.id}}"
+          name: "{{event.rule.name}}"
+   
+  
+
+  # -------------------------------------------------------------------------
+  # STEP 6: getConversation
+  # -------------------------------------------------------------------------
+  # Retrieves conversation history from the Agent Builder API.
+  # Returns the full message history of the AI agent conversation.
+  # Liquid syntax used:
+  # - References output from previous step(s)
+  # -------------------------------------------------------------------------
+  - name: getConversation
+    type: kibana.request
+    with:
+      method: "GET"
+      path: "/api/agent_builder/conversations/{{ steps.rca_analysis.output.conversation_id }}"
+
+  # -------------------------------------------------------------------------
+  # STEP 7: addReasoningToCase
+  # -------------------------------------------------------------------------
+  # Adds a comment to a case via POST /api/cases/{caseId}/comments.
+  # Comments document investigation findings, analyst notes, or action
+  # summaries.
+  # Liquid syntax used:
+  # - `size` - Gets array length or string length
+  # - `plus` - Adds number
+  # - `url_encode` - URL-encodes string
+  # - `{% if %}` - Conditional logic based on expression
+  # - `{% elsif %}` - Additional condition branch
+  # - `{% for %}` - Iterates over array elements
+  # - `{% assign %}` - Creates/assigns a variable
+  # - References output from previous step(s)
+  # - References workflow constant(s)
+  # -------------------------------------------------------------------------
+  - name: addReasoningToCase
+    type: kibana.request
+    with:
+      method: "POST"
+      path: "/api/cases/{{ steps.create_case.output.id }}/comments"
+      body:
+        type: user
+        owner: observability
+        comment: |
+          ## 🔍 AI Investigation Summary
+          [View Full Conversation]({{ context.kibanaUrl }}/app/agent_builder/conversations/{{ steps.get_conversation.output.id }})
+        
+          ### Investigation Steps
+          
+          {%- assign step_number = 0 %}
+          {%- for round in steps.getConversation.output.rounds %}
+          {%- for step in round.steps %}
+          {%- if step.type == "reasoning" %}
+          {%- assign step_number = step_number | plus: 1 %}
+          
+          **{{ step_number }}. Reasoning**
+          > {{ step.reasoning }}
+          
+          {%- elsif step.type == "tool_call" %}
+          {%- assign query_esql = "" %}
+          {%- assign result_count = 0 %}
+          {%- assign has_error = false %}
+          {%- assign error_message = "" %}
+          {%- for result in step.results %}
+          {%- if result.type == "error" %}
+          {%- assign has_error = true %}
+          {%- assign error_message = result.data.message %}
+          {%- elsif result.type == "query" %}
+          {%- assign query_esql = result.data.esql %}
+          {%- elsif result.type == "tabular_data" %}
+          {%- assign result_count = result.data.values | size %}
+          {%- endif %}
+          {%- endfor %}
+          
+          **Action:** `{{ step.tool_id }}`
+          {%- if has_error %}
+          - ❌ **Error:** {{ error_message }}
+          {%- elsif query_esql != "" %}
+          - ✅ **Found {{ result_count }} results** → [View in Discover]({{ context.kibanaUrl }}/{{consts.basePath}}app/discover#/?_a=(dataSource:(type:esql),query:(esql:'{{ query_esql | url_encode }}')))
+          {%- else %}
+          - ✅ **Completed**
+          {%- endif %}
+          
+          {%- endif %}
+          {%- endfor %}
+          {%- endfor %}
+
+
+
+  # -------------------------------------------------------------------------
+  # STEP 8: add_rca_as_comment
+  # -------------------------------------------------------------------------
+  # Adds a comment to a case via POST /api/cases/{caseId}/comments.
+  # Comments document investigation findings, analyst notes, or action
+  # summaries.
+  # Liquid syntax used:
+  # - References output from previous step(s)
+  # -------------------------------------------------------------------------
+  - name: add_rca_as_comment
+    type: kibana.request
+    with:
+      method: "POST"
+      path: "/api/cases/{{ steps.create_case.output.id }}/comments"
+      headers:
+        kbn-xsrf: "true"
+      body:
+        type: user
+        owner: observability
+        comment: "{{ steps.rca_analysis.output.response.message }}"
+ 

@@ -1,0 +1,147 @@
+# =============================================================================
+# Workflow: 🔲 Update Emulation Results
+# Category: utilities
+#
+# The workflow YAML titled "Update Emulation Results" is designed to manually
+# update the results of an emulation test in an Elasticsearch database. It
+# includes various input parameters such as execution status, timestamps,
+# results summary, and details about alerts triggered and phases completed.
+# The workflow consists of a single step that sends a POST request to update
+# the emulation history with the provided data, ensuring that the results are
+# accurately recorded and accessible for future reference.
+#
+# Author: Elastic
+# Created: 2025-12-04
+# =============================================================================
+name: 🔲 Update Emulation Results
+enabled: true
+
+# ---------------------------------------------------------------------------
+# TRIGGERS
+# ---------------------------------------------------------------------------
+# Defines how and when this workflow is executed. Supported trigger types:
+#   - manual: Run on-demand from the Kibana UI or API
+#   - scheduled: Run on a recurring schedule (every: "5m" or rrule)
+#   - alert: Run automatically when a security alert is triggered
+# ---------------------------------------------------------------------------
+triggers:
+  - type: manual
+
+# ---------------------------------------------------------------------------
+# TAGS
+# ---------------------------------------------------------------------------
+# Categories and labels for organizing, filtering, and discovering workflows
+# in the Kibana UI. Tags help with:
+#   - Categorizing workflows by use case (security, observability, etc.)
+#   - Filtering in the workflow library
+#   - Grouping related workflows together
+# ---------------------------------------------------------------------------
+tags: []
+inputs:
+  - name: status
+    type: string
+    default: completed
+  - name: executed_at
+    type: string
+    default: '2025-11-14T20:05:00Z'
+  - name: completed_at
+    type: string
+    default: '2025-11-14T20:20:00Z'
+  - name: results_text
+    type: string
+    default: |
+      ## EXECUTION_RESULTS
+
+      ### SUMMARY
+      Emulation executed successfully.
+  - name: emulation_content
+    type: string
+    default: >
+      TESTING Lateral Movement Emulation Plan - COMPLETED. Executed on 3 Windows Server 2022 hosts. Results: 2/3 phases
+      successful, 2/3 alerts triggered (66% success rate). LSASS dump blocked by AV. WinRM lateral movement and registry
+      hive dump succeeded. Duration: 15 minutes.
+  - name: phases_completed
+    type: number
+    default: 2
+  - name: alerts_triggered
+    type: number
+    default: 2
+  - name: alerts_expected
+    type: number
+    default: 3
+  - name: success_rate
+    type: number
+    default: 0.66
+  - name: duration_seconds
+    type: number
+    default: 900
+  - name: triggered_alert_ids
+    type: array
+    default:
+      - alert-id-1
+      - alert-id-2
+  - name: triggered_alert_names
+    type: array
+    default:
+      - WinRM Remote Execution
+      - Registry Hive Dump
+  - name: missed_alerts
+    type: array
+    default:
+      - LSASS Memory Dump
+  - name: phase_results
+    type: string
+    default: >-
+      {"phase_number": 1, "phase_title": "Initial Compromise", "status": "success", "host": "srv-win-defend-ab-01",
+      "command": "cmd.exe /c whoami", "output": "NT AUTHORITY\\SYSTEM", "alert_triggered": true, "alert_name": "Whoami
+      Process Activity", "timestamp": "2025-11-14T20:05:30Z"}
+  - name: doc_id
+    type: string
+    default: PF_nhJoBxy6JWUIcZutB
+
+# ---------------------------------------------------------------------------
+# STEPS
+# ---------------------------------------------------------------------------
+# The sequence of actions this workflow performs. Each step executes an
+# action and can reference outputs from previous steps. Key properties:
+#   - name: Unique identifier for referencing this step's output
+#   - type: The action to perform (http, elasticsearch.search, foreach, etc.)
+#   - with: Parameters passed to the action
+#   - condition: Optional expression to conditionally run the step
+#   - on-failure: Error handling configuration (retry, continue, etc.)
+# Access step outputs using {{ steps.step_name.output.field }} syntax
+# ---------------------------------------------------------------------------
+steps:
+
+  # -------------------------------------------------------------------------
+  # STEP 1: elasticsearch_request_step
+  # -------------------------------------------------------------------------
+  # Executes a search query against one or more Elasticsearch indices.
+  # Output: {{ steps.elasticsearch_request_step.output.hits }} contains
+  # matching documents.
+  # Liquid syntax used:
+  # - References workflow input parameter(s)
+  # -------------------------------------------------------------------------
+  - name: elasticsearch_request_step
+    type: elasticsearch.request
+    with:
+      method: POST
+      path: smeagol-emulation-history/_update/{{inputs.doc_id}}
+      headers:
+        Authorization: secret
+      body:
+        doc:
+          status: '{{inputs.status}}'
+          executed_at: '{{inputs.executed_at}}'
+          completed_at: '{{inputs.completed_at}}'
+          results_text: '{{inputs.results_text}}'
+          emulation_content: '{{inputs.emulation_content}}'
+          phases_completed: '{{inputs.phases_completed}}'
+          alerts_triggered: '{{inputs.alerts_triggered}}'
+          alerts_expected: '{{inputs.alerts_expected}}'
+          success_rate: '{{inputs.success_rate}}'
+          duration_seconds: '{{inputs.duration_seconds}}'
+          triggered_alert_ids: ${{inputs.triggered_alert_ids}}
+          triggered_alert_names: ${{inputs.triggered_alert_names}}
+          missed_alerts: ${{inputs.missed_alerts}}
+          phase_results: '{{inputs.phase_results}}'

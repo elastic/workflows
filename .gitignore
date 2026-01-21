@@ -1,0 +1,29 @@
+# Dependencies
+node_modules/
+
+# OS files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Logs
+*.log
+npm-debug.log*
+
+# Internal scripts and metadata
+scripts/
+workflow-metadata.json
+
+# Environment and secrets
+.env
+.env.*
+*.key
+*.pem

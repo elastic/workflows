@@ -1,0 +1,75 @@
+# =============================================================================
+# Workflow: 🔲 Get Action Status
+# Category: utilities
+#
+# The workflow YAML defines a manual trigger named "Get Action Status" that
+# retrieves the status of a specific action using its ID. It includes a
+# single step that makes an HTTP GET request to a specified API endpoint,
+# passing the action ID as a parameter and including necessary authorization
+# headers. The workflow is tagged for easy identification and is currently
+# enabled for use.
+#
+# Author: Elastic
+# Created: 2025-12-04
+# =============================================================================
+version: '1'
+name: 🔲 Get Action Status
+enabled: true
+
+# ---------------------------------------------------------------------------
+# TAGS
+# ---------------------------------------------------------------------------
+# Categories and labels for organizing, filtering, and discovering workflows
+# in the Kibana UI. Tags help with:
+#   - Categorizing workflows by use case (security, observability, etc.)
+#   - Filtering in the workflow library
+#   - Grouping related workflows together
+# ---------------------------------------------------------------------------
+tags: []
+triggers:
+  - type: manual
+
+# ---------------------------------------------------------------------------
+# INPUTS
+# ---------------------------------------------------------------------------
+# Runtime parameters provided when the workflow is triggered. Each input
+# can specify:
+#   - name: Unique identifier for the input
+#   - type: Data type (string, number, boolean, array, object)
+#   - required: Whether the input must be provided (default: false)
+#   - default: Default value if not provided
+# Reference inputs in steps using {{ inputs.input_name }} syntax
+# ---------------------------------------------------------------------------
+inputs:
+  - name: action_id
+    default: 7189af0c-161c-4b1b-8153-70fdf0cd7eb5
+    type: string
+
+# ---------------------------------------------------------------------------
+# STEPS
+# ---------------------------------------------------------------------------
+# The sequence of actions this workflow performs. Each step executes an
+# action and can reference outputs from previous steps. Key properties:
+#   - name: Unique identifier for referencing this step's output
+#   - type: The action to perform (http, elasticsearch.search, foreach, etc.)
+#   - with: Parameters passed to the action
+#   - condition: Optional expression to conditionally run the step
+#   - on-failure: Error handling configuration (retry, continue, etc.)
+# Access step outputs using {{ steps.step_name.output.field }} syntax
+# ---------------------------------------------------------------------------
+steps:
+
+  # -------------------------------------------------------------------------
+  # STEP 1: get_action_status
+  # -------------------------------------------------------------------------
+  # Retrieves data from an external API endpoint via HTTP GET request.
+  # -------------------------------------------------------------------------
+  - name: get_action_status
+    type: http
+    with:
+      method: GET
+      url: >-
+        https://your-deployment.elastic-cloud.com
+      headers:
+        Authorization: secret
+        kbn-xsrf: kibana

@@ -1,0 +1,274 @@
+# =============================================================================
+# Workflow: Digest workflow
+# Category: utilities
+#
+# The Digest workflow automates the generation of a weekly summary of
+# user-facing changes in the Workflows Execution Engine. It retrieves
+# relevant commit messages from Elasticsearch, analyzes them using AI to
+# create a formatted update, and posts this summary to a Slack channel. The
+# workflow can be triggered manually or scheduled to run weekly on Wednesdays
+# at 8 AM UTC. If no significant updates are found, it generates a friendly
+# message indicating that there are no user-facing changes for the week.
+#
+# Author: Elastic
+# Created: 2026-01-14
+# =============================================================================
+name: Digest workflow
+descriptions: |
+  This workflow generates a weekly digest of user-facing changes made in the Workflows Execution Engine.
+  It searches commit messages indexed in Elasticsearch for relevant updates from the past week,
+  analyzes them using AI to create a concise summary, and posts the formatted update to a Slack channel.
+enabled: true
+
+# ---------------------------------------------------------------------------
+# TRIGGERS
+# ---------------------------------------------------------------------------
+# Defines how and when this workflow is executed. Supported trigger types:
+#   - manual: Run on-demand from the Kibana UI or API
+#   - scheduled: Run on a recurring schedule (every: "5m" or rrule)
+#   - alert: Run automatically when a security alert is triggered
+# ---------------------------------------------------------------------------
+triggers:
+  - type: manual
+  - type: scheduled
+    with:
+      rrule:
+        freq: WEEKLY
+        interval: 1
+        byweekday:
+          - WE
+        byhour:
+          - 8
+        byminute:
+          - 0
+        tzid: UTC
+
+
+# ---------------------------------------------------------------------------
+# CONSTANTS
+# ---------------------------------------------------------------------------
+# Reusable configuration values defined once and referenced throughout the
+# workflow using {{ consts.key_name }} syntax. Use constants for:
+#   - API endpoints and URLs
+#   - API keys and authentication tokens (use secrets in production)
+#   - Environment-specific configuration
+#   - Values that may need to change across environments
+# ---------------------------------------------------------------------------
+consts:
+  index_name: indexed_commits_v1
+
+# ---------------------------------------------------------------------------
+# STEPS
+# ---------------------------------------------------------------------------
+# The sequence of actions this workflow performs. Each step executes an
+# action and can reference outputs from previous steps. Key properties:
+#   - name: Unique identifier for referencing this step's output
+#   - type: The action to perform (http, elasticsearch.search, foreach, etc.)
+#   - with: Parameters passed to the action
+#   - condition: Optional expression to conditionally run the step
+#   - on-failure: Error handling configuration (retry, continue, etc.)
+# Access step outputs using {{ steps.step_name.output.field }} syntax
+# ---------------------------------------------------------------------------
+steps:
+
+  # -------------------------------------------------------------------------
+  # STEP 1: search_commit_messages
+  # -------------------------------------------------------------------------
+  # Executes a search query against one or more Elasticsearch indices.
+  # Uses the Query DSL to define match criteria for documents.
+  # Output: {{ steps.search_commit_messages.output.hits }} contains matching
+  # documents.
+  # Liquid syntax used:
+  # - References workflow constant(s)
+  # -------------------------------------------------------------------------
+  - name: search_commit_messages
+    type: elasticsearch.request
+    with:
+      method: GET
+      path: /{{consts.index_name}}/_search
+      body:
+        {
+          "query":
+            {
+              "bool":
+                {
+                  "filter":
+                    [
+                      { "match_phrase": { "commit.message": "One Workflow" } },
+                      { "range": { "commit.author.date": { "gte": "now-7d/d", "lte": "now" } } }
+                    ]
+                }
+            },
+          "size": 50
+        }
+
+
+  # -------------------------------------------------------------------------
+  # STEP 2: commits_count_check
+  # -------------------------------------------------------------------------
+  # Evaluates a condition and executes different steps based on the result.
+  # Enables dynamic workflow behavior based on runtime data.
+  # -------------------------------------------------------------------------
+  - name: commits_count_check
+    type: if
+    condition: steps.search_commit_messages.output.hits.hits.length > 0
+    steps:
+
+        # -------------------------------------------------------------------------
+        # STEP 3: build_prompt
+        # -------------------------------------------------------------------------
+        # Outputs a message to the workflow execution log for visibility.
+        # Liquid syntax used:
+        # - `{% for %}` - Iterates over array elements
+        # -------------------------------------------------------------------------
+        - name: build_prompt
+          type: console
+          with:
+            message: |
+              ## Data for analisys
+              {% for hit in steps.search_commit_messages.output.hits.hits %}
+              ---------------------------------------------------------
+                ## Author: {{hit._source.commit.author.name}}
+                ## Date: {{hit._source.commit.author.date}}
+                ## Message:
+              ```markup
+                {{hit._source.commit.message}}
+              ```
+              ---------------------------------------------------------
+
+              {% endfor %}
+
+              ## Intro
+              You are a Product Manager for the Workflows Execution Engine. Every week you need to provide community updates about user-facing improvements and changes made during the last week.
+
+              Today is: {{now}}
+
+              ## Instructions
+              - Analyze commit messages from the past week to identify user-facing changes
+              - Generate a comprehensive update message for the community
+              - Focus ONLY on changes that affect workflow engine users, such as:
+                - New syntax or API changes
+                - Behavior modifications
+                - Performance improvements
+                - Bug fixes that impact user experience
+                - New features or capabilities
+                - Breaking changes or deprecations
+              - Exclude internal-only changes like refactoring, internal tooling, or code organization
+              - Format the message for Slack with proper markdown formatting
+              - Organize updates into clear categories: 🐛 **Bug Fixes**, 🚀 **Improvements**, ✨ **New Features**, ⚠️ **Breaking Changes**
+              - Use bullet points for easy readability
+              - Include brief, non-technical explanations that users can understand
+              - If no significant user-facing changes occurred, output: "No user-facing updates this week. Stay tuned for upcoming features!"
+              ## Output Requirements
+              - Take into account, that today's date is: {{now}}. THIS IS IMPORTANT!!! The update MUST be for the past week.
+              - Output ONLY the formatted Slack message
+              - Message must be ready to post immediately
+              - Use emojis and proper Slack markdown formatting
+              - Keep descriptions concise but informative
+              - Include relevant context for breaking changes or major features
+              - In the end of message, write something like "Have questions? Drop them in thread and we'll get back to you!"
+
+              ## Example Format:
+              ```
+              📅 **Weekly Workflows Engine Update :meow_merged: - [Date Range]**
+
+              🐛 **Bug Fixes**
+              • Fixed issue where workflow executions would timeout unexpectedly
+              • Resolved step parameter validation errors
+
+              🚀 **Improvements** 
+              • Enhanced error messages for better debugging
+              • Improved workflow execution performance by 15%
+
+              ✨ **New Features**
+              • Added support for conditional step execution
+              • Introduced new `retry` configuration option
+
+              ⚠️ **Breaking Changes**
+              • Deprecated `oldSyntax` in favor of `newSyntax` (migration guide: [link])
+
+              As always, thank you for your continued feedback and support! :eheart:
+              Have questions? Drop them in thread and we'll get back to you!
+              ```
+
+
+        # -------------------------------------------------------------------------
+        # STEP 4: analysis
+        # -------------------------------------------------------------------------
+        # Uses a large language model to analyze data or generate text.
+        # Useful for summarization, classification, or intelligent processing.
+        # Liquid syntax used:
+        # - References output from previous step(s)
+        # -------------------------------------------------------------------------
+        - name: analysis
+          type: ai.prompt
+          with:
+            prompt: ${{steps.build_prompt.output}}
+
+
+        # -------------------------------------------------------------------------
+        # STEP 5: post_update
+        # -------------------------------------------------------------------------
+        # Executes the slack action with the configured parameters.
+        # Liquid syntax used:
+        # - References output from previous step(s)
+        # -------------------------------------------------------------------------
+        - name: post_update
+          type: slack
+          connector-id: one-workflow-playground
+          with:
+            message: ${{steps.analysis.output.content}}
+    else:
+
+      # -------------------------------------------------------------------------
+      # STEP 6: generate_empty_updates
+      # -------------------------------------------------------------------------
+      # Uses a large language model to analyze data or generate text.
+      # Useful for summarization, classification, or intelligent processing.
+      # -------------------------------------------------------------------------
+      - name: generate_empty_updates
+        type: ai.prompt
+        with:
+          temperature: 0.6
+          prompt: |
+              ## Role
+              You are a Product Manager for the Workflows Execution Engine.
+
+              ## Context
+              Every week, you publish a short community update summarizing **user-facing changes and improvements** made during the last week.
+
+              Today is: {{ now }}
+
+              ## Task
+              This week, there are **no user-facing updates**.
+              Your task is to generate a **friendly and polished “no updates this week” message** that still feels engaging and intentional.
+
+              ## Output Requirements
+              - Format the output as a **Slack message**
+              - Use a **light, professional, and positive tone**
+              - Include **a few tasteful emojis**
+              - Do NOT invent features, fixes, or changes
+              - Keep it short and easy to read
+
+              ## Example Output
+              👋 **Weekly Workflow Engine Update**
+
+              Quiet week on the feature front! :elasticcarebear:
+              No user-facing changes shipped this time — the team focused on internal improvements and groundwork for upcoming releases.
+
+              Stay tuned, exciting updates are coming soon 🚀
+
+
+
+      # -------------------------------------------------------------------------
+      # STEP 7: post_empty_update
+      # -------------------------------------------------------------------------
+      # Executes the slack action with the configured parameters.
+      # Liquid syntax used:
+      # - References output from previous step(s)
+      # -------------------------------------------------------------------------
+      - name: post_empty_update
+        type: slack
+        connector-id: 'one-workflow-playground'
+        with:
+          message: ${{steps.generate_empty_updates.output.content}} 

@@ -1,0 +1,89 @@
+# =============================================================================
+# Workflow: 🔲 Execute
+# Category: utilities
+#
+# This workflow YAML defines a manual trigger for executing a command on
+# specified endpoints, with default inputs for endpoint IDs, a comment, and
+# the command to run. It includes a single step that sends a POST request to
+# a Kibana API to execute the command, passing the input parameters and a
+# timeout of 600 seconds.
+#
+# Author: Elastic
+# Created: 2025-12-04
+# =============================================================================
+version: "1"
+name: 🔲 Execute
+enabled: true
+
+# ---------------------------------------------------------------------------
+# TAGS
+# ---------------------------------------------------------------------------
+# Categories and labels for organizing, filtering, and discovering workflows
+# in the Kibana UI. Tags help with:
+#   - Categorizing workflows by use case (security, observability, etc.)
+#   - Filtering in the workflow library
+#   - Grouping related workflows together
+# ---------------------------------------------------------------------------
+tags: []
+triggers:
+  - type: manual
+
+# ---------------------------------------------------------------------------
+# INPUTS
+# ---------------------------------------------------------------------------
+# Runtime parameters provided when the workflow is triggered. Each input
+# can specify:
+#   - name: Unique identifier for the input
+#   - type: Data type (string, number, boolean, array, object)
+#   - required: Whether the input must be provided (default: false)
+#   - default: Default value if not provided
+# Reference inputs in steps using {{ inputs.input_name }} syntax
+# ---------------------------------------------------------------------------
+inputs:
+  - name: endpointids
+    default: ["7189af0c-161c-4b1b-8153-70fdf0cd7eb5"]
+    type: array
+  - name: comment
+    default: This command is being run to emulate behavior
+    type: string
+  - name: command
+    type: string
+    default: curl.exe icanhazip.com
+
+# ---------------------------------------------------------------------------
+# STEPS
+# ---------------------------------------------------------------------------
+# The sequence of actions this workflow performs. Each step executes an
+# action and can reference outputs from previous steps. Key properties:
+#   - name: Unique identifier for referencing this step's output
+#   - type: The action to perform (http, elasticsearch.search, foreach, etc.)
+#   - with: Parameters passed to the action
+#   - condition: Optional expression to conditionally run the step
+#   - on-failure: Error handling configuration (retry, continue, etc.)
+# Access step outputs using {{ steps.step_name.output.field }} syntax
+# ---------------------------------------------------------------------------
+steps:
+
+  # -------------------------------------------------------------------------
+  # STEP 1: execute_action
+  # -------------------------------------------------------------------------
+  # Executes a shell command on an endpoint via Elastic Defend response
+  # actions.
+  # Required: endpoint_ids, parameters.command. Optional: timeout (default
+  # 600s).
+  # Caution: Commands run with elevated privileges on the target endpoint.
+  # Liquid syntax used:
+  # - References workflow input parameter(s)
+  # -------------------------------------------------------------------------
+  - name: execute_action
+    type: kibana.request
+    with:
+      method: POST
+      path: /api/endpoint/action/execute
+      body:
+        endpoint_ids: ${{inputs.endpointids}}
+        comment: "{{inputs.comment}}"
+        parameters:
+          command: "{{inputs.command}}"
+          timeout: 600
+

@@ -1,0 +1,120 @@
+# =============================================================================
+# Workflow: ES|QL Query Output table values to new Index
+# Category: search
+#
+# This workflow YAML defines a manual trigger for processing financial data
+# related to suspicious activity reports (SARs) in Elasticsearch. It first
+# executes an ESQL query to identify transactions over $10,000, extracting
+# and renaming relevant fields, and then loops through the results to log
+# each entry into the `sar-reports` index with structured details about the
+# suspicious activity and associated accounts. The workflow ensures proper
+# mapping and renaming of fields for clarity and consistency in the output.
+#
+# Author: Elastic
+# Created: 2025-12-15
+# =============================================================================
+# There is a corresponding index template and ingest pipeline for the `sar-reports` index which is written to.  This handles the mappings and renames from the output values; e.g. `document.suspect_zip` to just `suspect_zip`
+
+name: ES|QL Query Output table values to new Index
+enabled: true
+
+# ---------------------------------------------------------------------------
+# TRIGGERS
+# ---------------------------------------------------------------------------
+# Defines how and when this workflow is executed. Supported trigger types:
+#   - manual: Run on-demand from the Kibana UI or API
+#   - scheduled: Run on a recurring schedule (every: "5m" or rrule)
+#   - alert: Run automatically when a security alert is triggered
+# ---------------------------------------------------------------------------
+triggers:
+  - type: manual
+
+# ---------------------------------------------------------------------------
+# STEPS
+# ---------------------------------------------------------------------------
+# The sequence of actions this workflow performs. Each step executes an
+# action and can reference outputs from previous steps. Key properties:
+#   - name: Unique identifier for referencing this step's output
+#   - type: The action to perform (http, elasticsearch.search, foreach, etc.)
+#   - with: Parameters passed to the action
+#   - condition: Optional expression to conditionally run the step
+#   - on-failure: Error handling configuration (retry, continue, etc.)
+# Access step outputs using {{ steps.step_name.output.field }} syntax
+# ---------------------------------------------------------------------------
+steps:
+
+  # -------------------------------------------------------------------------
+  # STEP 1: detect-amount-over-10k
+  # -------------------------------------------------------------------------
+  # Executes an ES|QL query against Elasticsearch.
+  # ES|QL is a piped query language for filtering, aggregating, and
+  # transforming data.
+  # This query aggregates data using STATS to compute metrics like COUNT,
+  # AVG, SUM.
+  # Filters results using WHERE clauses to match specific conditions.
+  # Output: {{ steps.detect-amount-over-10k.output.values }} contains the
+  # result rows.
+  # Liquid syntax used:
+  # - `sort` - Sorts array elements
+  # -------------------------------------------------------------------------
+  - name: detect-amount-over-10k
+    type: elasticsearch.esql.query
+    with:
+      query: >
+        FROM fraud-workshop*
+        | WHERE event.amount >= 10000 AND (wire.inbound.bank_name IS NOT NULL OR wire.outbound.bank_name IS NOT NULL)
+        | GROK account.address "%{GREEDYDATA:account.address}, %{WORD:account.city}, %{WORD:account.state} %{NUMBER:account.zip}$"
+        | DISSECT account.name "%{account.first_name} %{account.last_name}"
+        | RENAME wire.inbound.bank_name AS bank_name | RENAME wire.outbound.bank_name AS bank_name | RENAME wire.inbound.routing_number AS routing_number | RENAME wire.outbound.routing_number AS routing_number | RENAME wire.direction AS direction
+        | STATS SARs = COUNT(*) BY event.amount, account.event, account.address, account.city, account.first_name, account.last_name, account.state, account.zip, account.type, account.telephone_number, bank_name, routing_number, direction
+        | SORT event.amount DESC
+ 
+
+  # -------------------------------------------------------------------------
+  # STEP 2: loop_over_columns
+  # -------------------------------------------------------------------------
+  # Iterates over a collection of items, executing the nested steps for each.
+  # Access the current item via {{ item }} within the loop body.
+  # -------------------------------------------------------------------------
+  - name: loop_over_columns
+    type: foreach
+    foreach: "{{steps.detect-amount-over-10k.output.values}}"
+    steps:
+  
+
+      # -------------------------------------------------------------------------
+      # STEP 3: log_to_elasticsearch
+      # -------------------------------------------------------------------------
+      # Executes a search query against one or more Elasticsearch indices.
+      # Output: {{ steps.log_to_elasticsearch.output.hits }} contains matching
+      # documents.
+      # Liquid syntax used:
+      # - References current item in foreach loop
+      # -------------------------------------------------------------------------
+      - name: log_to_elasticsearch
+        type: elasticsearch.index
+        with:
+          index: "sar-reports"
+          id: "{{ execution.id }}-{{ foreach.index }}"
+          document:
+            timestamp: "{{ execution.startedAt }}"
+            total_dollar_amount: "${{ foreach.item[1] }}"
+            activity_description: "Account had {{ foreach.item[2] }} amount exceeding SAR threshold."
+            activity_type: "{{ foreach.item[13] }} {{ foreach.item[2] }} in excess of $10,000"
+            financial_institution_address: "123 Money St."
+            financial_institution_city: "${{ foreach.item[4] }}"
+            financial_institution_ein: "${{ foreach.item[12] }}"
+            financial_institution_name: "${{ foreach.item[11] }}"
+            financial_institution_state: "TX"
+            financial_institution_zip: "77072"
+            report_date: "{{ execution.startedAt }}"
+            suspect_address: "${{ foreach.item[3] }}"
+            suspect_city: "${{ foreach.item[4] }}"
+            suspect_first_name: "${{ foreach.item[5] }}"
+            suspect_last_name: "${{ foreach.item[6] }}"
+            suspect_phone: "${{ foreach.item[10] }}"
+            suspect_state: "${{ foreach.item[7] }}"
+            suspect_zip: "${{ foreach.item[8] }}"
+            suspicious_activity_date: "{{ execution.startedAt }}"
+
+# Note some field contain a `$` whereas some do not, if your output value will be used within a sentence or some other text, it does not require this. Also the `id` of the document must be set.

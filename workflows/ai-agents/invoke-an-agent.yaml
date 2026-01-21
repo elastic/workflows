@@ -1,0 +1,74 @@
+# =============================================================================
+# Workflow: 🤖 Invoke an Agent
+# Category: ai-agents
+#
+# This workflow YAML defines a security operation named "Invoke an Agent,"
+# which can be triggered manually or by an alert. It includes two steps:
+# logging the event for debugging purposes and posting a request to a Kibana
+# agent for triaging the alert based on system instructions, with a timeout
+# of 600 seconds.
+#
+# Author: Elastic
+# Created: 2025-11-07
+# =============================================================================
+version: "1"
+name: 🤖 Invoke an Agent
+enabled: true
+
+# ---------------------------------------------------------------------------
+# TRIGGERS
+# ---------------------------------------------------------------------------
+# Defines how and when this workflow is executed. Supported trigger types:
+#   - manual: Run on-demand from the Kibana UI or API
+#   - scheduled: Run on a recurring schedule (every: "5m" or rrule)
+#   - alert: Run automatically when a security alert is triggered
+# ---------------------------------------------------------------------------
+triggers:
+  - type: manual
+  - type:  alert
+
+# ---------------------------------------------------------------------------
+# STEPS
+# ---------------------------------------------------------------------------
+# The sequence of actions this workflow performs. Each step executes an
+# action and can reference outputs from previous steps. Key properties:
+#   - name: Unique identifier for referencing this step's output
+#   - type: The action to perform (http, elasticsearch.search, foreach, etc.)
+#   - with: Parameters passed to the action
+#   - condition: Optional expression to conditionally run the step
+#   - on-failure: Error handling configuration (retry, continue, etc.)
+# Access step outputs using {{ steps.step_name.output.field }} syntax
+# ---------------------------------------------------------------------------
+steps:
+
+  # -------------------------------------------------------------------------
+  # STEP 1: log_for_debug
+  # -------------------------------------------------------------------------
+  # Logs debug information to help troubleshoot workflow execution.
+  # Liquid syntax used:
+  # - `json` - Converts object to JSON string
+  # -------------------------------------------------------------------------
+  - name: log_for_debug
+    type: console
+    with:
+      message: "{{ event | json }}"
+
+  # -------------------------------------------------------------------------
+  # STEP 2: kibana_post_agent_builder_converse_step
+  # -------------------------------------------------------------------------
+  # Invokes an AI agent via the Kibana Agent Builder API (POST
+  # /api/agent/chat).
+  # The agent uses configured tools and knowledge to analyze input and
+  # respond.
+  # Required: agentId, conversationId (or create new), input message.
+  # Output: {{ steps.kibana_post_agent_builder_converse_step.output.message
+  # }} contains the agent response.
+  # Liquid syntax used:
+  # - `json` - Converts object to JSON string
+  # -------------------------------------------------------------------------
+  - name: kibana_post_agent_builder_converse_step
+    type: kibana.post_agent_builder_converse
+    with:
+      agent_id: alert.triage
+      input: "Triage the following alert based on your system instructions: {{event | json}}"
+    timeout: 600s

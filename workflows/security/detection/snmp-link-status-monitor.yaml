@@ -1,0 +1,198 @@
+# =============================================================================
+# Workflow: SNMP Link Status Monitor
+# Category: security/detection
+#
+# The SNMP Link Status Monitor workflow is designed to monitor SNMP link
+# status traps and send email notifications based on the link's state. It
+# triggers on alerts, logging received traps and checking their types to
+# determine if a link is down or up. If a link goes down, it sends an alert
+# email, logs the event, and creates an incident case; if a link recovers, it
+# sends a recovery email. The workflow concludes with a completion message,
+# ensuring all steps are logged.
+#
+# Author: Elastic
+# Created: 2025-12-06
+# Tags: network, snmp, alerting, link-status
+# =============================================================================
+version: '1'
+name: SNMP Link Status Monitor
+description: Monitors SNMP link down/up traps and sends email notifications
+enabled: true
+
+# ---------------------------------------------------------------------------
+# TAGS
+# ---------------------------------------------------------------------------
+# Categories and labels for organizing, filtering, and discovering workflows
+# in the Kibana UI. Tags help with:
+#   - Categorizing workflows by use case (security, observability, etc.)
+#   - Filtering in the workflow library
+#   - Grouping related workflows together
+# ---------------------------------------------------------------------------
+tags: ["network", "snmp", "alerting", "link-status"]
+
+
+# ---------------------------------------------------------------------------
+# TRIGGERS
+# ---------------------------------------------------------------------------
+# Defines how and when this workflow is executed. Supported trigger types:
+#   - manual: Run on-demand from the Kibana UI or API
+#   - scheduled: Run on a recurring schedule (every: "5m" or rrule)
+#   - alert: Run automatically when a security alert is triggered
+# ---------------------------------------------------------------------------
+triggers:
+  - type: alert
+
+
+# ---------------------------------------------------------------------------
+# STEPS
+# ---------------------------------------------------------------------------
+# The sequence of actions this workflow performs. Each step executes an
+# action and can reference outputs from previous steps. Key properties:
+#   - name: Unique identifier for referencing this step's output
+#   - type: The action to perform (http, elasticsearch.search, foreach, etc.)
+#   - with: Parameters passed to the action
+#   - condition: Optional expression to conditionally run the step
+#   - on-failure: Error handling configuration (retry, continue, etc.)
+# Access step outputs using {{ steps.step_name.output.field }} syntax
+# ---------------------------------------------------------------------------
+steps:
+
+  # -------------------------------------------------------------------------
+  # STEP 1: log_trap_received
+  # -------------------------------------------------------------------------
+  # Logs debug information to help troubleshoot workflow execution.
+  # -------------------------------------------------------------------------
+  - name: log_trap_received
+    type: console
+    with:
+      message: "SNMP Trap Received"
+
+
+  # -------------------------------------------------------------------------
+  # STEP 2: check_trap_type
+  # -------------------------------------------------------------------------
+  # Evaluates a condition and executes different steps based on the result.
+  # Enables dynamic workflow behavior based on runtime data.
+  # -------------------------------------------------------------------------
+  - name: check_trap_type
+    type: if
+    condition: "snmp.trap_oid: '1.3.6.1.6.3.1.1.5.3'"
+    steps:
+
+      # -------------------------------------------------------------------------
+      # STEP 3: handle_link_down
+      # -------------------------------------------------------------------------
+      # Outputs a message to the workflow execution log for visibility.
+      # -------------------------------------------------------------------------
+      - name: handle_link_down
+        type: console
+        with:
+          message: "LINK DOWN detected!"
+      
+
+      # -------------------------------------------------------------------------
+      # STEP 4: send_link_down_email
+      # -------------------------------------------------------------------------
+      # Executes the email action with the configured parameters.
+      # -------------------------------------------------------------------------
+      - name: send_link_down_email
+        type: email
+        connector-id: "Elastic-Cloud-SMTP"
+        with:
+          to: 
+            - "user@example.com"
+          subject: "ALERT: Network Link Down"
+          message: "A network interface has gone DOWN and requires immediate attention."
+      
+
+      # -------------------------------------------------------------------------
+      # STEP 5: create_incident_case
+      # -------------------------------------------------------------------------
+      # Creates a new case using the Kibana Cases API (POST /api/cases).
+      # Cases provide a workspace for investigating and tracking security
+      # incidents.
+      # Required: title, description, owner (e.g., "securitySolution"), tags,
+      # severity.
+      # Output: {{ steps.create_incident_case.output.id }} contains the new case
+      # ID.
+      # -------------------------------------------------------------------------
+      - name: create_incident_case
+        type: kibana.createCaseDefaultSpace
+        with:
+          title: "Network Link Down Event"
+          description: "Automated case created for network link down event."
+          tags: 
+            - "network"
+            - "snmp"
+            - "link-down"
+            - "automated"
+          severity: "high"
+          owner: "securitySolution"
+          settings:
+            syncAlerts: true
+          connector:
+            id: "none"
+            name: "none"
+            type: ".none"
+            fields: null
+    
+    else:
+
+      # -------------------------------------------------------------------------
+      # STEP 6: check_if_link_up
+      # -------------------------------------------------------------------------
+      # Evaluates a condition and executes different steps based on the result.
+      # Enables dynamic workflow behavior based on runtime data.
+      # -------------------------------------------------------------------------
+      - name: check_if_link_up
+        type: if
+        condition: "snmp.trap_oid: '1.3.6.1.6.3.1.1.5.4'"
+        steps:
+
+          # -------------------------------------------------------------------------
+          # STEP 7: handle_link_up
+          # -------------------------------------------------------------------------
+          # Outputs a message to the workflow execution log for visibility.
+          # -------------------------------------------------------------------------
+          - name: handle_link_up
+            type: console
+            with:
+              message: "LINK UP detected - Recovery!"
+          
+
+          # -------------------------------------------------------------------------
+          # STEP 8: send_link_recovery_email
+          # -------------------------------------------------------------------------
+          # Executes the email action with the configured parameters.
+          # -------------------------------------------------------------------------
+          - name: send_link_recovery_email
+            type: email
+            connector-id: "Elastic-Cloud-SMTP"
+            with:
+              to:
+                - "user@example.com"
+              subject: "RECOVERY: Network Link Up"
+              message: "A previously down network interface has RECOVERED."
+        
+        else:
+
+          # -------------------------------------------------------------------------
+          # STEP 9: log_other_trap
+          # -------------------------------------------------------------------------
+          # Logs debug information to help troubleshoot workflow execution.
+          # -------------------------------------------------------------------------
+          - name: log_other_trap
+            type: console
+            with:
+              message: "Other SNMP trap received"
+
+
+  # -------------------------------------------------------------------------
+  # STEP 10: workflow_completion
+  # -------------------------------------------------------------------------
+  # Outputs a message to the workflow execution log for visibility.
+  # -------------------------------------------------------------------------
+  - name: workflow_completion
+    type: console
+    with:
+      message: "Workflow Completed"

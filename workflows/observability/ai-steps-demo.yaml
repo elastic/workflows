@@ -1,0 +1,334 @@
+# =============================================================================
+# Workflow: AI Steps Demo
+# Category: observability
+#
+# The workflow YAML defines a process for generating and handling
+# observability and security alerts using AI prompts via Azure OpenAI. It
+# includes steps to generate two types of alerts, set data variables, and
+# loop through the generated alerts to classify and summarize them. Depending
+# on the type of alert identified, it further determines severity for
+# observability alerts and safety status for security alerts, storing the
+# results for each alert type. The workflow is currently disabled and is
+# triggered manually.
+#
+# Author: Elastic
+# Created: 2026-01-14
+# =============================================================================
+name: AI Steps Demo
+enabled: false
+
+# ---------------------------------------------------------------------------
+# TRIGGERS
+# ---------------------------------------------------------------------------
+# Defines how and when this workflow is executed. Supported trigger types:
+#   - manual: Run on-demand from the Kibana UI or API
+#   - scheduled: Run on a recurring schedule (every: "5m" or rrule)
+#   - alert: Run automatically when a security alert is triggered
+# ---------------------------------------------------------------------------
+triggers:
+  - type: manual
+
+# ---------------------------------------------------------------------------
+# STEPS
+# ---------------------------------------------------------------------------
+# The sequence of actions this workflow performs. Each step executes an
+# action and can reference outputs from previous steps. Key properties:
+#   - name: Unique identifier for referencing this step's output
+#   - type: The action to perform (http, elasticsearch.search, foreach, etc.)
+#   - with: Parameters passed to the action
+#   - condition: Optional expression to conditionally run the step
+#   - on-failure: Error handling configuration (retry, continue, etc.)
+# Access step outputs using {{ steps.step_name.output.field }} syntax
+# ---------------------------------------------------------------------------
+steps:
+
+  # -------------------------------------------------------------------------
+  # STEP 1: generate_obs_alert
+  # -------------------------------------------------------------------------
+  # Uses a large language model to analyze data or generate text.
+  # Useful for summarization, classification, or intelligent processing.
+  # -------------------------------------------------------------------------
+  - name: generate_obs_alert
+    type: ai.prompt
+    connector-id: azure_open_ai
+    with:
+      prompt: |
+        You are a system that generates Observability alerts.
+        I need you to generate 2 alerts.
+      
+      schema: {
+        type: array,
+        items: {
+          "title": "ObservabilityAlert",
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["id", "severity", "message", "timestamp"],
+          "properties": {
+            "id": {
+              "type": "string",
+              "description": "Unique identifier of the alert",
+              "examples": ["cpu_high_usage", "service_down"]
+            },
+            "severity": {
+              "type": "string",
+              "description": "Alert severity level",
+              "enum": ["critical", "high", "medium", "low", "info"]
+            },
+            "message": {
+              "type": "string",
+              "description": "Human-readable alert description",
+              "minLength": 1,
+              "examples": ["CPU usage exceeded 90% for 5 minutes"]
+            },
+            "timestamp": {
+              "type": "string",
+              "description": "Alert creation time in ISO 8601 format",
+              "format": "date-time",
+              "examples": ["2026-01-13T09:45:00Z"]
+            },
+            "description": {
+            "type": "string",
+            "description": "Human-readable explanation of the security alert",
+            "minLength": 1,
+            "examples": [
+              "Multiple failed login attempts detected from a single IP address",
+              "Malware signature matched during endpoint scan"
+            ]
+          },
+          }
+        }
+      }
+
+
+  # -------------------------------------------------------------------------
+  # STEP 2: generate_sec_alert
+  # -------------------------------------------------------------------------
+  # Uses a large language model to analyze data or generate text.
+  # Useful for summarization, classification, or intelligent processing.
+  # -------------------------------------------------------------------------
+  - name: generate_sec_alert
+    type: ai.prompt
+    connector-id: azure_open_ai
+    with:
+      prompt: |
+        You are a system that generates Security alerts.
+        I need you to generate 3 alerts.
+      
+      schema:
+        type: array
+        items:
+          title: SecurityAlert
+          type: object
+          additionalProperties: false
+
+          required:
+            - id
+            - severity
+            - category
+            - timestamp
+
+          properties:
+            id:
+              type: string
+              description: Unique identifier of the security alert or detection rule
+              examples:
+                - bruteforce_login
+                - malware_detected
+
+            severity:
+              type: string
+              description: Security impact level
+              enum:
+                - critical
+                - high
+                - medium
+                - low
+                - informational
+
+            category:
+              type: string
+              description: Type of security threat
+              enum:
+                - authentication
+                - authorization
+                - malware
+                - network
+                - data_exfiltration
+                - vulnerability
+                - policy_violation
+
+            timestamp:
+              type: string
+              description: Time when the security event was detected (ISO 8601)
+              format: date-time
+              examples:
+                - "2026-01-13T10:02:00Z"
+
+            description:
+              type: string
+              description: Human-readable explanation of the security alert
+              minLength: 1
+              examples:
+                - Multiple failed login attempts detected from a single IP address
+                - Malicious file execution detected on endpoint
+
+
+  # -------------------------------------------------------------------------
+  # STEP 3: not_alert_data
+  # -------------------------------------------------------------------------
+  # Executes the data.set action with the configured parameters.
+  # -------------------------------------------------------------------------
+  - name: not_alert_data
+    type: data.set
+    with:
+      var: [
+        {
+          "foo": "bar"
+        },
+        {
+          "hello": "world"
+        }
+      ]
+
+
+  # -------------------------------------------------------------------------
+  # STEP 4: loop
+  # -------------------------------------------------------------------------
+  # Iterates over a collection of items, executing the nested steps for each.
+  # Access the current item via {{ item }} within the loop body.
+  # Liquid syntax used:
+  # - `concat` - Concatenates arrays
+  # - References output from previous step(s)
+  # -------------------------------------------------------------------------
+  - name: loop
+    type: foreach
+    foreach: '${{steps.generate_obs_alert.output.content | concat: steps.not_alert_data.output.var | concat: steps.generate_sec_alert.output.content}}'
+    steps:
+
+      # -------------------------------------------------------------------------
+      # STEP 5: identify_type
+      # -------------------------------------------------------------------------
+      # Executes the ai.classify action with the configured parameters.
+      # Liquid syntax used:
+      # - References current item in foreach loop
+      # -------------------------------------------------------------------------
+      - name: identify_type
+        type: ai.classify
+        connector-id: azure_open_ai
+        with:
+          input: ${{foreach.item}}
+          includeRationale: true
+          categories:
+            - "security alert"
+            - "observability alert"
+          fallbackCategory: other
+
+
+      # -------------------------------------------------------------------------
+      # STEP 6: get_summary
+      # -------------------------------------------------------------------------
+      # Executes the ai.summarize action with the configured parameters.
+      # Liquid syntax used:
+      # - References current item in foreach loop
+      # -------------------------------------------------------------------------
+      - name: get_summary
+        type: ai.summarize
+        connector-id: azure_open_ai
+        with:
+          input: ${{foreach.item}}
+
+
+      # -------------------------------------------------------------------------
+      # STEP 7: handle_observability_alert
+      # -------------------------------------------------------------------------
+      # Evaluates a condition and executes different steps based on the result.
+      # Enables dynamic workflow behavior based on runtime data.
+      # -------------------------------------------------------------------------
+      - name: handle_observability_alert
+        type: if
+        condition: 'steps.identify_type.output.category: observability*'
+        steps:
+
+          # -------------------------------------------------------------------------
+          # STEP 8: determine_severity
+          # -------------------------------------------------------------------------
+          # Executes the ai.classify action with the configured parameters.
+          # Liquid syntax used:
+          # - References current item in foreach loop
+          # -------------------------------------------------------------------------
+          - name: determine_severity
+            type: ai.classify
+            connector-id: azure_open_ai
+            with:
+              input: ${{foreach.item}}
+              includeRationale: true
+              categories:
+                - "critical"
+                - "high"
+                - "medium"
+                - "low"
+
+
+          # -------------------------------------------------------------------------
+          # STEP 9: debug_observability_alert
+          # -------------------------------------------------------------------------
+          # Executes the data.set action with the configured parameters.
+          # Liquid syntax used:
+          # - References output from previous step(s)
+          # - References current item in foreach loop
+          # -------------------------------------------------------------------------
+          - name: debug_observability_alert
+            type: data.set
+            with:
+              item: ${{foreach.item}}
+              type: ${{steps.identify_type.output.category}}
+              severity: ${{steps.determine_severity.output.category}}
+              summary: ${{steps.get_summary.output.content}}
+      
+
+      # -------------------------------------------------------------------------
+      # STEP 10: handle_security_alert
+      # -------------------------------------------------------------------------
+      # Evaluates a condition and executes different steps based on the result.
+      # Enables dynamic workflow behavior based on runtime data.
+      # -------------------------------------------------------------------------
+      - name: handle_security_alert
+        type: if
+        condition: 'steps.identify_type.output.category: security*'
+        steps:
+
+          # -------------------------------------------------------------------------
+          # STEP 11: determine_safety
+          # -------------------------------------------------------------------------
+          # Executes the ai.classify action with the configured parameters.
+          # Liquid syntax used:
+          # - References current item in foreach loop
+          # -------------------------------------------------------------------------
+          - name: determine_safety
+            type: ai.classify
+            connector-id: azure_open_ai
+            with:
+              input: ${{foreach.item}}
+              includeRationale: true
+              categories:
+                - "malicious"
+                - "not malicious"
+              fallbackCategory: other
+
+
+          # -------------------------------------------------------------------------
+          # STEP 12: debug_security_alert
+          # -------------------------------------------------------------------------
+          # Executes the data.set action with the configured parameters.
+          # Liquid syntax used:
+          # - References output from previous step(s)
+          # - References current item in foreach loop
+          # -------------------------------------------------------------------------
+          - name: debug_security_alert
+            type: data.set
+            with:
+              item: ${{foreach.item}}
+              type: ${{steps.identify_type.output.category}}
+              status: ${{steps.determine_safety.output.category}}
+              summary: ${{steps.get_summary.output.content}}
+

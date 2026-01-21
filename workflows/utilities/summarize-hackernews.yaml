@@ -1,0 +1,111 @@
+# =============================================================================
+# Workflow: Summarize Hackernews 🔸
+# Category: utilities
+#
+# The workflow named "Summarize Hackernews" retrieves the top 10 posts from
+# Hackernews within the last 24 hours and formats them for Slack. It can be
+# triggered manually or scheduled to run daily. The process involves making
+# an HTTP request to an API to fetch the posts, formatting the output for
+# Slack using OpenAI, and then sending the formatted message to a specified
+# Slack channel.
+#
+# Author: Elastic
+# Created: 2025-11-09
+# =============================================================================
+name: Summarize Hackernews 🔸
+description: Summarizes the top 10 Hackernews posts from the last 24 hours and sends them to Slack
+enabled: true
+
+# ---------------------------------------------------------------------------
+# TRIGGERS
+# ---------------------------------------------------------------------------
+# Defines how and when this workflow is executed. Supported trigger types:
+#   - manual: Run on-demand from the Kibana UI or API
+#   - scheduled: Run on a recurring schedule (every: "5m" or rrule)
+#   - alert: Run automatically when a security alert is triggered
+# ---------------------------------------------------------------------------
+triggers:
+  - type: manual
+  - type: scheduled
+    with:
+      rrule:
+        freq: DAILY
+        interval: 1
+        tzid: Etc/GMT+2
+        dtstart: 2025-01-01T09:00:00.000Z
+
+# ---------------------------------------------------------------------------
+# CONSTANTS
+# ---------------------------------------------------------------------------
+# Reusable configuration values defined once and referenced throughout the
+# workflow using {{ consts.key_name }} syntax. Use constants for:
+#   - API endpoints and URLs
+#   - API keys and authentication tokens (use secrets in production)
+#   - Environment-specific configuration
+#   - Values that may need to change across environments
+# ---------------------------------------------------------------------------
+consts:
+  firecrawlApiKey: secret
+
+# ---------------------------------------------------------------------------
+# STEPS
+# ---------------------------------------------------------------------------
+# The sequence of actions this workflow performs. Each step executes an
+# action and can reference outputs from previous steps. Key properties:
+#   - name: Unique identifier for referencing this step's output
+#   - type: The action to perform (http, elasticsearch.search, foreach, etc.)
+#   - with: Parameters passed to the action
+#   - condition: Optional expression to conditionally run the step
+#   - on-failure: Error handling configuration (retry, continue, etc.)
+# Access step outputs using {{ steps.step_name.output.field }} syntax
+# ---------------------------------------------------------------------------
+steps:
+
+  # -------------------------------------------------------------------------
+  # STEP 1: getHackernewsPosts
+  # -------------------------------------------------------------------------
+  # Fetches data from the Hacker News API.
+  # Liquid syntax used:
+  # - References workflow constant(s)
+  # -------------------------------------------------------------------------
+  - name: getHackernewsPosts
+    type: http
+    with:
+      url: https://api.firecrawl.dev/v2/scrape
+      method: POST
+      headers:
+        Authorization: Bearer {{consts.firecrawlApiKey}}
+      body:
+        url: https://news.ycombinator.com/news
+        formats:
+          - type: json
+            prompt: >-
+              Extract the top 10 results from Hackernews, with the title of the post, score, URL, and a summary of what
+              this post speaks about.
+
+  # -------------------------------------------------------------------------
+  # STEP 2: formatMessage
+  # -------------------------------------------------------------------------
+  # Executes the inference.completion action with the configured parameters.
+  # Liquid syntax used:
+  # - `json` - Converts object to JSON string
+  # - References output from previous step(s)
+  # -------------------------------------------------------------------------
+  - name: formatMessage
+    type: inference.completion
+    connector-id: openai
+    with:
+      input: "Take this JSON output of the top 10 HackerNews posts from today and format it nicely so it can be sent as a Slack message.\n\nOrder by the score of the post, higher score first.\n\n```json\n{{ steps.getHackernewsPosts.output.data.data.json.results | json }}\n```\n\nHere are some guidelines from Slack, on how to format the message:\nFormatting\n\nBold\tSurround text with asterisks: \n*your text*\nItalic\tSurround text with underscores:\n_your text_\nStrikethrough\tSurround text with tildes:\n~your text~\nCode\tSurround text with backticks:\n`your text`\nBlock quote\tAdd an angled bracket in front of text:\n>your text\nCode block\tSurround text with three backticks:\n```your text```\nLink\t\nSurround text with brackets, then surround the link with parentheses:\n[your text](the link)\n\nYour response should include ONLY the message to be sent to Slack and nothing else besides that.\nAlso, The message should always start with \"🗞️ Here's your Daily HN Digest by One Workflow:\"\n"
+
+  # -------------------------------------------------------------------------
+  # STEP 3: sendSlack
+  # -------------------------------------------------------------------------
+  # Executes the slack action with the configured parameters.
+  # Liquid syntax used:
+  # - References output from previous step(s)
+  # -------------------------------------------------------------------------
+  - name: sendSlack
+    type: slack
+    connector-id: slacky
+    with:
+      message: '{{steps.formatMessage.output[0].result}}'

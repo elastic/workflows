@@ -1,0 +1,168 @@
+# =============================================================================
+# Workflow: IP Reputation Check
+# Category: security/enrichment
+#
+# The "IP Reputation Check" workflow is designed to assess the reputation of
+# a given IP address using the AbuseIPDB API and enrich the findings with
+# geolocation data from IP-API. It consists of three main steps: checking the
+# IP's reputation, retrieving geolocation information, and formatting the
+# results into a comprehensive report. The workflow includes error handling
+# with retry mechanisms for API calls and provides a risk assessment based on
+# the abuse confidence score.
+#
+# Author: Elastic
+# Created: 2025-11-13
+# =============================================================================
+name: IP Reputation Check
+description: Check IP address reputation using AbuseIPDB and enrich with geolocation data.
+
+# ---------------------------------------------------------------------------
+# CONSTANTS
+# ---------------------------------------------------------------------------
+# Reusable configuration values defined once and referenced throughout the
+# workflow using {{ consts.key_name }} syntax. Use constants for:
+#   - API endpoints and URLs
+#   - API keys and authentication tokens (use secrets in production)
+#   - Environment-specific configuration
+#   - Values that may need to change across environments
+# ---------------------------------------------------------------------------
+consts:
+  api_key: API-KEY
+  abuseipdb_base_url: https://api.abuseipdb.com/api/v2
+  ipapi_base_url: http://ip-api.com/json
+
+# ---------------------------------------------------------------------------
+# INPUTS
+# ---------------------------------------------------------------------------
+# Runtime parameters provided when the workflow is triggered. Each input
+# can specify:
+#   - name: Unique identifier for the input
+#   - type: Data type (string, number, boolean, array, object)
+#   - required: Whether the input must be provided (default: false)
+#   - default: Default value if not provided
+# Reference inputs in steps using {{ inputs.input_name }} syntax
+# ---------------------------------------------------------------------------
+inputs:
+  - name: ip_address
+    type: string
+    description:
+      The IP address to check for malicious activity and threat intelligence
+      (e.g., 8.8.8.8)
+    required: true
+
+# ---------------------------------------------------------------------------
+# TRIGGERS
+# ---------------------------------------------------------------------------
+# Defines how and when this workflow is executed. Supported trigger types:
+#   - manual: Run on-demand from the Kibana UI or API
+#   - scheduled: Run on a recurring schedule (every: "5m" or rrule)
+#   - alert: Run automatically when a security alert is triggered
+# ---------------------------------------------------------------------------
+triggers:
+  - type: manual
+
+# ---------------------------------------------------------------------------
+# STEPS
+# ---------------------------------------------------------------------------
+# The sequence of actions this workflow performs. Each step executes an
+# action and can reference outputs from previous steps. Key properties:
+#   - name: Unique identifier for referencing this step's output
+#   - type: The action to perform (http, elasticsearch.search, foreach, etc.)
+#   - with: Parameters passed to the action
+#   - condition: Optional expression to conditionally run the step
+#   - on-failure: Error handling configuration (retry, continue, etc.)
+# Access step outputs using {{ steps.step_name.output.field }} syntax
+# ---------------------------------------------------------------------------
+steps:
+
+# -------------------------------------------------------------------------
+# STEP 1: check_abuseipdb
+# -------------------------------------------------------------------------
+# Queries the AbuseIPDB API to check IP reputation and abuse reports.
+# Returns abuse confidence score, report count, and geographic information.
+# Includes retry logic to handle transient failures gracefully.
+# Liquid syntax used:
+# - References workflow input parameter(s)
+# - References workflow constant(s)
+# -------------------------------------------------------------------------
+- name: check_abuseipdb
+  type: http
+  with:
+    url: "{{ consts.abuseipdb_base_url }}/check?ipAddress={{ inputs.ip_address }}&maxAgeInDays=90&verbose=true"
+    method: GET
+    headers:
+      Key: "{{ consts.api_key }}"
+      Accept: application/json
+  on-failure:
+    retry:
+      max-attempts: 2
+      delay: 3s
+    continue: true
+
+# -------------------------------------------------------------------------
+# STEP 2: get_geolocation
+# -------------------------------------------------------------------------
+# Retrieves geolocation data for an IP address including country, city, and
+# ISP.
+# Includes retry logic to handle transient failures gracefully.
+# Liquid syntax used:
+# - References workflow input parameter(s)
+# - References workflow constant(s)
+# -------------------------------------------------------------------------
+- name: get_geolocation
+  type: http
+  with:
+    url: "{{ consts.ipapi_base_url }}/{{ inputs.ip_address }}?fields=status,message,country,countryCode,region,regionName,city,zip,lat,lon,timezone,isp,org,as,asname,mobile,proxy,hosting"
+    method: GET
+  on-failure:
+    retry:
+      max-attempts: 2
+      delay: 2s
+    continue: true
+
+# -------------------------------------------------------------------------
+# STEP 3: format_results
+# -------------------------------------------------------------------------
+# Formats and displays the results in a human-readable report format.
+# This output is visible in the workflow execution logs.
+# Liquid syntax used:
+# - `{% if %}` - Conditional logic based on expression
+# - `{% elsif %}` - Additional condition branch
+# - References output from previous step(s)
+# - References workflow input parameter(s)
+# -------------------------------------------------------------------------
+- name: format_results
+  type: console
+  with:
+    message: |
+      === IP Threat Intelligence Report ===
+      IP Address: {{ inputs.ip_address }}
+      
+      AbuseIPDB Results:
+      - Abuse Confidence Score: {{ steps.check_abuseipdb.output.data.data.abuseConfidenceScore }}%
+      - Total Reports: {{ steps.check_abuseipdb.output.data.data.totalReports }}
+      - Is Whitelisted: {{ steps.check_abuseipdb.output.data.data.isWhitelisted }}
+      - Country: {{ steps.check_abuseipdb.output.data.data.countryCode }}
+      - Usage Type: {{ steps.check_abuseipdb.output.data.data.usageType }}
+      - ISP: {{ steps.check_abuseipdb.output.data.data.isp }}
+      - Domain: {{ steps.check_abuseipdb.output.data.data.domain }}
+      
+      Geolocation Results:
+      - Country: {{ steps.get_geolocation.output.data.country }} ({{ steps.get_geolocation.output.data.countryCode }})
+      - Region: {{ steps.get_geolocation.output.data.regionName }}
+      - City: {{ steps.get_geolocation.output.data.city }}
+      - ISP: {{ steps.get_geolocation.output.data.isp }}
+      - Organization: {{ steps.get_geolocation.output.data.org }}
+      - AS Name: {{ steps.get_geolocation.output.data.asname }}
+      - Is Proxy: {{ steps.get_geolocation.output.data.proxy }}
+      - Is Hosting: {{ steps.get_geolocation.output.data.hosting }}
+      - Is Mobile: {{ steps.get_geolocation.output.data.mobile }}
+      
+      Threat Assessment:
+      {% if steps.check_abuseipdb.output.data.abuseConfidenceScore > 75 %}
+      \u26A0\uFE0F HIGH RISK - This IP has a high abuse confidence score
+      {% elsif steps.check_abuseipdb.output.data.abuseConfidenceScore > 25 %}
+      \u26A1 MEDIUM RISK - This IP has been reported for abuse
+      {% else %}
+      \u2713 LOW RISK - No significant abuse reports
+      {% endif %}

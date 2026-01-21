@@ -1,0 +1,322 @@
+# =============================================================================
+# Workflow: Splunk Enrichment with VirusTotal and AI Analysis
+# Category: integrations/splunk
+#
+# This workflow YAML outlines a security operations process that automates
+# the creation of a case from an alert, enriches it with data from Splunk,
+# performs a VirusTotal lookup on the destination IP, and utilizes AI for
+# analysis. It includes steps for creating a case in Kibana, attaching
+# alerts, querying Splunk for relevant logs, and adding findings from both
+# VirusTotal and AI analysis to the case. The workflow concludes by logging
+# the completion of the case creation, ensuring a comprehensive investigation
+# and documentation of the security alert.
+#
+# Author: Elastic
+# Created: 2025-12-19
+# =============================================================================
+version: '1'
+
+name: Splunk Enrichment with VirusTotal and AI Analysis
+
+description: Creates a case from alert, enriches with Splunk data, checks destination IP on VirusTotal, AI summarizes findings
+
+
+# ---------------------------------------------------------------------------
+# TRIGGERS
+# ---------------------------------------------------------------------------
+# Defines how and when this workflow is executed. Supported trigger types:
+#   - manual: Run on-demand from the Kibana UI or API
+#   - scheduled: Run on a recurring schedule (every: "5m" or rrule)
+#   - alert: Run automatically when a security alert is triggered
+# ---------------------------------------------------------------------------
+triggers:
+- type: alert
+
+
+# ---------------------------------------------------------------------------
+# CONSTANTS
+# ---------------------------------------------------------------------------
+# Reusable configuration values defined once and referenced throughout the
+# workflow using {{ consts.key_name }} syntax. Use constants for:
+#   - API endpoints and URLs
+#   - API keys and authentication tokens (use secrets in production)
+#   - Environment-specific configuration
+#   - Values that may need to change across environments
+# ---------------------------------------------------------------------------
+consts:
+  splunk_url: <YOUR_SPLUNK_URL>/services/search/jobs
+  splunk_auth_token: <BASE64_ENCODED_CREDENTIALS>
+  vt_api_key: <YOUR_VIRUSTOTAL_API_KEY>
+  kibana_base_url: <YOUR_KIBANA_URL>
+
+
+# ---------------------------------------------------------------------------
+# STEPS
+# ---------------------------------------------------------------------------
+# The sequence of actions this workflow performs. Each step executes an
+# action and can reference outputs from previous steps. Key properties:
+#   - name: Unique identifier for referencing this step's output
+#   - type: The action to perform (http, elasticsearch.search, foreach, etc.)
+#   - with: Parameters passed to the action
+#   - condition: Optional expression to conditionally run the step
+#   - on-failure: Error handling configuration (retry, continue, etc.)
+# Access step outputs using {{ steps.step_name.output.field }} syntax
+# ---------------------------------------------------------------------------
+steps:
+
+# -------------------------------------------------------------------------
+# STEP 1: create_case
+# -------------------------------------------------------------------------
+# Creates a new case via POST /api/cases.
+# Cases track security incidents with title, description, severity, and
+# tags.
+# Output: The response includes the new case ID for attaching alerts or
+# comments.
+# Liquid syntax used:
+# - References trigger event data (e.g., alert details)
+# -------------------------------------------------------------------------
+- name: create_case
+  type: kibana.request
+  with:
+    method: POST
+    path: /api/cases
+    body:
+      title: "Investigation: {{ event.rule.name }}"
+      description: "Auto-generated case for alert investigation. Rule: {{ event.rule.name }}, Severity: {{ event.alerts[0].kibana.alert.severity }}, User: {{ event.alerts[0].user.name }}, Source IP: {{ event.alerts[0].source.ip }}, Destination IP: {{ event.alerts[0].destination.ip }}"
+      tags: ["automated", "splunk-enriched", "virustotal", "ai-analyzed"]
+      severity: "high"
+      owner: "securitySolution"
+      connector:
+        id: "none"
+        name: "none"
+        type: ".none"
+        fields: null
+      settings:
+        syncAlerts: true
+
+
+# -------------------------------------------------------------------------
+# STEP 2: attach_alert
+# -------------------------------------------------------------------------
+# Attaches a security alert to a case via POST
+# /api/cases/{caseId}/comments.
+# Links the alert to the case for consolidated investigation tracking.
+# Required fields: alertId, index, rule (id and name), owner, type:
+# "alert".
+# Liquid syntax used:
+# - References output from previous step(s)
+# - References trigger event data (e.g., alert details)
+# -------------------------------------------------------------------------
+- name: attach_alert
+  type: kibana.request
+  with:
+    method: POST
+    path: /api/cases/{{ steps.create_case.output.id }}/comments
+    body:
+      type: alert
+      alertId: "{{ event.alerts[0]._id }}"
+      index: "{{ event.alerts[0]._index }}"
+      owner: "securitySolution"
+      rule:
+        id: "{{ event.rule.id }}"
+        name: "{{ event.rule.name }}"
+
+
+# -------------------------------------------------------------------------
+# STEP 3: query_splunk
+# -------------------------------------------------------------------------
+# Executes a query against Splunk to retrieve security or log data.
+# Liquid syntax used:
+# - References workflow constant(s)
+# - References trigger event data (e.g., alert details)
+# -------------------------------------------------------------------------
+- name: query_splunk
+  type: http
+  with:
+    url: '{{ consts.splunk_url }}'
+    method: POST
+    headers:
+      Authorization: Basic {{ consts.splunk_auth_token }}
+      Content-Type: application/x-www-form-urlencoded
+    body: >-
+      search=search index=main {{ event.alerts[0].user.name }} | head 10 
+      | rex field=_raw "src_ip=(?<src_ip>\S+)" 
+      | rex field=_raw "dest_ip=(?<dest_ip>\S+)" 
+      | rex field=_raw "dest_port=(?<dest_port>\S+)"
+      | rex field=_raw "action=(?<action>\S+)"
+      | rex field=_raw "threat_id=(?<threat_id>\S+)"
+      | rex field=_raw "subject=\"(?<email_subject>[^\"]+)\""
+      | rex field=_raw "sender=\"(?<email_sender>[^\"]+)\""
+      | rex field=_raw "attachment=\"(?<attachment>[^\"]+)\""
+      | rex field=_raw "process=\"(?<process>[^\"]+)\""
+      | rex field=_raw "parent_process=\"(?<parent_process>[^\"]+)\""
+      | rex field=_raw "command_line=\"(?<command_line>[^\"]+)\""
+      | table _time host sourcetype src_ip dest_ip dest_port action threat_id email_subject email_sender attachment process parent_process command_line
+      &output_mode=json&exec_mode=oneshot
+    timeout: 60s
+
+
+# -------------------------------------------------------------------------
+# STEP 4: virustotal_lookup
+# -------------------------------------------------------------------------
+# Makes an API call to VirusTotal to check for malicious indicators.
+# Returns threat intelligence data including detection results and
+# reputation scores.
+# Liquid syntax used:
+# - References workflow constant(s)
+# - References trigger event data (e.g., alert details)
+# -------------------------------------------------------------------------
+- name: virustotal_lookup
+  type: http
+  with:
+    url: "https://www.virustotal.com/api/v3/ip_addresses/{{ event.alerts[0].destination.ip }}"
+    method: GET
+    headers:
+      Content-Type: application/json
+      x-apikey: "{{ consts.vt_api_key }}"
+    timeout: 30s
+
+
+# -------------------------------------------------------------------------
+# STEP 5: create_saved_search
+# -------------------------------------------------------------------------
+# Manages Kibana saved objects (dashboards, visualizations, etc.).
+# Liquid syntax used:
+# - References trigger event data (e.g., alert details)
+# -------------------------------------------------------------------------
+- name: create_saved_search
+  type: kibana.request
+  with:
+    method: POST
+    path: /api/saved_objects/search
+    body:
+      attributes:
+        title: "Investigation - {{ event.alerts[0].user.name }} - {{ event.rule.name }}"
+        kibanaSavedObjectMeta:
+          searchSourceJSON: '{"query":{"query":"user.name:{{ event.alerts[0].user.name }} OR source.ip:{{ event.alerts[0].source.ip }} OR destination.ip:{{ event.alerts[0].destination.ip }}","language":"kuery"},"indexRefName":"kibanaSavedObjectMeta.searchSourceJSON.index","filter":[]}'
+        columns: ["@timestamp", "message", "user.name", "source.ip", "destination.ip", "event.action"]
+        sort: [["@timestamp", "desc"]]
+      references:
+        - id: "security-solution-default"
+          name: "kibanaSavedObjectMeta.searchSourceJSON.index"
+          type: "index-pattern"
+
+
+# -------------------------------------------------------------------------
+# STEP 6: ai_analysis
+# -------------------------------------------------------------------------
+# Executes the inference.unified_completion action with the configured
+# parameters.
+# Liquid syntax used:
+# - `json` - Converts object to JSON string
+# - References output from previous step(s)
+# - References trigger event data (e.g., alert details)
+# -------------------------------------------------------------------------
+- name: ai_analysis
+  type: inference.unified_completion
+  connector-id: <YOUR_LLM_CONNECTOR_NAME>
+  with:
+    body:
+      messages:
+        - role: "system"
+          content: "You are a senior SOC analyst specializing in threat detection and incident response."
+        - role: "user"
+          content: "Analyze this security alert, related logs, and threat intelligence to determine the attack chain and provide recommendations. Alert: {{ event.rule.name }} - User {{ event.alerts[0].user.name }} from source IP {{ event.alerts[0].source.ip }} connecting to destination {{ event.alerts[0].destination.ip }}. Splunk logs: {{ steps.query_splunk.output.data.results | json }}. VirusTotal results for destination IP {{ event.alerts[0].destination.ip }}: {{ steps.virustotal_lookup.output.data.data | json }}. Provide: 1) Attack timeline 2) Severity assessment based on VirusTotal reputation 3) Recommended response actions"
+
+
+# -------------------------------------------------------------------------
+# STEP 7: add_splunk_findings
+# -------------------------------------------------------------------------
+# Adds a comment to a case via POST /api/cases/{caseId}/comments.
+# Comments document investigation findings, analyst notes, or action
+# summaries.
+# Liquid syntax used:
+# - `json` - Converts object to JSON string
+# - References output from previous step(s)
+# - References trigger event data (e.g., alert details)
+# -------------------------------------------------------------------------
+- name: add_splunk_findings
+  type: kibana.request
+  with:
+    method: POST
+    path: /api/cases/{{ steps.create_case.output.id }}/comments
+    body:
+      type: user
+      owner: "securitySolution"
+      comment: "SPLUNK CONTEXT ENRICHMENT for user {{ event.alerts[0].user.name }}: {{ steps.query_splunk.output.data.results | json }}"
+
+
+# -------------------------------------------------------------------------
+# STEP 8: add_discover_link
+# -------------------------------------------------------------------------
+# Adds a comment to a case via POST /api/cases/{caseId}/comments.
+# Comments document investigation findings, analyst notes, or action
+# summaries.
+# Liquid syntax used:
+# - References output from previous step(s)
+# - References workflow constant(s)
+# -------------------------------------------------------------------------
+- name: add_discover_link
+  type: kibana.request
+  with:
+    method: POST
+    path: /api/cases/{{ steps.create_case.output.id }}/comments
+    body:
+      type: user
+      owner: "securitySolution"
+      comment: "Investigate related logs in Discover: {{ consts.kibana_base_url }}/app/discover#/view/{{ steps.create_saved_search.output.id }}"
+
+
+# -------------------------------------------------------------------------
+# STEP 9: add_virustotal_findings
+# -------------------------------------------------------------------------
+# Adds a comment to a case via POST /api/cases/{caseId}/comments.
+# Comments document investigation findings, analyst notes, or action
+# summaries.
+# Liquid syntax used:
+# - `json` - Converts object to JSON string
+# - References output from previous step(s)
+# - References trigger event data (e.g., alert details)
+# -------------------------------------------------------------------------
+- name: add_virustotal_findings
+  type: kibana.request
+  with:
+    method: POST
+    path: /api/cases/{{ steps.create_case.output.id }}/comments
+    body:
+      type: user
+      owner: "securitySolution"
+      comment: "VIRUSTOTAL ANALYSIS for {{ event.alerts[0].destination.ip }} -- Reputation Score: {{ steps.virustotal_lookup.output.data.data.attributes.reputation }} | Country: {{ steps.virustotal_lookup.output.data.data.attributes.country }} | ASN: {{ steps.virustotal_lookup.output.data.data.attributes.asn }} | AS Owner: {{ steps.virustotal_lookup.output.data.data.attributes.as_owner }} | Network: {{ steps.virustotal_lookup.output.data.data.attributes.network }} | Tags: {{ steps.virustotal_lookup.output.data.data.attributes.tags | json }} | Malicious: {{ steps.virustotal_lookup.output.data.data.attributes.last_analysis_stats.malicious }} | Suspicious: {{ steps.virustotal_lookup.output.data.data.attributes.last_analysis_stats.suspicious }} | Harmless: {{ steps.virustotal_lookup.output.data.data.attributes.last_analysis_stats.harmless }} | Community Votes - Malicious: {{ steps.virustotal_lookup.output.data.data.attributes.total_votes.malicious }}, Harmless: {{ steps.virustotal_lookup.output.data.data.attributes.total_votes.harmless }} | VT Link: https://www.virustotal.com/gui/ip-address/{{ event.alerts[0].destination.ip }}"
+
+
+# -------------------------------------------------------------------------
+# STEP 10: add_ai_summary
+# -------------------------------------------------------------------------
+# Adds a comment to a case via POST /api/cases/{caseId}/comments.
+# Comments document investigation findings, analyst notes, or action
+# summaries.
+# Liquid syntax used:
+# - References output from previous step(s)
+# -------------------------------------------------------------------------
+- name: add_ai_summary
+  type: kibana.request
+  with:
+    method: POST
+    path: /api/cases/{{ steps.create_case.output.id }}/comments
+    body:
+      type: user
+      owner: "securitySolution"
+      comment: "AI INVESTIGATION SUMMARY: {{ steps.ai_analysis.output.choices[0].message.content }}"
+
+
+# -------------------------------------------------------------------------
+# STEP 11: log_complete
+# -------------------------------------------------------------------------
+# Logs debug information to help troubleshoot workflow execution.
+# Liquid syntax used:
+# - References output from previous step(s)
+# -------------------------------------------------------------------------
+- name: log_complete
+  type: console
+  with:
+    message: "Case created: {{ steps.create_case.output.id }} with Splunk, VirusTotal, saved search, and AI analysis"

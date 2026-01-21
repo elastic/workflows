@@ -1,0 +1,160 @@
+# =============================================================================
+# Workflow: Grant and Fetch Firebase Bearer token
+# Category: integrations/firebase
+#
+# This workflow YAML defines a process for granting and fetching a Firebase
+# Bearer token, triggered manually. It initiates a grant bearer token
+# workflow and polls for its completion by repeatedly checking the execution
+# status. If the workflow is not completed, it waits for 3 seconds before
+# checking again; once completed, it outputs the token to the console.
+#
+# Author: Elastic
+# Created: 2025-11-25
+# =============================================================================
+name: "Grant and Fetch Firebase Bearer token"
+description: "Runs grant_bearer_token_workflow and polls for execution completion"
+enabled: true
+
+
+# ---------------------------------------------------------------------------
+# TRIGGERS
+# ---------------------------------------------------------------------------
+# Defines how and when this workflow is executed. Supported trigger types:
+#   - manual: Run on-demand from the Kibana UI or API
+#   - scheduled: Run on a recurring schedule (every: "5m" or rrule)
+#   - alert: Run automatically when a security alert is triggered
+# ---------------------------------------------------------------------------
+triggers:
+  - type: manual
+
+
+# ---------------------------------------------------------------------------
+# CONSTANTS
+# ---------------------------------------------------------------------------
+# Reusable configuration values defined once and referenced throughout the
+# workflow using {{ consts.key_name }} syntax. Use constants for:
+#   - API endpoints and URLs
+#   - API keys and authentication tokens (use secrets in production)
+#   - Environment-specific configuration
+#   - Values that may need to change across environments
+# ---------------------------------------------------------------------------
+consts:
+  grant_bearer_token_workflow_id: <brant_bearer_token_workflow_id>
+
+
+
+# ---------------------------------------------------------------------------
+# STEPS
+# ---------------------------------------------------------------------------
+# The sequence of actions this workflow performs. Each step executes an
+# action and can reference outputs from previous steps. Key properties:
+#   - name: Unique identifier for referencing this step's output
+#   - type: The action to perform (http, elasticsearch.search, foreach, etc.)
+#   - with: Parameters passed to the action
+#   - condition: Optional expression to conditionally run the step
+#   - on-failure: Error handling configuration (retry, continue, etc.)
+# Access step outputs using {{ steps.step_name.output.field }} syntax
+# ---------------------------------------------------------------------------
+steps:
+
+  # -------------------------------------------------------------------------
+  # STEP 1: run_grant_bearer_token_workflow
+  # -------------------------------------------------------------------------
+  # Triggers another workflow to run via the Workflows API.
+  # Returns a workflowExecutionId to track the execution status.
+  # Liquid syntax used:
+  # - References workflow constant(s)
+  # -------------------------------------------------------------------------
+  - name: run_grant_bearer_token_workflow
+    type: kibana.request
+    with:
+      method: "POST"
+      path: "/api/workflows/{{ consts.grant_bearer_token_workflow_id }}/run"
+      body: 
+        {"inputs":{}}
+      headers:
+        Content-Type: application/json
+        kbn-xsrf: workflow
+        x-elastic-internal-origin: Kibana
+
+
+  # -------------------------------------------------------------------------
+  # STEP 2: poll_bearer_token_workflow
+  # -------------------------------------------------------------------------
+  # Iterates over a collection of items, executing the nested steps for each.
+  # Access the current item via {{ item }} within the loop body.
+  # Liquid syntax used:
+  # - `json` - Converts object to JSON string
+  # - `split` - Splits string into array
+  # -------------------------------------------------------------------------
+  - name: poll_bearer_token_workflow
+    type: foreach
+    foreach: "{{'0123456789' | split: ''| json : 2}}"
+    on-failure:
+      continue: true
+    steps:
+
+      # -------------------------------------------------------------------------
+      # STEP 3: get_bearer_token_workflow_output
+      # -------------------------------------------------------------------------
+      # Retrieves the status and output of a workflow execution.
+      # Use this to poll for workflow completion or get results.
+      # Liquid syntax used:
+      # - References output from previous step(s)
+      # -------------------------------------------------------------------------
+      - name: get_bearer_token_workflow_output
+        type: kibana.request
+        with:
+          method: "GET"
+          path: "/api/workflowExecutions/{{ steps.run_grant_bearer_token_workflow.output.workflowExecutionId }}"
+          headers:
+            Content-Type: application/json
+            kbn-xsrf: workflow
+            x-elastic-internal-origin: Kibana
+
+      # -------------------------------------------------------------------------
+      # STEP 4: check_status_code
+      # -------------------------------------------------------------------------
+      # Evaluates a condition and executes different steps based on the result.
+      # Enables dynamic workflow behavior based on runtime data.
+      # -------------------------------------------------------------------------
+      - name: check_status_code
+        type: if
+        condition: "NOT steps.get_bearer_token_workflow_output.output.status: completed"
+        steps:
+
+          # -------------------------------------------------------------------------
+          # STEP 5: wait
+          # -------------------------------------------------------------------------
+          # Pauses workflow execution for a specified duration.
+          # Useful for waiting on async operations or rate-limiting API calls.
+          # -------------------------------------------------------------------------
+          - name: wait
+            type: wait
+            with:
+              duration: 3s
+        else:
+
+          # -------------------------------------------------------------------------
+          # STEP 6: exit_poll
+          # -------------------------------------------------------------------------
+          # Sends a HTTP request to a Kibana API.
+          # -------------------------------------------------------------------------
+          - name: exit_poll
+            type: kibana.request
+            with:
+              method: "GET"
+              path: "/123123"
+
+
+  # -------------------------------------------------------------------------
+  # STEP 7: output_token
+  # -------------------------------------------------------------------------
+  # Outputs a message to the workflow execution log for visibility.
+  # Liquid syntax used:
+  # - References output from previous step(s)
+  # -------------------------------------------------------------------------
+  - name: output_token
+    type: console
+    with:
+      message: "{{steps.get_bearer_token_workflow_output.output.stepExecutions[1].output.data.idToken}}"

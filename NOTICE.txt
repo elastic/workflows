@@ -1,0 +1,6 @@
+Elastic Workflows
+Copyright 2025 Elasticsearch B.V.
+
+This product includes software developed at Elastic
+(https://www.elastic.co/).
+

@@ -1,0 +1,82 @@
+# =============================================================================
+# Workflow: 🔲 Log Injection
+# Category: data
+#
+# The workflow YAML named "Log Injection" is designed for manual execution It
+# takes a string input called `phase_results`, which contains structured
+# event data related to file creation. The workflow includes a single step
+# that sends a POST request to an Elasticsearch endpoint, utilizing a
+# specified pipeline for processing the log data, with authorization and
+# content-type headers included.
+#
+# Author: Elastic
+# Created: 2025-12-04
+# =============================================================================
+name: 🔲 Log Injection
+enabled: true
+
+# ---------------------------------------------------------------------------
+# TAGS
+# ---------------------------------------------------------------------------
+# Categories and labels for organizing, filtering, and discovering workflows
+# in the Kibana UI. Tags help with:
+#   - Categorizing workflows by use case (security, observability, etc.)
+#   - Filtering in the workflow library
+#   - Grouping related workflows together
+# ---------------------------------------------------------------------------
+tags: []
+triggers:
+  - type: manual
+
+# ---------------------------------------------------------------------------
+# INPUTS
+# ---------------------------------------------------------------------------
+# Runtime parameters provided when the workflow is triggered. Each input
+# can specify:
+#   - name: Unique identifier for the input
+#   - type: Data type (string, number, boolean, array, object)
+#   - required: Whether the input must be provided (default: false)
+#   - default: Default value if not provided
+# Reference inputs in steps using {{ inputs.input_name }} syntax
+# ---------------------------------------------------------------------------
+inputs:
+  - name: phase_results
+    type: string
+    default: >-
+      {"@timestamp": "2025-11-15T10:30:00Z","event.category": ["file"],"event.type": ["creation"],"event.action":
+      "creation","host.name": "abc","host.ip": "1.2.3.4","file.path": "123","file.name": "hello","file.extension":
+      "com","file.directory": "123","process.name": "process","process.command_line": "oh no command","tags":
+      ["emulated", "log-injection"],"smeagol.emulation_id": "123","smeagol.phase": 1}
+
+# ---------------------------------------------------------------------------
+# STEPS
+# ---------------------------------------------------------------------------
+# The sequence of actions this workflow performs. Each step executes an
+# action and can reference outputs from previous steps. Key properties:
+#   - name: Unique identifier for referencing this step's output
+#   - type: The action to perform (http, elasticsearch.search, foreach, etc.)
+#   - with: Parameters passed to the action
+#   - condition: Optional expression to conditionally run the step
+#   - on-failure: Error handling configuration (retry, continue, etc.)
+# Access step outputs using {{ steps.step_name.output.field }} syntax
+# ---------------------------------------------------------------------------
+steps:
+
+  # -------------------------------------------------------------------------
+  # STEP 1: elasticsearch_request_step
+  # -------------------------------------------------------------------------
+  # Executes a search query against one or more Elasticsearch indices.
+  # Output: {{ steps.elasticsearch_request_step.output.hits }} contains
+  # matching documents.
+  # Liquid syntax used:
+  # - References workflow input parameter(s)
+  # -------------------------------------------------------------------------
+  - name: elasticsearch_request_step
+    type: elasticsearch.request
+    with:
+      method: POST
+      path: emulation-logs/_doc?pipeline=smeagol-log-injection
+      headers:
+        Authorization: secret
+        content-type: application/json
+      body: ${{inputs.phase_results}}

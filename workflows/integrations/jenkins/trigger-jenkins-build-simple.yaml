@@ -1,0 +1,169 @@
+# =============================================================================
+# Workflow: 🚀 Trigger Jenkins Build - Simple
+# Category: integrations/jenkins
+#
+# This workflow YAML defines a process to trigger a Jenkins build for a demo
+# application and report the result. It includes steps to obtain a security
+# crumb, initiate the build with optional parameters, wait briefly, and then
+# check the build status. Finally, it outputs the build number and URL to the
+# console, ensuring the operation is manual and can be executed as needed.
+#
+# Author: Elastic
+# Created: 2025-11-17
+# Tags: jenkins, trigger, deployment
+# =============================================================================
+name: 🚀 Trigger Jenkins Build - Simple
+description: Kicks off a Jenkins build and reports the result
+enabled: true
+
+# ---------------------------------------------------------------------------
+# TAGS
+# ---------------------------------------------------------------------------
+# Categories and labels for organizing, filtering, and discovering workflows
+# in the Kibana UI. Tags help with:
+#   - Categorizing workflows by use case (security, observability, etc.)
+#   - Filtering in the workflow library
+#   - Grouping related workflows together
+# ---------------------------------------------------------------------------
+tags: ["jenkins", "trigger", "deployment"]
+
+
+# ---------------------------------------------------------------------------
+# CONSTANTS
+# ---------------------------------------------------------------------------
+# Reusable configuration values defined once and referenced throughout the
+# workflow using {{ consts.key_name }} syntax. Use constants for:
+#   - API endpoints and URLs
+#   - API keys and authentication tokens (use secrets in production)
+#   - Environment-specific configuration
+#   - Values that may need to change across environments
+# ---------------------------------------------------------------------------
+consts:
+  jenkinsUrl: "http://a987b67d35f644f578e3bf9a87e83154-73333284.us-east-2.elb.amazonaws.com"
+  jobName: "demo-app"
+  jenkinsAuth: ""
+
+
+# ---------------------------------------------------------------------------
+# INPUTS
+# ---------------------------------------------------------------------------
+# Runtime parameters provided when the workflow is triggered. Each input
+# can specify:
+#   - name: Unique identifier for the input
+#   - type: Data type (string, number, boolean, array, object)
+#   - required: Whether the input must be provided (default: false)
+#   - default: Default value if not provided
+# Reference inputs in steps using {{ inputs.input_name }} syntax
+# ---------------------------------------------------------------------------
+inputs:
+  - name: elastic_endpoint
+    type: string
+    required: false
+    default: "https://o11y-project-c09e2f.kb.us-east-1.aws.elastic.cloud"
+    description: "Elastic endpoint URL"
+
+
+# ---------------------------------------------------------------------------
+# TRIGGERS
+# ---------------------------------------------------------------------------
+# Defines how and when this workflow is executed. Supported trigger types:
+#   - manual: Run on-demand from the Kibana UI or API
+#   - scheduled: Run on a recurring schedule (every: "5m" or rrule)
+#   - alert: Run automatically when a security alert is triggered
+# ---------------------------------------------------------------------------
+triggers:
+  - type: manual
+
+
+# ---------------------------------------------------------------------------
+# STEPS
+# ---------------------------------------------------------------------------
+# The sequence of actions this workflow performs. Each step executes an
+# action and can reference outputs from previous steps. Key properties:
+#   - name: Unique identifier for referencing this step's output
+#   - type: The action to perform (http, elasticsearch.search, foreach, etc.)
+#   - with: Parameters passed to the action
+#   - condition: Optional expression to conditionally run the step
+#   - on-failure: Error handling configuration (retry, continue, etc.)
+# Access step outputs using {{ steps.step_name.output.field }} syntax
+# ---------------------------------------------------------------------------
+steps:
+
+  # -------------------------------------------------------------------------
+  # STEP 1: get_crumb
+  # -------------------------------------------------------------------------
+  # Retrieves a CSRF crumb token required for Jenkins API authentication.
+  # Liquid syntax used:
+  # - References workflow constant(s)
+  # -------------------------------------------------------------------------
+  - name: get_crumb
+    type: http
+    with:
+      url: "{{ consts.jenkinsUrl }}/crumbIssuer/api/json"
+      method: GET
+      headers:
+        Authorization: "Basic {{ consts.jenkinsAuth }}"
+
+
+  # -------------------------------------------------------------------------
+  # STEP 2: trigger_build
+  # -------------------------------------------------------------------------
+  # Triggers a Jenkins build job, optionally with parameters.
+  # Liquid syntax used:
+  # - References output from previous step(s)
+  # - References workflow input parameter(s)
+  # - References workflow constant(s)
+  # -------------------------------------------------------------------------
+  - name: trigger_build
+    type: http
+    with:
+      url: "{{ consts.jenkinsUrl }}/job/{{ consts.jobName }}/buildWithParameters?ELASTIC_ENDPOINT={{ inputs.elastic_endpoint }}"
+      method: POST
+      headers:
+        Authorization: "Basic {{ consts.jenkinsAuth }}"
+        Jenkins-Crumb: "{{ steps.get_crumb.output.crumb }}"
+
+
+  # -------------------------------------------------------------------------
+  # STEP 3: wait_for_start
+  # -------------------------------------------------------------------------
+  # Pauses workflow execution for a specified duration.
+  # Useful for waiting on async operations or rate-limiting API calls.
+  # -------------------------------------------------------------------------
+  - name: wait_for_start
+    type: wait
+    with:
+      duration: "5s"
+
+
+  # -------------------------------------------------------------------------
+  # STEP 4: get_build_status
+  # -------------------------------------------------------------------------
+  # Triggers a Jenkins build job, optionally with parameters.
+  # Liquid syntax used:
+  # - References workflow constant(s)
+  # -------------------------------------------------------------------------
+  - name: get_build_status
+    type: http
+    with:
+      url: "{{ consts.jenkinsUrl }}/job/{{ consts.jobName }}/lastBuild/api/json"
+      method: GET
+      headers:
+        Authorization: "Basic {{ consts.jenkinsAuth }}"
+
+
+  # -------------------------------------------------------------------------
+  # STEP 5: show_result
+  # -------------------------------------------------------------------------
+  # Formats and displays the results in a human-readable report format.
+  # This output is visible in the workflow execution logs.
+  # Liquid syntax used:
+  # - References output from previous step(s)
+  # -------------------------------------------------------------------------
+  - name: show_result
+    type: console
+    with:
+      message: |
+        ✅ Build triggered!
+        Build: #{{ steps.get_build_status.output.data.number }}
+        URL: {{ steps.get_build_status.output.data.url }}

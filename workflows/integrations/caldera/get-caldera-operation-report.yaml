@@ -1,0 +1,112 @@
+# =============================================================================
+# Workflow: Get Caldera Operation Report
+# Category: integrations/caldera
+#
+# The workflow named "Get Caldera Operation Report" is designed to retrieve a
+# detailed operation report from MITRE Caldera using a specified operation
+# ID. It utilizes an HTTP POST request to the Caldera API, including
+# necessary headers and a body parameter to enable agent output. The workflow
+# is triggered manually and includes error handling with a retry mechanism
+# for failed requests. Finally, it formats and displays the output in the
+# console.
+#
+# Author: Elastic
+# Created: 2025-11-13
+# =============================================================================
+name: Get Caldera Operation Report
+enabled: true
+description: Retrieves a detailed operation report from MITRE Caldera
+
+# ---------------------------------------------------------------------------
+# CONSTANTS
+# ---------------------------------------------------------------------------
+# Reusable configuration values defined once and referenced throughout the
+# workflow using {{ consts.key_name }} syntax. Use constants for:
+#   - API endpoints and URLs
+#   - API keys and authentication tokens (use secrets in production)
+#   - Environment-specific configuration
+#   - Values that may need to change across environments
+# ---------------------------------------------------------------------------
+consts:
+  caldera_base_url: http://example.com:8888
+  caldera_api_key: api-key
+  include_output: true
+
+# ---------------------------------------------------------------------------
+# INPUTS
+# ---------------------------------------------------------------------------
+# Runtime parameters provided when the workflow is triggered. Each input
+# can specify:
+#   - name: Unique identifier for the input
+#   - type: Data type (string, number, boolean, array, object)
+#   - required: Whether the input must be provided (default: false)
+#   - default: Default value if not provided
+# Reference inputs in steps using {{ inputs.input_name }} syntax
+# ---------------------------------------------------------------------------
+inputs:
+  - name: operation_id
+    type: string
+    description: The Caldera operation ID to retrieve the report for
+    required: true
+
+# ---------------------------------------------------------------------------
+# TRIGGERS
+# ---------------------------------------------------------------------------
+# Defines how and when this workflow is executed. Supported trigger types:
+#   - manual: Run on-demand from the Kibana UI or API
+#   - scheduled: Run on a recurring schedule (every: "5m" or rrule)
+#   - alert: Run automatically when a security alert is triggered
+# ---------------------------------------------------------------------------
+triggers:
+  - type: manual
+
+# ---------------------------------------------------------------------------
+# STEPS
+# ---------------------------------------------------------------------------
+# The sequence of actions this workflow performs. Each step executes an
+# action and can reference outputs from previous steps. Key properties:
+#   - name: Unique identifier for referencing this step's output
+#   - type: The action to perform (http, elasticsearch.search, foreach, etc.)
+#   - with: Parameters passed to the action
+#   - condition: Optional expression to conditionally run the step
+#   - on-failure: Error handling configuration (retry, continue, etc.)
+# Access step outputs using {{ steps.step_name.output.field }} syntax
+# ---------------------------------------------------------------------------
+steps:
+
+  # -------------------------------------------------------------------------
+  # STEP 1: get_operation_report
+  # -------------------------------------------------------------------------
+  # Interacts with MITRE Caldera to create or manage adversary operations.
+  # Includes retry logic to handle transient failures gracefully.
+  # Liquid syntax used:
+  # - References workflow input parameter(s)
+  # - References workflow constant(s)
+  # -------------------------------------------------------------------------
+  - name: get_operation_report
+    type: http
+    with:
+      url: "{{ consts.caldera_base_url }}/api/v2/operations/{{ inputs.operation_id }}/report"
+      method: POST
+      headers:
+        KEY: "{{ consts.caldera_api_key }}"
+        Content-Type: application/json
+      body:
+        enable_agent_output: {{ consts.include_output }}
+    on-failure:
+      retry:
+        max-attempts: 2
+        delay: 3s
+
+  # -------------------------------------------------------------------------
+  # STEP 2: format_output
+  # -------------------------------------------------------------------------
+  # Formats and displays the results in a human-readable report format.
+  # This output is visible in the workflow execution logs.
+  # Liquid syntax used:
+  # - References output from previous step(s)
+  # -------------------------------------------------------------------------
+  - name: format_output
+    type: console
+    with:
+      message: ${{ steps.get_operation_report.output.data }}

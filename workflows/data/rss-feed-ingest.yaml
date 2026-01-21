@@ -1,0 +1,144 @@
+# =============================================================================
+# Workflow: RSS Feed Ingest
+# Category: data
+#
+# The "RSS Feed Ingest" workflow is designed to manually fetch and process
+# RSS feeds from various cybersecurity sources. It iterates through a list of
+# predefined URLs, retrieves the RSS content, and parses it to extract
+# relevant information such as titles, links, publication dates, and
+# descriptions. The parsed data is then indexed into an Elasticsearch
+# database for further analysis. Currently, the workflow is disabled.
+#
+# Author: Elastic
+# Created: 2025-12-03
+# =============================================================================
+name: RSS Feed Ingest
+enabled: false
+
+# ---------------------------------------------------------------------------
+# TRIGGERS
+# ---------------------------------------------------------------------------
+# Defines how and when this workflow is executed. Supported trigger types:
+#   - manual: Run on-demand from the Kibana UI or API
+#   - scheduled: Run on a recurring schedule (every: "5m" or rrule)
+#   - alert: Run automatically when a security alert is triggered
+# ---------------------------------------------------------------------------
+triggers:
+  - type: manual
+
+# ---------------------------------------------------------------------------
+# CONSTANTS
+# ---------------------------------------------------------------------------
+# Reusable configuration values defined once and referenced throughout the
+# workflow using {{ consts.key_name }} syntax. Use constants for:
+#   - API endpoints and URLs
+#   - API keys and authentication tokens (use secrets in production)
+#   - Environment-specific configuration
+#   - Values that may need to change across environments
+# ---------------------------------------------------------------------------
+consts:
+  urls:
+    - "https://www.bleepingcomputer.com/feed/"
+    - "https://feeds.feedburner.com/TheHackersNews?format=xml"
+    - "https://www.cisa.gov/news.xml"
+    - "https://www.cisa.gov/cybersecurity-advisories/all.xml"
+    - "https://securityboulevard.com/feed/"
+    - "https://www.cisecurity.org/feed/blog"
+    - "https://cyberscoop.com/feed/"
+    - "https://www.itnews.com.au/RSS/rss.ashx"
+    # - "https://news.risky.biz/rss/"
+
+# ---------------------------------------------------------------------------
+# STEPS
+# ---------------------------------------------------------------------------
+# The sequence of actions this workflow performs. Each step executes an
+# action and can reference outputs from previous steps. Key properties:
+#   - name: Unique identifier for referencing this step's output
+#   - type: The action to perform (http, elasticsearch.search, foreach, etc.)
+#   - with: Parameters passed to the action
+#   - condition: Optional expression to conditionally run the step
+#   - on-failure: Error handling configuration (retry, continue, etc.)
+# Access step outputs using {{ steps.step_name.output.field }} syntax
+# ---------------------------------------------------------------------------
+steps:
+
+  # -------------------------------------------------------------------------
+  # STEP 1: foreach_step
+  # -------------------------------------------------------------------------
+  # Iterates over a collection of items, executing the nested steps for each.
+  # Access the current item via {{ item }} within the loop body.
+  # Liquid syntax used:
+  # - References workflow constant(s)
+  # -------------------------------------------------------------------------
+  - name: foreach_step
+    type: foreach
+    foreach: "{{consts.urls}}"
+    steps:
+
+      # -------------------------------------------------------------------------
+      # STEP 2: fetch-rss
+      # -------------------------------------------------------------------------
+      # Fetches an RSS or Atom feed for content ingestion.
+      # Liquid syntax used:
+      # - References current item in foreach loop
+      # -------------------------------------------------------------------------
+      - name: fetch-rss
+        type: http
+        with:
+          url: "{{foreach.items[foreach.index]}}"
+          method: GET
+          timeout: "30s"
+
+      # -------------------------------------------------------------------------
+      # STEP 3: parse_feed
+      # -------------------------------------------------------------------------
+      # Executes a Painless script for data transformation.
+      # Painless is Elasticsearch's secure scripting language.
+      # Liquid syntax used:
+      # - `json` - Converts object to JSON string
+      # - `replace` - Replaces substring occurrences
+      # -------------------------------------------------------------------------
+      - name: parse_feed
+        type: kibana.request
+        with:
+          method: "POST"
+          path: "/api/painless_lab/execute"
+          headers:
+            x-elastic-internal-origin: kibana
+          body: '{"script": {"source": "String rss = params.data;def matcher = /%item%(.*?)%\\/item%/.matcher(rss);String output = \"[\";while (matcher.find()) {    String middle = matcher.group();    output += \"{\";        def title_matcher = /%title%(.*?)%\\/title%/.matcher(middle);    if (title_matcher.find()) {        output += \"\\\"title\\\": \\\"\" + title_matcher.group().replace(\"%title%\", \"\").replace(\"%/title%\", \"\").replace(\"\\\"\", \"\\\\\\\"\") + \"\\\",\";    } else {        output += \"\\\"title\\\": \\\"\" + \"\\\",\";    }    def link_matcher = /%link%(.*?)%\\/link%/.matcher(middle);    if (link_matcher.find()) {        output += \"\\\"link\\\": \\\"\" + link_matcher.group().replace(\"%link%\", \"\").replace(\"%/link%\", \"\").replace(\"\\\"\", \"\\\\\\\"\") + \"\\\",\";    } else {        output += \"\\\"link\\\": \\\"\" + \"\\\",\";    }    def pubDate_matcher = /%pubDate%(.*?)%\\/pubDate%/.matcher(middle);    if (pubDate_matcher.find()) {        output += \"\\\"pubDate\\\": \\\"\" + pubDate_matcher.group().replace(\"%pubDate%\", \"\").replace(\"%/pubDate%\", \"\").replace(\"\\\"\", \"\\\\\\\"\") + \"\\\",\";    } else {        output += \"\\\"pubDate\\\": \\\"\" + \"\\\",\";    }    def description_matcher = /%description%(.*?)%\\/description%/.matcher(middle);    if (description_matcher.find()) {        output += \"\\\"description\\\": \\\"\" + description_matcher.group().replace(\"%description%\", \"\").replace(\"%/description%\", \"\").replace(\"\\\"\", \"\\\\\\\"\") + \"\\\"\";    } else {        output += \"\\\"description\\\": \\\"\" + \"\\\"\";    }    output += \"},\";}output = output.substring(0, output.length() -1).replace(\"%![CDATA[\", \"\").replace(\" [...]]]%\", \"\");output += \"]\";return output;", "params": {"data": {{steps["fetch-rss"].output.data | json | replace: "<", "%" | replace: ">", "%" | replace: "\\r", "" | replace: "\\n", "" }}}}}'
+
+      # -------------------------------------------------------------------------
+      # STEP 4: index-article
+      # -------------------------------------------------------------------------
+      # Iterates over a collection of items, executing the nested steps for each.
+      # Access the current item via {{ item }} within the loop body.
+      # Liquid syntax used:
+      # - `json_parse` - Parses JSON string to object
+      # - References output from previous step(s)
+      # -------------------------------------------------------------------------
+      - name: index-article
+        type: foreach
+        foreach: "{{ steps.parse_feed.output.result | json_parse }}"
+        steps:
+
+          # -------------------------------------------------------------------------
+          # STEP 5: index_article
+          # -------------------------------------------------------------------------
+          # Executes a search query against one or more Elasticsearch indices.
+          # Output: {{ steps.index_article.output.hits }} contains matching
+          # documents.
+          # Liquid syntax used:
+          # - `json` - Converts object to JSON string
+          # - `date` - Formats date/time value
+          # - References current item in foreach loop
+          # -------------------------------------------------------------------------
+          - name: index_article
+            type: elasticsearch.request
+            with:
+              method: "POST"
+              path: "/logs/_bulk"
+              headers: 
+                content-type: application/x-ndjson
+              body: |
+                { "create": {} }
+                {"rss.title": {{ foreach.items[foreach.index].title | json }}, "@timestamp": {{ foreach.items[foreach.index].pubDate | date: "%Y-%m-%dT%H:%M:%S%z" | json }}, "rss.link": {{ foreach.items[foreach.index].link | json }}, "rss.message": {{ foreach.items[foreach.index].description | json }}}

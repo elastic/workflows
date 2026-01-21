@@ -1,0 +1,92 @@
+# =============================================================================
+# Workflow: createCaseTool
+# Category: security/response
+#
+# The `createCaseTool` workflow allows an agent to manually create a case
+# with a specified title and description. It is enabled and categorized under
+# "Observability" and "AgentTool" tags. The workflow includes a single step
+# that utilizes the Kibana API to create a case in the default space, with
+# settings that specify high severity and automatic tagging.
+#
+# Author: Elastic
+# Created: 2025-11-19
+# Tags: Observability, AgentTool
+# =============================================================================
+name: createCaseTool
+description: A tool that let an Agent to create a case
+enabled: true
+
+# ---------------------------------------------------------------------------
+# TRIGGERS
+# ---------------------------------------------------------------------------
+# Defines how and when this workflow is executed. Supported trigger types:
+#   - manual: Run on-demand from the Kibana UI or API
+#   - scheduled: Run on a recurring schedule (every: "5m" or rrule)
+#   - alert: Run automatically when a security alert is triggered
+# ---------------------------------------------------------------------------
+triggers:
+  - type: manual
+
+# ---------------------------------------------------------------------------
+# TAGS
+# ---------------------------------------------------------------------------
+# Categories and labels for organizing, filtering, and discovering workflows
+# in the Kibana UI. Tags help with:
+#   - Categorizing workflows by use case (security, observability, etc.)
+#   - Filtering in the workflow library
+#   - Grouping related workflows together
+# ---------------------------------------------------------------------------
+tags: ["Observability", "AgentTool"]
+inputs:
+  - name: caseDescription
+    required: true
+    type: string
+  - name: caseTitle
+    required: true
+    type: string
+
+
+# ---------------------------------------------------------------------------
+# STEPS
+# ---------------------------------------------------------------------------
+# The sequence of actions this workflow performs. Each step executes an
+# action and can reference outputs from previous steps. Key properties:
+#   - name: Unique identifier for referencing this step's output
+#   - type: The action to perform (http, elasticsearch.search, foreach, etc.)
+#   - with: Parameters passed to the action
+#   - condition: Optional expression to conditionally run the step
+#   - on-failure: Error handling configuration (retry, continue, etc.)
+# Access step outputs using {{ steps.step_name.output.field }} syntax
+# ---------------------------------------------------------------------------
+steps:
+
+  # -------------------------------------------------------------------------
+  # STEP 1: kibana_createCaseDefaultSpace_step
+  # -------------------------------------------------------------------------
+  # Creates a new case using the Kibana Cases API (POST /api/cases).
+  # Cases provide a workspace for investigating and tracking security
+  # incidents.
+  # Required: title, description, owner (e.g., "securitySolution"), tags,
+  # severity.
+  # Output: {{ steps.kibana_createCaseDefaultSpace_step.output.id }} contains
+  # the new case ID.
+  # Liquid syntax used:
+  # - References workflow input parameter(s)
+  # -------------------------------------------------------------------------
+  - name: kibana_createCaseDefaultSpace_step
+    type: kibana.createCaseDefaultSpace
+    with:
+      connector:
+        fields: null
+        id: none
+        name: none
+        type: .none
+      description: |
+        "{{ inputs.caseDescription }}"
+      owner: observability
+      settings:
+        syncAlerts: false
+      severity: high
+      tags:
+        - Automatic
+      title: "{{ inputs.caseTitle }}"

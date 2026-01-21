@@ -1,0 +1,142 @@
+# =============================================================================
+# Workflow: ➕ Add Users to Slack Channel
+# Category: integrations/slack
+#
+# This workflow YAML defines a manual process for adding users to a Slack
+# channel. It includes steps to look up a user by their email, invite them to
+# a specified channel, and post a welcome message upon their addition. The
+# workflow utilizes Slack's API and requires a Slack token for
+# authentication, with default inputs for channel ID, user email, user IDs,
+# and a welcome message.
+#
+# Author: Elastic
+# Created: 2025-11-07
+# =============================================================================
+version: '1'
+name: ➕ Add Users to Slack Channel
+enabled: true
+
+# ---------------------------------------------------------------------------
+# TRIGGERS
+# ---------------------------------------------------------------------------
+# Defines how and when this workflow is executed. Supported trigger types:
+#   - manual: Run on-demand from the Kibana UI or API
+#   - scheduled: Run on a recurring schedule (every: "5m" or rrule)
+#   - alert: Run automatically when a security alert is triggered
+# ---------------------------------------------------------------------------
+triggers:
+  - type: manual
+
+# ---------------------------------------------------------------------------
+# INPUTS
+# ---------------------------------------------------------------------------
+# Runtime parameters provided when the workflow is triggered. Each input
+# can specify:
+#   - name: Unique identifier for the input
+#   - type: Data type (string, number, boolean, array, object)
+#   - required: Whether the input must be provided (default: false)
+#   - default: Default value if not provided
+# Reference inputs in steps using {{ inputs.input_name }} syntax
+# ---------------------------------------------------------------------------
+inputs:
+  - name: channel_id
+    default: C09HLMRKTV1
+    type: string
+  - name: user_email
+    default: user@example.com
+    type: string
+  - name: user_ids
+    default: U031BKNF7BJ
+    type: string
+  - name: welcome_message
+    default: Welcome to the channel!
+    type: string
+
+# ---------------------------------------------------------------------------
+# CONSTANTS
+# ---------------------------------------------------------------------------
+# Reusable configuration values defined once and referenced throughout the
+# workflow using {{ consts.key_name }} syntax. Use constants for:
+#   - API endpoints and URLs
+#   - API keys and authentication tokens (use secrets in production)
+#   - Environment-specific configuration
+#   - Values that may need to change across environments
+# ---------------------------------------------------------------------------
+consts:
+  slack_token: "YOUR-SECRET-HERE"
+
+# ---------------------------------------------------------------------------
+# STEPS
+# ---------------------------------------------------------------------------
+# The sequence of actions this workflow performs. Each step executes an
+# action and can reference outputs from previous steps. Key properties:
+#   - name: Unique identifier for referencing this step's output
+#   - type: The action to perform (http, elasticsearch.search, foreach, etc.)
+#   - with: Parameters passed to the action
+#   - condition: Optional expression to conditionally run the step
+#   - on-failure: Error handling configuration (retry, continue, etc.)
+# Access step outputs using {{ steps.step_name.output.field }} syntax
+# ---------------------------------------------------------------------------
+steps:
+
+  # -------------------------------------------------------------------------
+  # STEP 1: lookup_user_by_email
+  # -------------------------------------------------------------------------
+  # Looks up a Slack user by their email address.
+  # Liquid syntax used:
+  # - References workflow input parameter(s)
+  # - References workflow constant(s)
+  # -------------------------------------------------------------------------
+  - name: lookup_user_by_email
+    type: http
+    with:
+      url: https://slack.com/api/users.lookupByEmail?email={{ inputs.user_email }}
+      method: GET
+      headers:
+        Authorization: Bearer {{ consts.slack_token }}
+      timeout: 30s
+
+  # -------------------------------------------------------------------------
+  # STEP 2: invite-users-to-channel
+  # -------------------------------------------------------------------------
+  # Invites users to a Slack channel.
+  # Liquid syntax used:
+  # - References output from previous step(s)
+  # - References workflow input parameter(s)
+  # - References workflow constant(s)
+  # -------------------------------------------------------------------------
+  - name: invite-users-to-channel
+    type: http
+    with:
+      url: https://slack.com/api/conversations.invite
+      method: POST
+      headers:
+        Content-Type: application/json; charset=utf-8
+        Authorization: Bearer {{ consts.slack_token }}
+      body:
+        channel: '{{ inputs.channel_id }}'
+        users: '{{ steps.lookup_user_by_email.output.data.user.id }}'
+      timeout: 30s
+
+  # -------------------------------------------------------------------------
+  # STEP 3: post-welcome-message
+  # -------------------------------------------------------------------------
+  # Sends a message to a Slack channel using the Slack API.
+  # Liquid syntax used:
+  # - `replace` - Replaces substring occurrences
+  # - References output from previous step(s)
+  # - References workflow input parameter(s)
+  # - References workflow constant(s)
+  # -------------------------------------------------------------------------
+  - name: post-welcome-message
+    type: http
+    with:
+      url: https://slack.com/api/chat.postMessage
+      method: POST
+      headers:
+        Content-Type: application/json; charset=utf-8
+        Authorization: Bearer {{ consts.slack_token }}
+      body:
+        channel: '{{ inputs.channel_id }}'
+        text: '<@{{ steps.lookup_user_by_email.output.data.user.id | replace: '','', ''> <@'' }}> {{ inputs.welcome_message }}'
+      timeout: 30s

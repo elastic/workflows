@@ -1,0 +1,124 @@
+# =============================================================================
+# Workflow: Search Snowflake
+# Category: integrations/snowflake
+#
+# The workflow YAML defines a manual trigger for executing ad-hoc SQL queries
+# against a Snowflake security logs database. It allows users to input a
+# custom SQL query, with a default query provided, and utilizes HTTP POST
+# requests to execute the query against Snowflake. The results are then
+# logged to the console, displaying the number of rows returned and the data
+# in JSON format.
+#
+# Author: Elastic
+# Created: 2026-01-05
+# =============================================================================
+version: '1'
+name: Search Snowflake
+description: Execute ad-hoc SQL queries against Snowflake security logs database
+enabled: true
+
+# ---------------------------------------------------------------------------
+# TRIGGERS
+# ---------------------------------------------------------------------------
+# Defines how and when this workflow is executed. Supported trigger types:
+#   - manual: Run on-demand from the Kibana UI or API
+#   - scheduled: Run on a recurring schedule (every: "5m" or rrule)
+#   - alert: Run automatically when a security alert is triggered
+# ---------------------------------------------------------------------------
+triggers:
+  - type: manual
+    enabled: true
+
+# ---------------------------------------------------------------------------
+# INPUTS
+# ---------------------------------------------------------------------------
+# Runtime parameters provided when the workflow is triggered. Each input
+# can specify:
+#   - name: Unique identifier for the input
+#   - type: Data type (string, number, boolean, array, object)
+#   - required: Whether the input must be provided (default: false)
+#   - default: Default value if not provided
+# Reference inputs in steps using {{ inputs.input_name }} syntax
+# ---------------------------------------------------------------------------
+inputs:
+  - name: snowflake_query
+    default: SELECT * FROM SECURITY_EVENTS ORDER BY timestamp DESC LIMIT 10
+    type: string
+    description: SQL query to execute against Snowflake
+
+# ---------------------------------------------------------------------------
+# CONSTANTS
+# ---------------------------------------------------------------------------
+# Reusable configuration values defined once and referenced throughout the
+# workflow using {{ consts.key_name }} syntax. Use constants for:
+#   - API endpoints and URLs
+#   - API keys and authentication tokens (use secrets in production)
+#   - Environment-specific configuration
+#   - Values that may need to change across environments
+# ---------------------------------------------------------------------------
+consts:
+  snowflake_url: YOUR_URL_HERE
+  pat_token: secret
+  database: YOUR_DB_HERE
+  schema: YOUR_SCHEMA_HERE
+  warehouse: YOUR_URL_HERE
+  role: YOUR_ROLE_HERE
+
+# ---------------------------------------------------------------------------
+# STEPS
+# ---------------------------------------------------------------------------
+# The sequence of actions this workflow performs. Each step executes an
+# action and can reference outputs from previous steps. Key properties:
+#   - name: Unique identifier for referencing this step's output
+#   - type: The action to perform (http, elasticsearch.search, foreach, etc.)
+#   - with: Parameters passed to the action
+#   - condition: Optional expression to conditionally run the step
+#   - on-failure: Error handling configuration (retry, continue, etc.)
+# Access step outputs using {{ steps.step_name.output.field }} syntax
+# ---------------------------------------------------------------------------
+steps:
+
+  # -------------------------------------------------------------------------
+  # STEP 1: execute_snowflake_query
+  # -------------------------------------------------------------------------
+  # Executes a SQL query against Snowflake data warehouse.
+  # Liquid syntax used:
+  # - References workflow input parameter(s)
+  # - References workflow constant(s)
+  # -------------------------------------------------------------------------
+  - name: execute_snowflake_query
+    type: http
+    with:
+      url: '{{ consts.snowflake_url }}'
+      method: POST
+      headers:
+        Content-Type: application/json
+        Accept: application/json
+        Authorization: Bearer {{ consts.pat_token }}
+        User-Agent: ElasticWorkflows/1.0
+      body: |
+        {
+          "statement": "{{ inputs.snowflake_query }}",
+          "timeout": 60,
+          "database": "{{ consts.database }}",
+          "schema": "{{ consts.schema }}",
+          "warehouse": "{{ consts.warehouse }}",
+          "role": "{{ consts.role }}"
+        }
+      timeout: 90s
+
+  # -------------------------------------------------------------------------
+  # STEP 2: log_results
+  # -------------------------------------------------------------------------
+  # Formats and displays the results in a human-readable report format.
+  # This output is visible in the workflow execution logs.
+  # Liquid syntax used:
+  # - `json` - Converts object to JSON string
+  # - References output from previous step(s)
+  # -------------------------------------------------------------------------
+  - name: log_results
+    type: console
+    with:
+      message: >-
+        Snowflake Results ({{ steps.execute_snowflake_query.output.resultSetMetaData.numRows }} rows): {{
+        steps.execute_snowflake_query.output.data | json }}

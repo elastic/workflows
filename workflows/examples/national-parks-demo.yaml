@@ -1,0 +1,265 @@
+# =============================================================================
+# Workflow: 🏔️ National Parks Demo
+# Category: examples
+#
+# This workflow YAML outlines a process for managing an Elasticsearch index
+# for national parks. It checks if the index exists, deletes it if necessary,
+# creates a new index with specified mappings, and bulk loads sample park
+# data. The workflow then searches for parks by the "canyon" category, logs
+# the results, and iterates over the found parks to display their names.
+#
+# Author: Elastic
+# Created: 2025-11-09
+# Tags: demo, getting-started
+# =============================================================================
+version: 1
+name: 🏔️ National Parks Demo
+description: Creates an Elasticsearch index, loads sample national park data using bulk operations, searches for parks by category, and displays the results.
+enabled: true
+
+# ---------------------------------------------------------------------------
+# TAGS
+# ---------------------------------------------------------------------------
+# Categories and labels for organizing, filtering, and discovering workflows
+# in the Kibana UI. Tags help with:
+#   - Categorizing workflows by use case (security, observability, etc.)
+#   - Filtering in the workflow library
+#   - Grouping related workflows together
+# ---------------------------------------------------------------------------
+tags: ["demo", "getting-started"]
+consts:
+ indexName: national-parks
+
+# ---------------------------------------------------------------------------
+# TRIGGERS
+# ---------------------------------------------------------------------------
+# Defines how and when this workflow is executed. Supported trigger types:
+#   - manual: Run on-demand from the Kibana UI or API
+#   - scheduled: Run on a recurring schedule (every: "5m" or rrule)
+#   - alert: Run automatically when a security alert is triggered
+# ---------------------------------------------------------------------------
+triggers:
+ - type: manual
+
+# ---------------------------------------------------------------------------
+# STEPS
+# ---------------------------------------------------------------------------
+# The sequence of actions this workflow performs. Each step executes an
+# action and can reference outputs from previous steps. Key properties:
+#   - name: Unique identifier for referencing this step's output
+#   - type: The action to perform (http, elasticsearch.search, foreach, etc.)
+#   - with: Parameters passed to the action
+#   - condition: Optional expression to conditionally run the step
+#   - on-failure: Error handling configuration (retry, continue, etc.)
+# Access step outputs using {{ steps.step_name.output.field }} syntax
+# ---------------------------------------------------------------------------
+steps:
+
+ # -------------------------------------------------------------------------
+ # STEP 1: get_index
+ # -------------------------------------------------------------------------
+ # Executes a search query against one or more Elasticsearch indices.
+ # Output: {{ steps.get_index.output.hits }} contains matching documents.
+ # Liquid syntax used:
+ # - References workflow constant(s)
+ # -------------------------------------------------------------------------
+ - name: get_index
+   type: elasticsearch.indices.exists
+   with:
+     index: "{{ consts.indexName }}"
+
+ # -------------------------------------------------------------------------
+ # STEP 2: check_if_index_exists
+ # -------------------------------------------------------------------------
+ # Evaluates a condition and executes different steps based on the result.
+ # Enables dynamic workflow behavior based on runtime data.
+ # -------------------------------------------------------------------------
+ - name: check_if_index_exists
+   type: if
+   condition: 'steps.get_index.output : true'
+   steps:
+
+     # -------------------------------------------------------------------------
+     # STEP 3: index_already_exists
+     # -------------------------------------------------------------------------
+     # Outputs a message to the workflow execution log for visibility.
+     # Liquid syntax used:
+     # - References workflow constant(s)
+     # -------------------------------------------------------------------------
+     - name: index_already_exists
+       type: console
+       with:
+         message: "index: {{ consts.indexName }} already exists. Will proceed to delete it and re-create"
+
+     # -------------------------------------------------------------------------
+     # STEP 4: delete_index
+     # -------------------------------------------------------------------------
+     # Executes a search query against one or more Elasticsearch indices.
+     # Output: {{ steps.delete_index.output.hits }} contains matching documents.
+     # Liquid syntax used:
+     # - References workflow constant(s)
+     # -------------------------------------------------------------------------
+     - name: delete_index
+       type: elasticsearch.indices.delete
+       with:
+         index: "{{ consts.indexName }}"
+   else:
+
+     # -------------------------------------------------------------------------
+     # STEP 5: no_index_found
+     # -------------------------------------------------------------------------
+     # Outputs a message to the workflow execution log for visibility.
+     # Liquid syntax used:
+     # - References workflow constant(s)
+     # -------------------------------------------------------------------------
+     - name: no_index_found
+       type: console
+       with:
+         message: "index: {{ consts.indexName }} Not found. Will proceed to create"
+      
+
+ # -------------------------------------------------------------------------
+ # STEP 6: create_parks_index
+ # -------------------------------------------------------------------------
+ # Executes a search query against one or more Elasticsearch indices.
+ # Output: {{ steps.create_parks_index.output.hits }} contains matching
+ # documents.
+ # Liquid syntax used:
+ # - References workflow constant(s)
+ # -------------------------------------------------------------------------
+ - name: create_parks_index
+   type: elasticsearch.indices.create
+   with:
+     index: "{{ consts.indexName }}"
+     mappings:
+       properties:
+         name: { type: text }
+         category: { type: keyword }
+         description: { type: text }
+
+ # -------------------------------------------------------------------------
+ # STEP 7: bulk_index_park_data
+ # -------------------------------------------------------------------------
+ # Executes a search query against one or more Elasticsearch indices.
+ # Output: {{ steps.bulk_index_park_data.output.hits }} contains matching
+ # documents.
+ # Liquid syntax used:
+ # - References workflow constant(s)
+ # -------------------------------------------------------------------------
+ - name: bulk_index_park_data
+   type: elasticsearch.bulk
+   with:
+     index: "{{ consts.indexName }}"
+     operations:
+
+       # -------------------------------------------------------------------------
+       # STEP 8: Yellowstone National Park
+       # -------------------------------------------------------------------------
+       # Executes the specified action with the configured parameters.
+       # -------------------------------------------------------------------------
+       - name: "Yellowstone National Park"
+         category: "geothermal"
+         description: "America's first national park, established in 1872, famous for Old Faithful geyser and diverse wildlife including grizzly bears, wolves, and herds of bison and elk."
+
+
+
+       # -------------------------------------------------------------------------
+       # STEP 9: Grand Canyon National Park
+       # -------------------------------------------------------------------------
+       # Executes the specified action with the configured parameters.
+       # -------------------------------------------------------------------------
+       - name: "Grand Canyon National Park"
+         category: "canyon"
+         description: "Home to the immense Grand Canyon, a mile deep gorge carved by the Colorado River, revealing millions of years of geological history in its colorful rock layers."
+
+
+
+       # -------------------------------------------------------------------------
+       # STEP 10: Yosemite National Park
+       # -------------------------------------------------------------------------
+       # Executes the specified action with the configured parameters.
+       # -------------------------------------------------------------------------
+       - name: "Yosemite National Park"
+         category: "mountain"
+         description: "Known for its granite cliffs, waterfalls, clear streams, giant sequoia groves, and biological diversity. El Capitan and Half Dome are iconic rock formations."
+        
+
+       # -------------------------------------------------------------------------
+       # STEP 11: Zion National Park
+       # -------------------------------------------------------------------------
+       # Executes the specified action with the configured parameters.
+       # -------------------------------------------------------------------------
+       - name: "Zion National Park"
+         category: "canyon"
+         description: "Utah's first national park featuring cream, pink, and red sandstone cliffs soaring into a blue sky. Famous for the Narrows wade through the Virgin River."
+        
+
+       # -------------------------------------------------------------------------
+       # STEP 12: Rocky Mountain National Park
+       # -------------------------------------------------------------------------
+       # Executes the specified action with the configured parameters.
+       # -------------------------------------------------------------------------
+       - name: "Rocky Mountain National Park"
+         category: "mountain"
+         description: "Features mountain environments, from wooded forests to mountain tundra, with over 150 riparian lakes and diverse wildlife at various elevations."
+
+ # -------------------------------------------------------------------------
+ # STEP 13: search_park_data
+ # -------------------------------------------------------------------------
+ # Executes a search query against one or more Elasticsearch indices.
+ # Uses the Query DSL to define match criteria for documents.
+ # Output: {{ steps.search_park_data.output.hits }} contains matching
+ # documents.
+ # Liquid syntax used:
+ # - References workflow constant(s)
+ # -------------------------------------------------------------------------
+ - name: search_park_data
+   type: elasticsearch.search
+   with:
+     index: "{{ consts.indexName }}"
+     size: 5
+     query:
+       term:
+         category: "canyon"
+
+ # -------------------------------------------------------------------------
+ # STEP 14: log_results
+ # -------------------------------------------------------------------------
+ # Formats and displays the results in a human-readable report format.
+ # This output is visible in the workflow execution logs.
+ # Liquid syntax used:
+ # - References output from previous step(s)
+ # -------------------------------------------------------------------------
+ - name: log_results
+   type: console
+
+
+   with:
+     message: |-
+       Found {{ steps.search_park_data.output.hits.total.value }} parks in category "canyon".
+
+ # -------------------------------------------------------------------------
+ # STEP 15: loop_over_results
+ # -------------------------------------------------------------------------
+ # Iterates over a collection of items, executing the nested steps for each.
+ # Access the current item via {{ item }} within the loop body.
+ # Liquid syntax used:
+ # - `json` - Converts object to JSON string
+ # - References output from previous step(s)
+ # -------------------------------------------------------------------------
+ - name: loop_over_results
+   type: foreach
+   foreach: "{{steps.search_park_data.output.hits.hits | json}}"
+   steps:
+
+     # -------------------------------------------------------------------------
+     # STEP 16: process-item
+     # -------------------------------------------------------------------------
+     # Outputs a message to the workflow execution log for visibility.
+     # Liquid syntax used:
+     # - References current item in foreach loop
+     # -------------------------------------------------------------------------
+     - name: process-item
+       type: console
+       with:
+         message: "{{foreach.item._source.name}}"

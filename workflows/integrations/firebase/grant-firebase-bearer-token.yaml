@@ -1,0 +1,74 @@
+# =============================================================================
+# Workflow: Grant Firebase Bearer Token
+# Category: integrations/firebase
+#
+# The workflow YAML defines a manual process for granting a Firebase Bearer
+# Token. It consists of two main steps: first, it retrieves Firebase user
+# credentials from an Elasticsearch index, and then it uses those credentials
+# to make an HTTP POST request to Firebase's authentication endpoint to
+# obtain a bearer token. The workflow is currently disabled.
+#
+# Author: Elastic
+# Created: 2025-11-25
+# =============================================================================
+name: Grant Firebase Bearer Token
+enabled: false
+
+# ---------------------------------------------------------------------------
+# TRIGGERS
+# ---------------------------------------------------------------------------
+# Defines how and when this workflow is executed. Supported trigger types:
+#   - manual: Run on-demand from the Kibana UI or API
+#   - scheduled: Run on a recurring schedule (every: "5m" or rrule)
+#   - alert: Run automatically when a security alert is triggered
+# ---------------------------------------------------------------------------
+triggers:
+  - type: manual
+
+# ---------------------------------------------------------------------------
+# STEPS
+# ---------------------------------------------------------------------------
+# The sequence of actions this workflow performs. Each step executes an
+# action and can reference outputs from previous steps. Key properties:
+#   - name: Unique identifier for referencing this step's output
+#   - type: The action to perform (http, elasticsearch.search, foreach, etc.)
+#   - with: Parameters passed to the action
+#   - condition: Optional expression to conditionally run the step
+#   - on-failure: Error handling configuration (retry, continue, etc.)
+# Access step outputs using {{ steps.step_name.output.field }} syntax
+# ---------------------------------------------------------------------------
+steps:
+
+  # -------------------------------------------------------------------------
+  # STEP 1: read_firebase_credentials
+  # -------------------------------------------------------------------------
+  # Executes a search query against one or more Elasticsearch indices.
+  # Uses the Query DSL to define match criteria for documents.
+  # Output: {{ steps.read_firebase_credentials.output.hits }} contains
+  # matching documents.
+  # -------------------------------------------------------------------------
+  - name: read_firebase_credentials
+    type: elasticsearch.search
+    with:
+      index: "credentials"
+      query:
+        match:
+          _id: "firebase_user"
+      size: 1
+
+  # -------------------------------------------------------------------------
+  # STEP 2: get_firebase_bearer_token
+  # -------------------------------------------------------------------------
+  # Authenticates with Firebase to obtain a bearer token for subsequent API
+  # calls.
+  # Liquid syntax used:
+  # - References output from previous step(s)
+  # -------------------------------------------------------------------------
+  - name: get_firebase_bearer_token
+    type: http
+    with:
+      url: https://identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key="{{ steps.read_firebase_credentials.output.hits.hits[0]._source.project_key }}"
+      method: POST
+      headers: 
+        Content-Type: application/json
+      body: '{"email": "{{ steps.read_firebase_credentials.output.hits.hits[0]._source.username }}", "password": "{{ steps.read_firebase_credentials.output.hits.hits[0]._source.secret }}", "returnSecureToken": true}'

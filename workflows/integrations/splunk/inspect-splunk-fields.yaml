@@ -1,0 +1,130 @@
+# =============================================================================
+# Workflow: Inspect Splunk Fields
+# Category: integrations/splunk
+#
+# The workflow YAML defines a manual trigger for inspecting Splunk fields,
+# using a specified index name with a default value of "omm-ep1." It consists
+# of three main steps: sending a POST request to initiate a search job in
+# Splunk, waiting for a brief period, and then retrieving the search results
+# using a GET request. The workflow includes constants for the Splunk URL and
+# authentication, and it allows for SSL verification to be skipped during
+# HTTP requests.
+#
+# Author: Elastic
+# Created: 2025-12-19
+# =============================================================================
+version: '1'
+name: Inspect Splunk Fields
+enabled: true
+
+# ---------------------------------------------------------------------------
+# TRIGGERS
+# ---------------------------------------------------------------------------
+# Defines how and when this workflow is executed. Supported trigger types:
+#   - manual: Run on-demand from the Kibana UI or API
+#   - scheduled: Run on a recurring schedule (every: "5m" or rrule)
+#   - alert: Run automatically when a security alert is triggered
+# ---------------------------------------------------------------------------
+triggers:
+  - type: manual
+
+# ---------------------------------------------------------------------------
+# INPUTS
+# ---------------------------------------------------------------------------
+# Runtime parameters provided when the workflow is triggered. Each input
+# can specify:
+#   - name: Unique identifier for the input
+#   - type: Data type (string, number, boolean, array, object)
+#   - required: Whether the input must be provided (default: false)
+#   - default: Default value if not provided
+# Reference inputs in steps using {{ inputs.input_name }} syntax
+# ---------------------------------------------------------------------------
+inputs:
+  - name: index_name
+    default: omm-ep1
+    type: string
+
+# ---------------------------------------------------------------------------
+# CONSTANTS
+# ---------------------------------------------------------------------------
+# Reusable configuration values defined once and referenced throughout the
+# workflow using {{ consts.key_name }} syntax. Use constants for:
+#   - API endpoints and URLs
+#   - API keys and authentication tokens (use secrets in production)
+#   - Environment-specific configuration
+#   - Values that may need to change across environments
+# ---------------------------------------------------------------------------
+consts:
+  splunk_url: https://nlp.swiftcrypto.com:8089
+  splunk_auth: secret
+
+# ---------------------------------------------------------------------------
+# STEPS
+# ---------------------------------------------------------------------------
+# The sequence of actions this workflow performs. Each step executes an
+# action and can reference outputs from previous steps. Key properties:
+#   - name: Unique identifier for referencing this step's output
+#   - type: The action to perform (http, elasticsearch.search, foreach, etc.)
+#   - with: Parameters passed to the action
+#   - condition: Optional expression to conditionally run the step
+#   - on-failure: Error handling configuration (retry, continue, etc.)
+# Access step outputs using {{ steps.step_name.output.field }} syntax
+# ---------------------------------------------------------------------------
+steps:
+
+  # -------------------------------------------------------------------------
+  # STEP 1: check_field_list
+  # -------------------------------------------------------------------------
+  # Submits a search query to Splunk and creates a search job.
+  # The search job ID can be used to retrieve results after processing.
+  # Liquid syntax used:
+  # - `append` - Adds string to end
+  # - `url_encode` - URL-encodes string
+  # - References workflow constant(s)
+  # -------------------------------------------------------------------------
+  - name: check_field_list
+    type: http
+    with:
+      url: '{{consts.splunk_url}}/services/search/jobs'
+      method: POST
+      headers:
+        Content-Type: application/x-www-form-urlencoded
+        Authorization: '{{consts.splunk_auth}}'
+      body: >-
+        search={{ 'search index=' | append: inputs.index_name | append: ' | fieldsummary maxvals=0 | table field count'
+        | url_encode }}&count=0&output_mode=json
+      timeout: 30s
+      fetcher:
+        skip_ssl_verification: true
+
+  # -------------------------------------------------------------------------
+  # STEP 2: wait_for_search
+  # -------------------------------------------------------------------------
+  # Pauses workflow execution for a specified duration.
+  # Useful for waiting on async operations or rate-limiting API calls.
+  # -------------------------------------------------------------------------
+  - name: wait_for_search
+    type: wait
+    with:
+      duration: 2s
+
+  # -------------------------------------------------------------------------
+  # STEP 3: get-splunk-results
+  # -------------------------------------------------------------------------
+  # Submits a search query to Splunk and creates a search job.
+  # The search job ID can be used to retrieve results after processing.
+  # Liquid syntax used:
+  # - References output from previous step(s)
+  # - References workflow constant(s)
+  # -------------------------------------------------------------------------
+  - name: get-splunk-results
+    type: http
+    with:
+      url: >-
+        {{consts.splunk_url}}/services/search/jobs/{{steps.check_field_list.output.data.sid}}/results?output_mode=json&count=0
+      method: GET
+      headers:
+        Authorization: '{{consts.splunk_auth}}'
+      timeout: 30s
+      fetcher:
+        skip_ssl_verification: true

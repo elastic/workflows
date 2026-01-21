@@ -1,0 +1,210 @@
+# =============================================================================
+# Workflow: Index commits
+# Category: utilities
+#
+# The "Index commits" workflow is designed to index commits from a specified
+# GitHub repository into an Elasticsearch index, enabling powerful search
+# capabilities for commit messages and metadata. It can be triggered manually
+# or scheduled to run daily. The workflow includes steps to create the
+# Elasticsearch index, fetch commits from the GitHub API, and index each
+# commit into Elasticsearch, while also handling failures gracefully.
+# Additionally, it checks for the last indexed commit date to determine the
+# starting point for fetching new commits.
+#
+# Author: Elastic
+# Created: 2026-01-14
+# =============================================================================
+name: Index commits
+descriptions: |
+  This workflow indexes commits from a specified GitHub repository into an Elasticsearch index.
+  This is needed to leverage Elasticsearch's powerful search capabilities for commit messages and metadata.
+  We could later filter commits by date, author, or message content using Elasticsearch queries.
+enabled: true
+
+# ---------------------------------------------------------------------------
+# TRIGGERS
+# ---------------------------------------------------------------------------
+# Defines how and when this workflow is executed. Supported trigger types:
+#   - manual: Run on-demand from the Kibana UI or API
+#   - scheduled: Run on a recurring schedule (every: "5m" or rrule)
+#   - alert: Run automatically when a security alert is triggered
+# ---------------------------------------------------------------------------
+triggers:
+  - type: manual
+  - type: scheduled
+    with:
+      every: 1d
+
+# ---------------------------------------------------------------------------
+# CONSTANTS
+# ---------------------------------------------------------------------------
+# Reusable configuration values defined once and referenced throughout the
+# workflow using {{ consts.key_name }} syntax. Use constants for:
+#   - API endpoints and URLs
+#   - API keys and authentication tokens (use secrets in production)
+#   - Environment-specific configuration
+#   - Values that may need to change across environments
+# ---------------------------------------------------------------------------
+consts:
+  gh_token: secret
+  repo: elastic/kibana
+  index_name: indexed_commits_v1
+
+# ---------------------------------------------------------------------------
+# STEPS
+# ---------------------------------------------------------------------------
+# The sequence of actions this workflow performs. Each step executes an
+# action and can reference outputs from previous steps. Key properties:
+#   - name: Unique identifier for referencing this step's output
+#   - type: The action to perform (http, elasticsearch.search, foreach, etc.)
+#   - with: Parameters passed to the action
+#   - condition: Optional expression to conditionally run the step
+#   - on-failure: Error handling configuration (retry, continue, etc.)
+# Access step outputs using {{ steps.step_name.output.field }} syntax
+# ---------------------------------------------------------------------------
+steps:
+
+  # -------------------------------------------------------------------------
+  # STEP 1: create_index
+  # -------------------------------------------------------------------------
+  # Executes a search query against one or more Elasticsearch indices.
+  # Output: {{ steps.create_index.output.hits }} contains matching documents.
+  # Liquid syntax used:
+  # - References workflow constant(s)
+  # -------------------------------------------------------------------------
+  - name: create_index
+    type: elasticsearch.request
+    on-failure:
+      continue: true
+    with:
+      method: PUT
+      path: /{{consts.index_name}}
+      body:
+        mappings:
+          properties:
+            commit:
+              properties:
+                message:
+                  type: text
+                  analyzer: standard
+                  fields:
+                    keyword:
+                      type: keyword
+                      ignore_above: 256
+                author:
+                  properties:
+                    date:
+                      type: date
+                      format: strict_date_optional_time||epoch_millis
+        settings:
+          index:
+            number_of_shards: 1
+            number_of_replicas: 0
+          analysis:
+            analyzer:
+              standard:
+                type: standard
+                stopwords: _none_
+
+  # -------------------------------------------------------------------------
+  # STEP 2: search_last_commit
+  # -------------------------------------------------------------------------
+  # Executes a search query against one or more Elasticsearch indices.
+  # Output: {{ steps.search_last_commit.output.hits }} contains matching
+  # documents.
+  # Liquid syntax used:
+  # - References workflow constant(s)
+  # -------------------------------------------------------------------------
+  - name: search_last_commit
+    type: elasticsearch.request
+    with:
+      method: GET
+      path: /{{consts.index_name}}/_search
+      body:
+        size: 1
+        sort:
+          - commit.author.date:
+              order: desc
+
+  # -------------------------------------------------------------------------
+  # STEP 3: since_date_var
+  # -------------------------------------------------------------------------
+  # Outputs a message to the workflow execution log for visibility.
+  # Liquid syntax used:
+  # - `{% if %}` - Conditional logic based on expression
+  # - References output from previous step(s)
+  # -------------------------------------------------------------------------
+  - name: since_date_var
+    type: console
+    with:
+      message: |
+        {% if steps.search_last_commit.output.hits.hits.length > 0 %}
+          {{ steps.search_last_commit.output.hits.hits[0]._source.commit.committer.date }}
+        {% endif %}
+        {% if steps.search_last_commit.output.hits.hits.length == 0 %}
+          {{'2025-11-30T00:00:00Z'}}
+        {% endif %}
+
+  # -------------------------------------------------------------------------
+  # STEP 4: loop
+  # -------------------------------------------------------------------------
+  # Iterates over a collection of items, executing the nested steps for each.
+  # Access the current item via {{ item }} within the loop body.
+  # -------------------------------------------------------------------------
+  - name: loop
+    type: foreach
+    foreach: '[1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,30,31,32,33,34,35]'
+    on-failure:
+      continue: true
+    steps:
+
+      # -------------------------------------------------------------------------
+      # STEP 5: fetch_commits
+      # -------------------------------------------------------------------------
+      # Retrieves data from an external API endpoint via HTTP GET request.
+      # Liquid syntax used:
+      # - `strip` - Removes leading/trailing whitespace
+      # - References output from previous step(s)
+      # - References workflow constant(s)
+      # - References current item in foreach loop
+      # -------------------------------------------------------------------------
+      - name: fetch_commits
+        type: http
+        with:
+          url: >-
+            https://api.github.com/repos/{{consts.repo}}/commits?page={{foreach.item}}&per_page=100&since={{steps.since_date_var.output
+            | strip | strip_newlines}}
+          method: GET
+          headers:
+            Authorization: Bearer {{consts.gh_token}}
+            Accept: application/vnd.github+json
+
+      # -------------------------------------------------------------------------
+      # STEP 6: index_commit
+      # -------------------------------------------------------------------------
+      # Executes a search query against one or more Elasticsearch indices.
+      # Output: {{ steps.index_commit.output.hits }} contains matching documents.
+      # Liquid syntax used:
+      # - References output from previous step(s)
+      # - References workflow constant(s)
+      # - References current item in foreach loop
+      # -------------------------------------------------------------------------
+      - name: index_commit
+        type: elasticsearch.request
+        foreach: '{{steps.fetch_commits.output.data}}'
+        with:
+          method: PUT
+          path: /{{consts.index_name}}/_doc/${{foreach.item.sha}}
+          body: ${{foreach.item}}
+
+      # -------------------------------------------------------------------------
+      # STEP 7: check_1
+      # -------------------------------------------------------------------------
+      # Executes the slack action with the configured parameters.
+      # -------------------------------------------------------------------------
+      - name: check_1
+        if: steps.fetch_commits.output.data.length:0
+        type: slack
+        connector-id: not_existing
+        with:
+          message: It's expected

@@ -1,0 +1,655 @@
+# =============================================================================
+# Workflow: 📁 Case workflow - Prod
+# Category: security/response
+#
+# The YAML workflow outlines a security operations process that triggers on
+# alerts, enabling automated case management in a production environment. It
+# includes steps for identifying indicators of compromise (IOCs) based on
+# event categories, querying external services like VirusTotal and URLScan,
+# and searching for similar cases in Elasticsearch. Depending on whether a
+# similar case exists, it either updates the existing case or creates a new
+# one, while also sending an email notification with case details. The
+# workflow emphasizes efficient incident response and documentation through
+# structured data gathering and case management.
+#
+# Author: Elastic
+# Created: 2025-11-09
+# =============================================================================
+version: "1"
+name: 📁 Case workflow - Prod
+enabled: true
+
+# ---------------------------------------------------------------------------
+# TRIGGERS
+# ---------------------------------------------------------------------------
+# Defines how and when this workflow is executed. Supported trigger types:
+#   - manual: Run on-demand from the Kibana UI or API
+#   - scheduled: Run on a recurring schedule (every: "5m" or rrule)
+#   - alert: Run automatically when a security alert is triggered
+# ---------------------------------------------------------------------------
+triggers:
+  - type: alert
+
+# ---------------------------------------------------------------------------
+# CONSTANTS
+# ---------------------------------------------------------------------------
+# Reusable configuration values defined once and referenced throughout the
+# workflow using {{ consts.key_name }} syntax. Use constants for:
+#   - API endpoints and URLs
+#   - API keys and authentication tokens (use secrets in production)
+#   - Environment-specific configuration
+#   - Values that may need to change across environments
+# ---------------------------------------------------------------------------
+consts:
+    kibana_domain: [REDACTED]
+    cyberbro_domain: [REDACTED]
+    email_to_send_to: [REDACTED]
+    ai_connector_id: [REDACTED]
+    hash_ioc: [REDACTED]
+    url_ioc: [REDACTED]
+    vtkey: [REDACTED]
+    web_query: [REDACTED]
+
+# ---------------------------------------------------------------------------
+# STEPS
+# ---------------------------------------------------------------------------
+# The sequence of actions this workflow performs. Each step executes an
+# action and can reference outputs from previous steps. Key properties:
+#   - name: Unique identifier for referencing this step's output
+#   - type: The action to perform (http, elasticsearch.search, foreach, etc.)
+#   - with: Parameters passed to the action
+#   - condition: Optional expression to conditionally run the step
+#   - on-failure: Error handling configuration (retry, continue, etc.)
+# Access step outputs using {{ steps.step_name.output.field }} syntax
+# ---------------------------------------------------------------------------
+steps:
+
+  # -------------------------------------------------------------------------
+  # STEP 1: choose-ioc-using-event-category
+  # -------------------------------------------------------------------------
+  # Outputs a message to the workflow execution log for visibility.
+  # Liquid syntax used:
+  # - `strip` - Removes leading/trailing whitespace
+  # - `{% if %}` - Conditional logic based on expression
+  # - `{% elsif %}` - Additional condition branch
+  # - `{% assign %}` - Creates/assigns a variable
+  # -------------------------------------------------------------------------
+  - name: choose-ioc-using-event-category
+    type: console
+    with:
+      message: |2-
+        {%- assign category = event.alerts[0].event.category -%}
+        {%- if category contains "process" -%}
+        {{-  event.alerts[0].process.hash.sha256 | strip -}}
+        {%- elsif category contains "file" -%}
+        {{- event.alerts[0].file.hash.sha256 | strip -}}
+        {%- elsif category contains " dll" -%}
+        {{- event.alerts[0].dll.hash.sha256 | strip -}}
+        {%- elsif category contains " network" -%}
+        {{- event.alerts[0].destination.ip | strip -}}
+        {%- elsif category contains " network" and event.alerts[0].url.domain  -%}
+        {{- event.alerts[0].url.domain | strip -}}
+        {%- else -%}
+        {{-  event.alerts[0].process.hash.sha256 | strip -}}
+        {%- endif -%}
+
+  # -------------------------------------------------------------------------
+  # STEP 2: lookup-hash-via-vt
+  # -------------------------------------------------------------------------
+  # Makes an API call to VirusTotal to check for malicious indicators.
+  # Returns threat intelligence data including detection results and
+  # reputation scores.
+  # Liquid syntax used:
+  # - References workflow constant(s)
+  # -------------------------------------------------------------------------
+  - name: lookup-hash-via-vt
+    type: http
+    with:
+      url: https://www.virustotal.com/api/v3/search?query={{steps.choose-ioc-using-event-category.output}}
+      method: GET
+      headers:
+        Content-Type: application/json
+        x-apikey: "{{ consts.vtkey }}"
+      timeout: 30s 
+
+  # -------------------------------------------------------------------------
+  # STEP 3: lookup-url-via-urlscan
+  # -------------------------------------------------------------------------
+  # Submits a URL to URLScan.io for security analysis and screenshot capture.
+  # Returns scan results including malicious indicators and page metadata.
+  # -------------------------------------------------------------------------
+  - name: lookup-url-via-urlscan
+    type: http
+    with:
+      url: https://urlscan.io/api/v1/search/?q=domain:{{steps.choose-ioc-using-event-category.output}}
+      method: GET
+      headers:
+        Content-Type: application/json
+      timeout: 30s 
+
+  # -------------------------------------------------------------------------
+  # STEP 4: search-on-web
+  # -------------------------------------------------------------------------
+  # Retrieves data from an external API endpoint via HTTP GET request.
+  # Liquid syntax used:
+  # - `url_encode` - URL-encodes string
+  # -------------------------------------------------------------------------
+  - name: search-on-web
+    type: http
+    with:
+      url: "https://leta.mullvad.net/search?q={{ steps.choose-ioc-using-event-category.output | url_encode}}&engine=google"
+      method: GET
+      headers:
+          Accept: application/json
+          Accept-Encoding: gzip
+
+  # -------------------------------------------------------------------------
+  # STEP 5: search_similair_cases_id-process
+  # -------------------------------------------------------------------------
+  # Executes an ES|QL query against Elasticsearch.
+  # ES|QL is a piped query language for filtering, aggregating, and
+  # transforming data.
+  # Filters results using WHERE clauses to match specific conditions.
+  # Output: {{ steps.search_similair_cases_id-process.output.values }}
+  # contains the result rows.
+  # Liquid syntax used:
+  # - `sort` - Sorts array elements
+  # - References trigger event data (e.g., alert details)
+  # -------------------------------------------------------------------------
+  - name: search_similair_cases_id-process
+    type: elasticsearch.esql.query
+    with:
+      format: json
+      query: FROM .kibana_alerting_cases* METADATA _id | WHERE cases.created_at > now() - 1h and cases.status == 0 or cases.status == 10  | WHERE (cases.title LIKE "*{{event.alerts[0].user.name}}*" and cases.title LIKE  "*{{event.alerts[0].process.name}}*") OR  (cases.title LIKE "*{{event.alerts[0].host.name}}*" and cases.title LIKE  "*{{event.alerts[0].user.name}}*") OR  (cases.title LIKE "*{{event.alerts[0].process.name}}*" and cases.title LIKE  "*{{event.alerts[0].host.name}}*") or (cases.description LIKE "*{{event.alerts[0].user.name}}*" and cases.description LIKE  "*{{event.alerts[0].source.ip}}*" and cases.description LIKE  "*{{event.alerts[0].destination.ip}}*") OR  (cases.description LIKE "*{{event.alerts[0].host.name}}*" and cases.description LIKE  "*{{event.alerts[0].source.ip}}*" and cases.description LIKE  "*{{event.alerts[0].destination.ip}}*") | SORT cases.created_at DESC | LIMIT 1 | EVAL case_id = REPLACE(_id, ".*:","")  | keep case_id
+
+  # -------------------------------------------------------------------------
+  # STEP 6: find_similar_case_id
+  # -------------------------------------------------------------------------
+  # Outputs a message to the workflow execution log for visibility.
+  # Liquid syntax used:
+  # - `strip` - Removes leading/trailing whitespace
+  # - `{% if %}` - Conditional logic based on expression
+  # - `{% elsif %}` - Additional condition branch
+  # - `{% assign %}` - Creates/assigns a variable
+  # -------------------------------------------------------------------------
+  - name: find_similar_case_id
+    type: console
+    with:
+      message: |2-
+        {%- assign category = event.alerts[0].event.category -%}
+        {%- if category contains "process" -%}
+        {{- steps.search_similair_cases_id-process.output.values[0] | strip -}}
+        {%- elsif category contains "file" -%}
+        {{- steps.search_similair_cases_id-process.output.values[0] | strip -}}
+        {%- elsif category contains " network" -%}
+        {{- steps.search_similair_cases_id-process.output.values[0] | strip -}}
+        {%- else -%}
+        {{- steps.search_similair_cases_id-process.output.values[0] | strip -}}
+        {%- endif -%}
+
+  # -------------------------------------------------------------------------
+  # STEP 7: create_case_title
+  # -------------------------------------------------------------------------
+  # Outputs a message to the workflow execution log for visibility.
+  # Liquid syntax used:
+  # - `{% if %}` - Conditional logic based on expression
+  # - `{% elsif %}` - Additional condition branch
+  # - `{% assign %}` - Creates/assigns a variable
+  # - References trigger event data (e.g., alert details)
+  # -------------------------------------------------------------------------
+  - name: create_case_title
+    type: console
+    with:
+      message: |2-
+        {%- assign category = event.alerts[0].event.category -%}
+        {%- if category contains "process" -%}
+        {{event.alerts[0].signal.rule.name}} on {{event.alerts[0].host.name}} by {{event.alerts[0].user.name}} via {{event.alerts[0].process.name}}
+        {%- elsif category contains "file" -%}
+        {{event.alerts[0].signal.rule.name}} on {{event.alerts[0].host.name}} by {{event.alerts[0].user.name}} via {{event.alerts[0].process.name}} with file {{event.alerts[0].file.name}}
+        {%- elsif category contains "dll" -%}
+        {{event.alerts[0].signal.rule.name}} on {{event.alerts[0].host.name}} by {{event.alerts[0].user.name}} via {{event.alerts[0].process.name}} with dll {{event.alerts[0].dll.name}}
+        {%- elsif category contains "network" -%}
+        {{event.alerts[0].signal.rule.name}} with source: {{event.alerts[0].source.ip}} and destination:{{event.alerts[0].destination.ip}}
+        {%- else -%}
+        {{event.alerts[0].signal.rule.name}} on {{event.alerts[0].host.name}} by {{event.alerts[0].user.name}} via {{event.alerts[0].process.name}}
+        {%- endif -%}
+
+  # -------------------------------------------------------------------------
+  # STEP 8: update_existing_case
+  # -------------------------------------------------------------------------
+  # Evaluates a condition and executes different steps based on the result.
+  # Enables dynamic workflow behavior based on runtime data.
+  # -------------------------------------------------------------------------
+  - name: update_existing_case
+    type: if
+    condition: 'not steps.find_similar_case_id.output: ""'
+    steps:
+
+      # -------------------------------------------------------------------------
+      # STEP 9: get_case_to_update
+      # -------------------------------------------------------------------------
+      # Retrieves case details using the Kibana Cases API (GET
+      # /api/cases/{caseId}).
+      # Returns: id, title, description, status, severity, tags, created/updated
+      # timestamps.
+      # Output: {{ steps.get_case_to_update.output }} contains the full case
+      # object.
+      # Liquid syntax used:
+      # - References output from previous step(s)
+      # -------------------------------------------------------------------------
+      - name: get_case_to_update
+        type: kibana.getCaseDefaultSpace
+        with:
+          caseId: "{{steps.find_similar_case_id.output}}"
+          fetcher:
+            skip_ssl_verification: true
+
+      # -------------------------------------------------------------------------
+      # STEP 10: update_case_tag
+      # -------------------------------------------------------------------------
+      # Updates case properties using the Kibana Cases API (PATCH /api/cases).
+      # Can modify: title, description, status, severity, tags, assignees,
+      # settings.
+      # Requires the case ID and current version for optimistic concurrency
+      # control.
+      # -------------------------------------------------------------------------
+      - name: update_case_tag
+        type: kibana.updateCaseDefaultSpace
+        with:
+          cases:
+            - id: "{{steps.get_case_to_update.id}}"
+              tags:
+                - new-alert
+                - automatic
+              version: "{{steps.get_case_to_update.version}}"
+              fetcher:
+                skip_ssl_verification: true
+
+      # -------------------------------------------------------------------------
+      # STEP 11: loop_trough_alerts_to_update
+      # -------------------------------------------------------------------------
+      # Iterates over a collection of items, executing the nested steps for each.
+      # Access the current item via {{ item }} within the loop body.
+      # Liquid syntax used:
+      # - `json` - Converts object to JSON string
+      # - References trigger event data (e.g., alert details)
+      # -------------------------------------------------------------------------
+      - name: loop_trough_alerts_to_update
+        type: foreach
+        foreach: "{{event.alerts | json}}"
+        steps:
+
+          # -------------------------------------------------------------------------
+          # STEP 12: add_alert_to_case_update #logic to add the alert to the case
+          # -------------------------------------------------------------------------
+          # Attaches a security alert to a case (POST /api/cases/{caseId}/comments).
+          # Links the alert to the case for consolidated investigation and timeline
+          # tracking.
+          # Required: alertId, index (.alerts-security.alerts-*), rule info, type:
+          # "alert".
+          # Liquid syntax used:
+          # - References output from previous step(s)
+          # - References current item in foreach loop
+          # -------------------------------------------------------------------------
+          - name: add_alert_to_case_update #logic to add the alert to the case
+            type: kibana.addCaseCommentDefaultSpace
+            with:
+              alertId: "{{foreach.item._id}}"
+              index: .alerts-security.alerts-*
+              owner: securitySolution
+              rule:
+                id: "{{foreach.item.signal.rule.id}}"
+                name: "{{foreach.item.signal.rule.name}}"
+              type: alert
+              caseId: "{{steps.find_similar_case_id.output}}"
+              fetcher:
+                skip_ssl_verification: true
+
+          # -------------------------------------------------------------------------
+          # STEP 13: update_alert_statuss
+          # -------------------------------------------------------------------------
+          # Updates alert status using the Security Detection Engine API.
+          # Valid statuses: "open" (new), "acknowledged" (in progress), "closed"
+          # (resolved).
+          # Status changes are audited and visible in the alert timeline.
+          # Liquid syntax used:
+          # - References current item in foreach loop
+          # -------------------------------------------------------------------------
+          - name: update_alert_statuss
+            type: kibana.SetAlertsStatus
+            with:
+              status: "in-progress"
+              signal_ids: ["{{foreach.item._id}}"]
+              fetcher:
+                skip_ssl_verification: true
+
+  # -------------------------------------------------------------------------
+  # STEP 14: create_new_case
+  # -------------------------------------------------------------------------
+  # Evaluates a condition and executes different steps based on the result.
+  # Enables dynamic workflow behavior based on runtime data.
+  # -------------------------------------------------------------------------
+  - name: create_new_case
+    type: if
+    condition: 'steps.find_similar_case_id.output: ""'
+    steps:
+
+      # -------------------------------------------------------------------------
+      # STEP 15: esql_get_context_for_host
+      # -------------------------------------------------------------------------
+      # Executes an ES|QL query against Elasticsearch.
+      # ES|QL is a piped query language for filtering, aggregating, and
+      # transforming data.
+      # Filters results using WHERE clauses to match specific conditions.
+      # Output: {{ steps.esql_get_context_for_host.output.values }} contains the
+      # result rows.
+      # Liquid syntax used:
+      # - References trigger event data (e.g., alert details)
+      # -------------------------------------------------------------------------
+      - name: esql_get_context_for_host
+        type: elasticsearch.esql.query
+        with:
+          format: json
+          query: FROM logs-* | WHERE @timestamp > now() - 5m AND host.name == "{{event.alerts[0].host.name}}" | keep host.os.type, host.os.version
+
+      # -------------------------------------------------------------------------
+      # STEP 16: esql_first_login_user
+      # -------------------------------------------------------------------------
+      # Executes an ES|QL query against Elasticsearch.
+      # ES|QL is a piped query language for filtering, aggregating, and
+      # transforming data.
+      # This query aggregates data using STATS to compute metrics like COUNT,
+      # AVG, SUM.
+      # Filters results using WHERE clauses to match specific conditions.
+      # Output: {{ steps.esql_first_login_user.output.values }} contains the
+      # result rows.
+      # Liquid syntax used:
+      # - References trigger event data (e.g., alert details)
+      # -------------------------------------------------------------------------
+      - name: esql_first_login_user
+        type: elasticsearch.esql.query
+        with:
+          format: json
+          query: FROM logs-system* | WHERE @timestamp > now() - 1y AND user.name == "{{event.alerts[0].user.name}}"  | STATS  first_login = MIN(@timestamp) | keep first_login
+
+      # -------------------------------------------------------------------------
+      # STEP 17: esql_get_context_for_user
+      # -------------------------------------------------------------------------
+      # Executes an ES|QL query against Elasticsearch.
+      # ES|QL is a piped query language for filtering, aggregating, and
+      # transforming data.
+      # Filters results using WHERE clauses to match specific conditions.
+      # Output: {{ steps.esql_get_context_for_user.output.values }} contains the
+      # result rows.
+      # Liquid syntax used:
+      # - References trigger event data (e.g., alert details)
+      # -------------------------------------------------------------------------
+      - name: esql_get_context_for_user
+        type: elasticsearch.esql.query
+        with:
+          format: json
+          query: FROM logs-* | WHERE @timestamp > now() - 5m AND host.name == "{{event.alerts[0].user.name}}"
+
+      # -------------------------------------------------------------------------
+      # STEP 18: esql_get_alerts_by_host
+      # -------------------------------------------------------------------------
+      # Executes an ES|QL query against Elasticsearch.
+      # ES|QL is a piped query language for filtering, aggregating, and
+      # transforming data.
+      # This query aggregates data using STATS to compute metrics like COUNT,
+      # AVG, SUM.
+      # Filters results using WHERE clauses to match specific conditions.
+      # Output: {{ steps.esql_get_alerts_by_host.output.values }} contains the
+      # result rows.
+      # Liquid syntax used:
+      # - `sort` - Sorts array elements
+      # - References trigger event data (e.g., alert details)
+      # -------------------------------------------------------------------------
+      - name: esql_get_alerts_by_host
+        type: elasticsearch.esql.query
+        with:
+          format: json
+          query: FROM .alerts-security.alerts-* | WHERE @timestamp > now() - 1h AND host.name == "{{event.alerts[0].host.name}}" | STATS triggers = COUNT(*), last_trigger = MAX(@timestamp) BY rule_name = kibana.alert.rule.name, host.name | SORT triggers DESC | KEEP last_trigger, triggers,rule_name, host.name
+
+      # -------------------------------------------------------------------------
+      # STEP 19: esql_get_alerts_by_user
+      # -------------------------------------------------------------------------
+      # Executes an ES|QL query against Elasticsearch.
+      # ES|QL is a piped query language for filtering, aggregating, and
+      # transforming data.
+      # This query aggregates data using STATS to compute metrics like COUNT,
+      # AVG, SUM.
+      # Filters results using WHERE clauses to match specific conditions.
+      # Output: {{ steps.esql_get_alerts_by_user.output.values }} contains the
+      # result rows.
+      # Liquid syntax used:
+      # - `sort` - Sorts array elements
+      # - References trigger event data (e.g., alert details)
+      # -------------------------------------------------------------------------
+      - name: esql_get_alerts_by_user
+        type: elasticsearch.esql.query
+        with:
+          format: json
+          query: FROM .alerts-security.alerts-* | WHERE @timestamp > now() - 1h AND user.name == "{{event.alerts[0].user.name}}" | STATS triggers = COUNT(*), last_trigger = MAX(@timestamp) BY rule_name = kibana.alert.rule.name, user.name | SORT triggers DESC | KEEP last_trigger, triggers,rule_name, user.name
+
+      # -------------------------------------------------------------------------
+      # STEP 20: esql_get_cases_with_indicators
+      # -------------------------------------------------------------------------
+      # Executes an ES|QL query against Elasticsearch.
+      # ES|QL is a piped query language for filtering, aggregating, and
+      # transforming data.
+      # Filters results using WHERE clauses to match specific conditions.
+      # Output: {{ steps.esql_get_cases_with_indicators.output.values }} contains
+      # the result rows.
+      # Liquid syntax used:
+      # - References trigger event data (e.g., alert details)
+      # -------------------------------------------------------------------------
+      - name: esql_get_cases_with_indicators
+        type: elasticsearch.esql.query
+        with:
+          format: json
+          query: FROM .kibana_alerting_cases* METADATA _id | WHERE (cases.description LIKE  "*{{event.alerts[0].user.name}}*" and  cases.description LIKE  "*{{event.alerts[0].process.name}}*") or (cases.description LIKE  "*{{event.alerts[0].host.name}}*" and  cases.description LIKE  "*{{event.alerts[0].process.name}}*") | EVAL case_id = REPLACE(_id, ".*:","")   | keep cases.created_at, cases.title, case_id
+          
+
+      # -------------------------------------------------------------------------
+      # STEP 21: kibana_createCaseDefaultSpace_step
+      # -------------------------------------------------------------------------
+      # Creates a new case using the Kibana Cases API (POST /api/cases).
+      # Cases provide a workspace for investigating and tracking security
+      # incidents.
+      # Required: title, description, owner (e.g., "securitySolution"), tags,
+      # severity.
+      # Output: {{ steps.kibana_createCaseDefaultSpace_step.output.id }} contains
+      # the new case ID.
+      # Liquid syntax used:
+      # - `default` - Provides fallback value if nil
+      # - `date` - Formats date/time value
+      # - `{% if %}` - Conditional logic based on expression
+      # - References output from previous step(s)
+      # - References trigger event data (e.g., alert details)
+      # -------------------------------------------------------------------------
+      - name: kibana_createCaseDefaultSpace_step
+        type: kibana.createCaseDefaultSpace
+        with:
+          connector:
+            fields: null
+            id: none
+            name: none
+            type: .none
+          description: |
+            > **What is the actual date of the alert:**
+            signal.original_time: `{{ event.alerts[0].signal.original_time | date: "%Y-%m-%d %H:%M:%S.%L", "Europe/Amsterdam" | default: "niet beschikbaar" }}`
+            >**Which hosts and users are involved in the alert:**
+            {% if event.alerts[0].host.name %}
+            host.name: `{{event.alerts[0].host.name | default: "niet beschikbaar"}}` van type: `{{steps.esql_get_context_for_host.output.values[0] | default: "niet beschikbaar"}}` met eigenaar: `{{steps.esql_get_context_for_host.output.values[1] | default: "niet beschikbaar"}}`. AD account aangemaakt op: TODO
+            {% endif %}
+            {% if event.alerts[0].source.hostname %}
+            source.hostname: `{{event.alerts[0].source.hostname | default: "niet beschikbaar"}}` 
+            {% endif %}
+            {% if event.alerts[0].destination.hostname %}
+            destination.hostname: `{{event.alerts[0].destination.hostname | default: "niet beschikbaar"}}` 
+            {% endif %}
+            {% if event.alerts[0].user.name %}
+            user.name: `{{event.alerts[0].user.name | default: "niet beschikbaar"}}` uit afdeling: `{{steps.esql_get_context_for_user.output.values[0] | default: "niet beschikbaar"}}` met email: `{{steps.esql_get_context_for_user.output.values[1] | default: "niet beschikbaar"}}` en voor het eerst gezien op: `{{steps.esql_first_login_user.output.values[0] | default: "niet beschikbaar"}}` 
+            {% endif %}
+            >**Important IOC information**
+            {% if steps.choose-ioc-using-event-category.output %}
+            Virustotal malicious hits `{{steps.lookup-hash-via-vt.output.data.data[0].attributes.last_analysis_stats.malicious | default: "niet beschikbaar"}}` on `{{steps.choose-ioc-using-event-category.output | default: "niet beschikbaar"}}`. Last checked on `{{ steps.lookup-hash-via-vt.output.data.data[0].attributes.last_analysis_date | default: "niet beschikbaar" | date: "%Y-%m-%d %H:%M:%S" }}` [click]({{steps.lookup-hash-via-vt.output.data.data[0].links.self}}). Make sure to rescan if older than an hour. 
+            {% endif %}  
+            >**Which processes and IOCs are involved in the alert:**
+            {% if event.alerts[0].process.command_line %}
+            process.command_line: `{{event.alerts[0].process.command_line | default: "niet beschikbaar"}}`  
+            {% endif %}
+            {% if event.alerts[0].process.parent.command_line %}
+            process.parent.command_line: `{{event.alerts[0].process.parent.command_line | default: "niet beschikbaar"}}` 
+            {% endif %}
+            {% if event.alerts[0].file.hash.sha256 %}
+            file.hash: `{{event.alerts[0].file.hash.sha256 | default: "niet beschikbaar"}}` | file.name: `{{event.alerts[0].file.name | default: "niet beschikbaar"}}` | [Check Hash](https://www.virustotal.com/gui/file/{{event.alerts[0].file.hash.sha256}}/detection)
+            {% endif %}
+            {% if event.alerts[0].process.hash.sha256 %}
+            process.hash: `{{event.alerts[0].process.hash.sha256 | default: "niet beschikbaar"}}`  | process.name: `{{event.alerts[0].process.name | default: "niet beschikbaar"}}` | [Check Hash](https://www.virustotal.com/gui/file/{{event.alerts[0].process.hash.sha256}}/detection)
+            {% endif %}
+            {% if event.alerts[0].process.parent.hash.sha256 %}
+            process.parent.hash: `{{event.alerts[0].process.parent.hash.sha256 | default: "niet beschikbaar"}}`  | process.parent.name: `{{event.alerts[0].process.parent.name | default: "niet beschikbaar"}}`  | [Check Hash](https://www.virustotal.com/gui/file/{{event.alerts[0].process.parent.hash.sha256}}/detection)
+            {% endif %}
+            {% if event.alerts[0].dll.hash.sha256 %}
+            dll.hash: `{{event.alerts[0].dll.hash.sha256 | default: "niet beschikbaar"}}`  | dll.name: `{{event.alerts[0].dll.name | default: "niet beschikbaar"}}` | [Check Hash](https://www.virustotal.com/gui/file/{{event.alerts[0].dll.hash.sha256}}/detection)
+            {% endif %}
+            {% if event.alerts[0].source.ip %}
+            source.ip: `{{event.alerts[0].source.ip | default: "niet beschikbaar"}}` | [Check Hash](https://www.virustotal.com/gui/ip-address/{{event.alerts[0].source.ip}}/detection)
+            {% endif %}
+            {% if event.alerts[0].destination.ip %}
+            destination.ip: `{{event.alerts[0].destination.ip | default: "niet beschikbaar"}}`  | [Check Hash](https://www.virustotal.com/gui/ip-address/{{event.alerts[0].destination.ip}}/detection)
+            {% endif %}
+            {% if event.alerts[0].url.domain %}
+            url.domain: `{{event.alerts[0].url.domain | default: "niet beschikbaar"}}` | [Check Hash](https://www.virustotal.com/gui/domain/{{event.alerts[0].url.domain}}/detection)
+            {% endif %}
+            {% if event.alerts[0].dns.question.name %}
+            dns.question.name:  `{{event.alerts[0].dns.question.name | default: "niet beschikbaar"}}` | [Check Hash](https://www.virustotal.com/gui/domain/{{event.alerts[0].dns.question.name}}/detection)
+            {% endif %}
+            >**Other reports on this host or user in the last 24 hours** [click here for 7 days]({{consts.kibana_domain}}/app/discover#/?_g=(filters:!(),refreshInterval:(pause:!f,value:10000),time:(from:now-7d%2Fd,to:now))&_tab=(tabId:a3e873a7-8172-4567-ab53-179f81b002d9)&_a=(breakdownField:kibana.alert.workflow_status,columns:!(rule_name,triggers),dataSource:(type:esql),filters:!(),grid:(columns:('@timestamp':(width:218),message:(width:360))),interval:auto,query:(esql:'FROM%20.alerts-security.alerts-*%20%7C%20WHERE%20@timestamp%20%3E%20now()%20-%207d%20AND%20(user.name%20%3D%3D%20%22{{event.alerts[0].user.name}}%22%20or%20host.name%3D%3D%22{{event.alerts[0].host.name}}%22)%20%7C%20STATS%20triggers%20%3D%20COUNT(*)%20BY%20rule_name%20%3D%20kibana.alert.rule.name%20%7C%20SORT%20triggers%20DESC%20%7C%20KEEP%20rule_name,%20triggers'),sort:!()))
+            {% for value in steps.esql_get_alerts_by_host.output.values  %}
+            {{ value[0]   | date: "%Y-%m-%d %H:%M:%S.%L", "Europe/Amsterdam" | default: "niet beschikbaar" }} | Aantal triggers: `{{ value[1] | default: "niet beschikbaar" }}` | laatste op: `{{ value[2] | default: "niet beschikbaar" }}` | hit op: `{{ value[3] | default: "niet beschikbaar" }}`
+            {% endfor %}
+            {% for value in steps.esql_get_alerts_by_user.output.value %}
+            {{ value[0]   | date: "%Y-%m-%d %H:%M:%S.%L", "Europe/Amsterdam" | default: "niet beschikbaar" }} | Aantal triggers: `{{ value[1] | default: "niet beschikbaar" }}` | laatste op: `{{ value[2] | default: "niet beschikbaar" }}` | hit op: `{{ value[3] | default: "niet beschikbaar" }}`
+            {% endfor %}
+            >**Analysis**
+                  AI Response {{steps.ask_ai_for_summary.output.data}}
+            >**Conclusion**
+          owner: securitySolution
+          settings:
+            syncAlerts: true
+          severity: high
+          tags:
+            - Automatic
+          title: "{{steps.create_case_title.output}}"
+          fetcher:
+            skip_ssl_verification: true
+
+      # -------------------------------------------------------------------------
+      # STEP 22: esql_get_case_id
+      # -------------------------------------------------------------------------
+      # Executes an ES|QL query against Elasticsearch.
+      # ES|QL is a piped query language for filtering, aggregating, and
+      # transforming data.
+      # Filters results using WHERE clauses to match specific conditions.
+      # Output: {{ steps.esql_get_case_id.output.values }} contains the result
+      # rows.
+      # Liquid syntax used:
+      # - References output from previous step(s)
+      # -------------------------------------------------------------------------
+      - name: esql_get_case_id
+        type: elasticsearch.esql.query
+        with:
+          format: json
+          query: FROM .kibana_alerting_cases* METADATA _id | WHERE cases.created_at > now() - 5m and cases.title LIKE "{{steps.create_case_title.output}}"| LIMIT 1 | EVAL case_id = REPLACE(_id, ".*:","")  | keep  case_id
+
+      # -------------------------------------------------------------------------
+      # STEP 23: loop_over_results
+      # -------------------------------------------------------------------------
+      # Iterates over a collection of items, executing the nested steps for each.
+      # Access the current item via {{ item }} within the loop body.
+      # Liquid syntax used:
+      # - `json` - Converts object to JSON string
+      # - References trigger event data (e.g., alert details)
+      # -------------------------------------------------------------------------
+      - name: loop_over_results
+        type: foreach
+        foreach: "{{event.alerts | json}}"
+        steps:
+
+          # -------------------------------------------------------------------------
+          # STEP 24: process-item
+          # -------------------------------------------------------------------------
+          # Outputs a message to the workflow execution log for visibility.
+          # Liquid syntax used:
+          # - References current item in foreach loop
+          # -------------------------------------------------------------------------
+          - name: process-item
+            type: console
+            with:
+              message: "{{foreach.item.id}}"    
+
+          # -------------------------------------------------------------------------
+          # STEP 25: add_alert_to_case
+          # -------------------------------------------------------------------------
+          # Attaches a security alert to a case (POST /api/cases/{caseId}/comments).
+          # Links the alert to the case for consolidated investigation and timeline
+          # tracking.
+          # Required: alertId, index (.alerts-security.alerts-*), rule info, type:
+          # "alert".
+          # Liquid syntax used:
+          # - References output from previous step(s)
+          # - References current item in foreach loop
+          # -------------------------------------------------------------------------
+          - name: add_alert_to_case
+            type: kibana.addCaseCommentDefaultSpace
+            with:
+              alertId: "{{foreach.item._id}}"
+              index: .alerts-security.alerts-*
+              owner: securitySolution
+              rule:
+                id: "{{foreach.item.signal.rule.id}}"
+                name: "{{foreach.item.signal.rule.name}}"
+              type: alert
+              caseId: "{{steps.kibana_createCaseDefaultSpace_step.output.id}}"
+              fetcher:
+                skip_ssl_verification: true
+
+          # -------------------------------------------------------------------------
+          # STEP 26: update_alert_status
+          # -------------------------------------------------------------------------
+          # Updates alert status using the Security Detection Engine API.
+          # Valid statuses: "open" (new), "acknowledged" (in progress), "closed"
+          # (resolved).
+          # Status changes are audited and visible in the alert timeline.
+          # Liquid syntax used:
+          # - References current item in foreach loop
+          # -------------------------------------------------------------------------
+          - name: update_alert_status
+            type: kibana.SetAlertsStatus
+            with:
+            # Add parameters here. Press Ctrl+Space to see all available options
+              status: "in-progress"
+              signal_ids: ["{{foreach.item._id}}"]
+              fetcher:
+                  skip_ssl_verification: true
+
+      # -------------------------------------------------------------------------
+      # STEP 27: email_step
+      # -------------------------------------------------------------------------
+      # Executes the email action with the configured parameters.
+      # Liquid syntax used:
+      # - References output from previous step(s)
+      # - References workflow constant(s)
+      # - References trigger event data (e.g., alert details)
+      # -------------------------------------------------------------------------
+      - name: email_step
+        type: email
+        connector-id: Gmail
+        with:
+          to:
+            - "{{consts.email_to_send_to}}"
+          subject: "{{steps.create_case_title.output}} [{{event.alerts[0].signal.rule.severity}}]"
+          message: "{{steps.create_case_title.output}}"

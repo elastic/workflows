@@ -1,0 +1,77 @@
+# =============================================================================
+# Workflow: 🏷️ Add Alert Tag - TP
+# Category: security/detection
+#
+# This workflow YAML defines a manual trigger for adding tags to an alert in
+# a security operations context. It allows users to input an alert ID, which
+# is then used in the step to set the alert tags, specifically adding
+# "Triaged as True Positive by AI" while not removing any existing tags. The
+# workflow is enabled and structured to facilitate the tagging process
+# efficiently.
+#
+# Author: Elastic
+# Created: 2025-11-07
+# =============================================================================
+version: "1"
+name: 🏷️ Add Alert Tag - TP
+enabled: true
+
+# ---------------------------------------------------------------------------
+# TRIGGERS
+# ---------------------------------------------------------------------------
+# Defines how and when this workflow is executed. Supported trigger types:
+#   - manual: Run on-demand from the Kibana UI or API
+#   - scheduled: Run on a recurring schedule (every: "5m" or rrule)
+#   - alert: Run automatically when a security alert is triggered
+# ---------------------------------------------------------------------------
+triggers:
+  - type: manual
+
+# ---------------------------------------------------------------------------
+# INPUTS
+# ---------------------------------------------------------------------------
+# Runtime parameters provided when the workflow is triggered. Each input
+# can specify:
+#   - name: Unique identifier for the input
+#   - type: Data type (string, number, boolean, array, object)
+#   - required: Whether the input must be provided (default: false)
+#   - default: Default value if not provided
+# Reference inputs in steps using {{ inputs.input_name }} syntax
+# ---------------------------------------------------------------------------
+inputs:
+  - name: alertid
+    type: string
+    default: "abc123"
+
+# ---------------------------------------------------------------------------
+# STEPS
+# ---------------------------------------------------------------------------
+# The sequence of actions this workflow performs. Each step executes an
+# action and can reference outputs from previous steps. Key properties:
+#   - name: Unique identifier for referencing this step's output
+#   - type: The action to perform (http, elasticsearch.search, foreach, etc.)
+#   - with: Parameters passed to the action
+#   - condition: Optional expression to conditionally run the step
+#   - on-failure: Error handling configuration (retry, continue, etc.)
+# Access step outputs using {{ steps.step_name.output.field }} syntax
+# ---------------------------------------------------------------------------
+steps:
+
+  # -------------------------------------------------------------------------
+  # STEP 1: Set_Alert_Tag
+  # -------------------------------------------------------------------------
+  # Modifies tags on security alerts for categorization and workflow
+  # tracking.
+  # Specify tags_to_add and tags_to_remove arrays to modify alert tags.
+  # Common uses: marking triage status, priority levels, or investigation
+  # outcomes.
+  # Liquid syntax used:
+  # - References workflow input parameter(s)
+  # -------------------------------------------------------------------------
+  - name: Set_Alert_Tag
+    type: kibana.SetAlertTags
+    with:
+      ids: ["{{inputs.alertid}}"]
+      tags: 
+        tags_to_add: ["Triaged as True Positive by AI"]
+        tags_to_remove: []
