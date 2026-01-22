@@ -23,7 +23,7 @@ This document explains the core concepts behind Elastic Workflows and how to use
 
 ## What Are Workflows?
 
-Elastic Workflows are **declarative automation pipelines** that define security operations as code. Instead of writing procedural scripts, you describe:
+Elastic Workflows are **declarative automation pipelines** that define automation as code. Instead of writing procedural scripts, you describe:
 
 - **What** you want to accomplish (actions)
 - **When** it should run (triggers)
