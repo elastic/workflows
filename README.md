@@ -1,9 +1,5 @@
 <p align="center">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="https://images.contentstack.io/v3/assets/bltefdd0b53724fa2ce/blt5d10f3a91df97d15/620a9ac8849cd422f315b83d/logo-elastic-vertical-reverse.svg">
-    <source media="(prefers-color-scheme: light)" srcset="https://images.contentstack.io/v3/assets/bltefdd0b53724fa2ce/blt36f2da8d650732a0/620a9ac8849cd4798f4a12c0/logo-elastic-vertical-color.svg">
-    <img alt="Elastic Logo" src="https://cdn.worldvectorlogo.com/logos/elastic.svg" height="80">
-  </picture>
+  <img alt="Elastic Logo" src="https://cdn.worldvectorlogo.com/logos/elastic.svg" height="80">
 </p>
 
 <h1 align="center">Elastic Workflow Library</h1>
