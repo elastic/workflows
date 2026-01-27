@@ -12,7 +12,6 @@
 # Created: 2025-11-09
 # Tags: demo, getting-started
 # =============================================================================
-version: 1
 name: 🏔️ National Parks Demo
 description: Creates an Elasticsearch index, loads sample national park data using bulk operations, searches for parks by category, and displays the results.
 enabled: true
@@ -150,6 +149,7 @@ steps:
    type: elasticsearch.bulk
    with:
      index: "{{ consts.indexName }}"
+     refresh: wait_for # wait for documents to be available for search, so the next step can find them
      operations:
 
        # -------------------------------------------------------------------------
@@ -157,6 +157,7 @@ steps:
        # -------------------------------------------------------------------------
        # Executes the specified action with the configured parameters.
        # -------------------------------------------------------------------------
+       - create: {}
        - name: "Yellowstone National Park"
          category: "geothermal"
          description: "America's first national park, established in 1872, famous for Old Faithful geyser and diverse wildlife including grizzly bears, wolves, and herds of bison and elk."
@@ -168,6 +169,7 @@ steps:
        # -------------------------------------------------------------------------
        # Executes the specified action with the configured parameters.
        # -------------------------------------------------------------------------
+       - create: {}
        - name: "Grand Canyon National Park"
          category: "canyon"
          description: "Home to the immense Grand Canyon, a mile deep gorge carved by the Colorado River, revealing millions of years of geological history in its colorful rock layers."
@@ -179,6 +181,7 @@ steps:
        # -------------------------------------------------------------------------
        # Executes the specified action with the configured parameters.
        # -------------------------------------------------------------------------
+       - create: {}
        - name: "Yosemite National Park"
          category: "mountain"
          description: "Known for its granite cliffs, waterfalls, clear streams, giant sequoia groves, and biological diversity. El Capitan and Half Dome are iconic rock formations."
@@ -189,6 +192,7 @@ steps:
        # -------------------------------------------------------------------------
        # Executes the specified action with the configured parameters.
        # -------------------------------------------------------------------------
+       - create: {}
        - name: "Zion National Park"
          category: "canyon"
          description: "Utah's first national park featuring cream, pink, and red sandstone cliffs soaring into a blue sky. Famous for the Narrows wade through the Virgin River."
@@ -199,6 +203,7 @@ steps:
        # -------------------------------------------------------------------------
        # Executes the specified action with the configured parameters.
        # -------------------------------------------------------------------------
+       - create: {}
        - name: "Rocky Mountain National Park"
          category: "mountain"
          description: "Features mountain environments, from wooded forests to mountain tundra, with over 150 riparian lakes and diverse wildlife at various elevations."
