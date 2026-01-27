@@ -133,12 +133,13 @@ steps:
           # - References current item in foreach loop
           # -------------------------------------------------------------------------
           - name: index_article
-            type: elasticsearch.request
+            type: elasticsearch.bulk
             with:
-              method: "POST"
-              path: "/logs/_bulk"
-              headers: 
-                content-type: application/x-ndjson
-              body: |
-                { "create": {} }
-                {"rss.title": {{ foreach.items[foreach.index].title | json }}, "@timestamp": {{ foreach.items[foreach.index].pubDate | date: "%Y-%m-%dT%H:%M:%S%z" | json }}, "rss.link": {{ foreach.items[foreach.index].link | json }}, "rss.message": {{ foreach.items[foreach.index].description | json }}}
+              index: "logs"
+              operations:
+                - create: {}
+                - name: "{{ foreach.items[foreach.index].title }}"
+                  rss.title: "{{ foreach.items[foreach.index].title | json }}"
+                  "@timestamp": '{{ foreach.items[foreach.index].pubDate | date: "%Y-%m-%dT%H:%M:%S%z" | json }}'
+                  rss.link: "{{ foreach.items[foreach.index].link | json }}"
+                  rss.message: "{{ foreach.items[foreach.index].description | json }}"
