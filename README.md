@@ -601,7 +601,7 @@ This project is licensed under the Apache License 2.0 - see [LICENSE](./LICENSE.
 
 ## Resources
 
-- [Elastic Workflows Documentation](https://www.elastic.co/guide/en/kibana/current/workflows.html)
+- [Elastic Workflows Documentation](https://www.elastic.co/docs/explore-analyze/workflows)
 - [ES|QL Reference](https://www.elastic.co/guide/en/elasticsearch/reference/current/esql.html)
 - [Kibana API Reference](https://www.elastic.co/guide/en/kibana/current/api.html)
 
