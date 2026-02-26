@@ -75,6 +75,7 @@ steps:
   # - References workflow input parameter(s)
   # -------------------------------------------------------------------------
   - name: converse_with_agent
+  # This type is currently not available
     type: kibana.post_agent_builder_converse
     with:
       agent_id: "{{ inputs.agent_id }}"

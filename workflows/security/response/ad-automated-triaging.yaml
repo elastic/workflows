@@ -28,7 +28,7 @@ enabled: true
 #   - Filtering in the workflow library
 #   - Grouping related workflows together
 # ---------------------------------------------------------------------------
-tags: []
+tags:
   - Example
   - Agentic Workflow
   - SOC Agent
