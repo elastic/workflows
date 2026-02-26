@@ -67,6 +67,7 @@ steps:
   # - `json` - Converts object to JSON string
   # -------------------------------------------------------------------------
   - name: kibana_post_agent_builder_converse_step
+  # This type is currently not available
     type: kibana.post_agent_builder_converse
     with:
       agent_id: alert.triage

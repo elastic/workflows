@@ -50,6 +50,7 @@ steps:
   # Output: {{ steps.eql-search.output.hits }} contains matching documents.
   # -------------------------------------------------------------------------
   - name: eql-search
+  # This type is currently not available
     type: elasticsearch.eql.search
     with:
       index: fraud-workshop-smurfing
