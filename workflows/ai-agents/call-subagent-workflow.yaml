@@ -75,11 +75,11 @@ steps:
   # - References workflow input parameter(s)
   # -------------------------------------------------------------------------
   - name: converse_with_agent
-  # This type is currently not available
-    type: kibana.post_agent_builder_converse
+    type: ai.agent
+    agent-id: "{{ inputs.agent_id }}"
+    create-conversation: true
     with:
-      agent_id: "{{ inputs.agent_id }}"
-      input: "{{ inputs.question }}"
+      message: "{{ inputs.question }}"
 
   # -------------------------------------------------------------------------
   # STEP 2: filter_output
@@ -91,4 +91,4 @@ steps:
   - name: filter_output
     type: console
     with:
-      message: "{{ steps.converse_with_agent.output.response.message }}"
+      message: "{{ steps.converse_with_agent.output.message }}"

@@ -56,20 +56,18 @@ steps:
   # -------------------------------------------------------------------------
   # STEP 2: kibana_post_agent_builder_converse_step
   # -------------------------------------------------------------------------
-  # Invokes an AI agent via the Kibana Agent Builder API (POST
-  # /api/agent/chat).
+  # Invokes an AI agent.
   # The agent uses configured tools and knowledge to analyze input and
   # respond.
   # Required: agentId, conversationId (or create new), input message.
-  # Output: {{ steps.kibana_post_agent_builder_converse_step.output.message
+  # Output: {{ steps.converse_with_agent.output.message
   # }} contains the agent response.
   # Liquid syntax used:
   # - `json` - Converts object to JSON string
   # -------------------------------------------------------------------------
-  - name: kibana_post_agent_builder_converse_step
-  # This type is currently not available
-    type: kibana.post_agent_builder_converse
+  - name: converse_with_agent
+    type: ai.agent
+    agent-id: alert.triage
+    create-conversation: true
     with:
-      agent_id: alert.triage
-      input: "Triage the following alert based on your system instructions: {{event | json}}"
-    timeout: 600s
+      message: "Triage the following alert based on your system instructions: {{event | json}}"
