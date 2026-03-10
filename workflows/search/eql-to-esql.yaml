@@ -50,16 +50,16 @@ steps:
   # Output: {{ steps.eql-search.output.hits }} contains matching documents.
   # -------------------------------------------------------------------------
   - name: eql-search
-  # This type is currently not available
-    type: elasticsearch.eql.search
+    type: elasticsearch.request
     with:
-      index: fraud-workshop-smurfing
-      query: >
-        sequence by account.name with maxspan=1d
-          [any where account.event == "deposit" and event.amount >= 1 and event.amount <= 1000] 
-          [any where account.event == "withdrawal" and event.amount >= 1 and event.amount <= 1000] 
-          [any where account.event == "deposit" and event.amount >= 1 and event.amount <= 1000]
-          
+      method: "POST"
+      path: "/fraud-workshop-smurfing/_eql/search"
+      body:
+        query: >
+          sequence by account.name with maxspan=1d
+            [any where account.event == "deposit" and event.amount >= 1 and event.amount <= 1000] 
+            [any where account.event == "withdrawal" and event.amount >= 1 and event.amount <= 1000] 
+            [any where account.event == "deposit" and event.amount >= 1 and event.amount <= 1000]
 
 
   # -------------------------------------------------------------------------
