@@ -92,7 +92,7 @@ steps:
         KEY: "{{ consts.caldera_api_key }}"
         Content-Type: application/json
       body:
-        enable_agent_output: {{ consts.include_output }}
+        enable_agent_output: "{{ consts.include_output }}"
     on-failure:
       retry:
         max-attempts: 2
