@@ -56,48 +56,39 @@ steps:
         You are a system that generates Observability alerts.
         I need you to generate 2 alerts.
       
-      schema: {
-        type: array,
-        items: {
-          "title": "ObservabilityAlert",
-          "type": "object",
-          "additionalProperties": false,
-          "required": ["id", "severity", "message", "timestamp"],
-          "properties": {
-            "id": {
-              "type": "string",
-              "description": "Unique identifier of the alert",
+      schema: 
+        items: 
+          "title": "ObservabilityAlert"
+          "type": "object"
+          "additionalProperties": false
+          "required": ["id", "severity", "message", "timestamp"]
+          "properties": 
+            "id": 
+              "type": "string"
+              "description": "Unique identifier of the alert"
               "examples": ["cpu_high_usage", "service_down"]
-            },
-            "severity": {
-              "type": "string",
-              "description": "Alert severity level",
+            "severity": 
+              "type": "string"
+              "description": "Alert severity level"
               "enum": ["critical", "high", "medium", "low", "info"]
-            },
-            "message": {
-              "type": "string",
-              "description": "Human-readable alert description",
-              "minLength": 1,
+            "message":
+              "type": "string"
+              "description": "Human-readable alert description"
+              "minLength": 1
               "examples": ["CPU usage exceeded 90% for 5 minutes"]
-            },
-            "timestamp": {
-              "type": "string",
-              "description": "Alert creation time in ISO 8601 format",
-              "format": "date-time",
+            "timestamp": 
+              "type": "string"
+              "description": "Alert creation time in ISO 8601 format"
+              "format": "date-time"
               "examples": ["2026-01-13T09:45:00Z"]
-            },
-            "description": {
-            "type": "string",
-            "description": "Human-readable explanation of the security alert",
-            "minLength": 1,
-            "examples": [
-              "Multiple failed login attempts detected from a single IP address",
-              "Malware signature matched during endpoint scan"
-            ]
-          },
-          }
-        }
-      }
+            "description": 
+              "type": "string"
+              "description": "Human-readable explanation of the security alert"
+              "minLength": 1
+              "examples": [
+                "Multiple failed login attempts detected from a single IP address",
+                "Malware signature matched during endpoint scan"
+              ]
 
 
   # -------------------------------------------------------------------------
@@ -115,7 +106,6 @@ steps:
         I need you to generate 3 alerts.
       
       schema:
-        type: array
         items:
           title: SecurityAlert
           type: object
