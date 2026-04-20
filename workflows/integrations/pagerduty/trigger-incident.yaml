@@ -1,0 +1,85 @@
+# =============================================================================
+# Workflow: 🚨 Trigger PagerDuty Incident
+# Category: integrations/pagerduty
+#
+# This workflow integrates with PagerDuty to automatically or manually trigger
+# a high-priority incident using the PagerDuty Events API v2. It is ideal for
+# escalating critical security alerts to the on-call SOC analyst directly
+# from Elastic Security.
+#
+# Author: Community
+# Created: 2026-04-20
+# Tags: [pagerduty, incident, on-call, notification]
+# =============================================================================
+version: '1'
+name: 🚨 Trigger PagerDuty Incident
+description: Triggers a new incident in PagerDuty via the Events API v2.
+enabled: true
+
+# ---------------------------------------------------------------------------
+# TAGS
+# ---------------------------------------------------------------------------
+tags:
+  - pagerduty
+  - incident
+  - on-call
+
+# ---------------------------------------------------------------------------
+# TRIGGERS
+# ---------------------------------------------------------------------------
+triggers:
+  - type: manual
+  - type: alert
+
+# ---------------------------------------------------------------------------
+# INPUTS
+# ---------------------------------------------------------------------------
+inputs:
+  - name: summary
+    type: string
+    description: "A brief text summary of the event"
+    default: "Critical Security Alert Detected"
+    required: true
+  - name: source
+    type: string
+    description: "The unique location of the affected system"
+    default: "Elastic Security Workflows"
+  - name: severity
+    type: string
+    description: "The perceived severity of the status (critical, error, warning, info)"
+    default: "critical"
+
+# ---------------------------------------------------------------------------
+# CONSTANTS
+# ---------------------------------------------------------------------------
+consts:
+  pagerduty_routing_key: "YOUR-PAGERDUTY-ROUTING-KEY-HERE"
+
+# ---------------------------------------------------------------------------
+# STEPS
+# ---------------------------------------------------------------------------
+steps:
+
+  # -------------------------------------------------------------------------
+  # STEP 1: enqueue_pagerduty_incident
+  # -------------------------------------------------------------------------
+  # Sends an event to the PagerDuty Events API v2 to trigger an incident.
+  # Liquid syntax used:
+  # - References workflow constant(s)
+  # - References workflow input parameter(s)
+  # -------------------------------------------------------------------------
+  - name: enqueue_pagerduty_incident
+    type: http
+    with:
+      url: https://events.pagerduty.com/v2/enqueue
+      method: POST
+      headers:
+        Content-Type: application/json
+      body:
+        routing_key: "{{ consts.pagerduty_routing_key }}"
+        event_action: trigger
+        payload:
+          summary: "{{ inputs.summary }}"
+          source: "{{ inputs.source }}"
+          severity: "{{ inputs.severity }}"
+      timeout: 30s
