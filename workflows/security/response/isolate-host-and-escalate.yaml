@@ -1,0 +1,94 @@
+# =============================================================================
+# Workflow: Isolate Host & Create Case
+# Category: security/response
+#
+# This workflow is designed to quickly contain a compromised host by issuing
+# an isolation command via Elastic Defend. It then automatically creates a
+# high-severity case in Kibana and notifies the SOC team via Slack.
+#
+# Author: Nathan MARTEL
+# Created: 2026-04-20
+# Tags: [security, response, isolation, endpoint]
+# =============================================================================
+name: "Automated Host Isolation & Case Creation"
+description: "Isolates a compromised host via Elastic Defend, creates a Kibana case, and sends a Slack alert."
+enabled: true
+
+# ---------------------------------------------------------------------------
+# TAGS
+# ---------------------------------------------------------------------------
+tags:
+  - security
+  - response
+  - isolation
+
+# ---------------------------------------------------------------------------
+# TRIGGERS
+# ---------------------------------------------------------------------------
+triggers:
+  - type: manual
+
+# ---------------------------------------------------------------------------
+# CONSTANTS
+# ---------------------------------------------------------------------------
+consts:
+  slack_webhook_url: "YOUR-SLACK-WEBHOOK-URL-HERE"
+
+# ---------------------------------------------------------------------------
+# INPUTS
+# ---------------------------------------------------------------------------
+inputs:
+  - name: endpoint_id
+    type: string
+    description: "The Elastic Defend endpoint ID to isolate"
+    required: true
+  - name: reason
+    type: string
+    description: "Reason for isolation"
+    default: "Suspected critical malware activity detected. Automated containment triggered."
+
+# ---------------------------------------------------------------------------
+# STEPS
+# ---------------------------------------------------------------------------
+steps:
+
+  # Step 1: Isolate the host using Elastic Defend
+  - name: isolate_endpoint
+    type: kibana.request
+    with:
+      method: POST
+      path: /api/endpoint/action/isolate
+      body:
+        endpoint_ids:
+          - "{{ inputs.endpoint_id }}"
+        comment: "Automated isolation: {{ inputs.reason }}"
+    on-failure:
+      continue: true # We continue to create the case even if the endpoint is currently offline
+
+  # Step 2: Create a Kibana Case to track the incident
+  - name: create_triage_case
+    type: kibana.cases
+    with:
+      action: create
+      title: "🚨 Urgent: Host Isolated - {{ inputs.endpoint_id }}"
+      description: |
+        An endpoint has been isolated from the network to prevent lateral movement.
+        
+        *Endpoint ID:* {{ inputs.endpoint_id }}
+        *Reason:* {{ inputs.reason }}
+        
+        Please investigate the host and the associated alerts immediately.
+      severity: critical
+      tags:
+        - automated-isolation
+    
+  # Step 3: Notify the SOC channel via Slack
+  - name: notify_soc_slack
+    type: http
+    with:
+      method: POST
+      url: "{{ consts.slack_webhook_url }}"
+      headers:
+        Content-Type: application/json
+      body:
+        text: "🚨 *Automated Host Isolation Triggered*\n*Endpoint ID:* `{{ inputs.endpoint_id }}`\n*Reason:* {{ inputs.reason }}\n*Case Created:* Yes"
