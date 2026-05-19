@@ -4,7 +4,7 @@ PCI DSS and compliance automation workflows powered by Agent Builder's `pci-comp
 
 ## Prerequisites
 
-- Elastic Stack **9.3+** with Workflows and Agent Builder enabled
+- Elastic Stack **9.5+** with Workflows and Agent Builder enabled
 - The **pci-compliance** skill available in Agent Builder (see [elastic/kibana#256060](https://github.com/elastic/kibana/pull/256060))
 - An **elastic-ai-agent** (or custom agent with the pci-compliance skill attached)
 - For notifications: a Slack or email connector ID configured in `consts.notification_connector_id`
