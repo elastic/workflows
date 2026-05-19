@@ -1,0 +1,153 @@
+# =============================================================================
+# Workflow: PCI DSS Daily Compliance Assessment
+# Category: security/compliance
+#
+# Scheduled daily PCI DSS v4.0.1 posture assessment using Agent Builder's
+# pci-compliance skill. Discovers data sources, runs requirement checks,
+# indexes the report to pci-compliance-results for trending, and sends a
+# summary via a configured Slack or email connector.
+#
+# Author: Elastic
+# Created: 2026-05-19
+# Tags: Example, Compliance, PCI DSS, Scheduled
+# =============================================================================
+version: "1"
+name: PCI DSS Daily Compliance Assessment
+description: >
+  Scheduled daily PCI DSS v4.0.1 posture assessment using Agent Builder's
+  pci-compliance skill. Discovers data sources, runs requirement checks across
+  available telemetry, indexes results for dashboard trending, and sends a
+  summary notification via a configured Slack or email connector.
+enabled: false
+tags:
+  - Example
+  - Compliance
+  - PCI DSS
+  - Scheduled
+
+# ---------------------------------------------------------------------------
+# CONSTANTS
+# ---------------------------------------------------------------------------
+consts:
+  results_index: pci-compliance-results
+  notification_connector_id: YOUR-SLACK-OR-EMAIL-CONNECTOR-ID
+
+# ---------------------------------------------------------------------------
+# TRIGGERS
+# ---------------------------------------------------------------------------
+triggers:
+  - type: scheduled
+    with:
+      rrule:
+        freq: DAILY
+        interval: 1
+        tzid: UTC
+        byhour:
+          - 6
+        byminute:
+          - 0
+  - type: manual
+
+# ---------------------------------------------------------------------------
+# STEPS
+# ---------------------------------------------------------------------------
+steps:
+
+  # -------------------------------------------------------------------------
+  # STEP 1: run_assessment
+  # -------------------------------------------------------------------------
+  # Invokes elastic-ai-agent with the pci-compliance skill to run a full
+  # posture assessment. Output text is in steps.run_assessment.output.message
+  # -------------------------------------------------------------------------
+  - name: run_assessment
+    type: ai.agent
+    agent-id: elastic-ai-agent
+    with:
+      message: |
+        Run a full PCI DSS v4.0.1 compliance assessment. Use the pci-compliance
+        skill and follow this workflow:
+
+        1. Call pci_scope_discovery to identify all PCI-relevant indices and
+           their ECS coverage.
+        2. Run pci_compliance_check for ALL requirements against discovered
+           indices.
+        3. If any indices have low ECS coverage, call pci_field_mapper and
+           note the mapping gaps.
+        4. Call pci_compliance_report in executive format with recommendations.
+
+        Compile the final output as plain text (no markdown code fences):
+
+        PCI DSS v4.0.1 — Daily Compliance Report
+        Date: <today YYYY-MM-DD>
+        Data sources: <number of indices>
+        ================================
+        SCORECARD
+
+        For each requirement, one line:
+        <GREEN/AMBER/RED/NOT_ASSESSABLE> Req <id> — <name> — confidence: <level>
+
+        ================================
+        SUMMARY
+        X Compliant, Y Non-Compliant, Z Partial, W Not Assessable
+        Overall score: <score>/100
+
+        FINDINGS REQUIRING ACTION (if any RED):
+        For each RED: requirement, evidence, remediation.
+
+        DATA GAPS (if any NOT_ASSESSABLE):
+        For each: missing fields/sources, recommended onboarding.
+
+        ================================
+        Automated assessment. Does not constitute PCI QSA attestation.
+    timeout: 900s
+    on-failure:
+      continue: true
+      retry:
+        max-attempts: 2
+        delay: 10s
+
+  # -------------------------------------------------------------------------
+  # STEP 2: log_output
+  # -------------------------------------------------------------------------
+  - name: log_output
+    type: console
+    with:
+      message: "PCI assessment complete: {{ steps.run_assessment.output | json }}"
+
+  # -------------------------------------------------------------------------
+  # STEP 3: index_report
+  # -------------------------------------------------------------------------
+  # Indexes the assessment report for trending dashboards and audit history.
+  # -------------------------------------------------------------------------
+  - name: index_report
+    type: elasticsearch.index
+    with:
+      index: "{{ consts.results_index }}"
+      id: "pci-daily-{{ execution.id }}"
+      document:
+        "@timestamp": "{{ execution.startedAt }}"
+        report_type: daily_full_assessment
+        source: agent-builder-pci-compliance-skill
+        report: "{{ steps.run_assessment.output.message }}"
+    on-failure:
+      continue: true
+
+  # -------------------------------------------------------------------------
+  # STEP 4: send_notification
+  # -------------------------------------------------------------------------
+  # Sends the report via a Kibana action connector (Slack, email, etc.).
+  # Set consts.notification_connector_id before enabling this workflow.
+  # -------------------------------------------------------------------------
+  - name: send_notification
+    type: kibana.request
+    with:
+      method: POST
+      path: /api/actions/connector/{{ consts.notification_connector_id }}/_execute
+      body:
+        params:
+          message: "{{ steps.run_assessment.output.message }}"
+    on-failure:
+      continue: true
+      retry:
+        max-attempts: 2
+        delay: 5s
