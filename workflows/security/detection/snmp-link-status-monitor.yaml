@@ -117,11 +117,11 @@ steps:
       # ID.
       # -------------------------------------------------------------------------
       - name: create_incident_case
-        type: kibana.createCaseDefaultSpace
+        type: cases.createCase
         with:
           title: "Network Link Down Event"
           description: "Automated case created for network link down event."
-          tags: 
+          tags:
             - "network"
             - "snmp"
             - "link-down"
@@ -130,11 +130,6 @@ steps:
           owner: "securitySolution"
           settings:
             syncAlerts: true
-          connector:
-            id: "none"
-            name: "none"
-            type: ".none"
-            fields: null
     
     else:
 

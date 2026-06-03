@@ -27,22 +27,21 @@ enabled: true
 triggers:
   - type: manual
     enabled: true
-
-# ---------------------------------------------------------------------------
-# INPUTS
-# ---------------------------------------------------------------------------
-# Runtime parameters provided when the workflow is triggered. Each input
-# can specify:
-#   - name: Unique identifier for the input
-#   - type: Data type (string, number, boolean, array, object)
-#   - required: Whether the input must be provided (default: false)
-#   - default: Default value if not provided
-# Reference inputs in steps using {{ inputs.input_name }} syntax
-# ---------------------------------------------------------------------------
-inputs:
-  - name: splunk_query
-    default: source="ep1data.json" host="SRVWIN01" index="omm-ep1" sourcetype="OMM"
-    type: string
+    # ---------------------------------------------------------------------------
+    # INPUTS
+    # ---------------------------------------------------------------------------
+    # Runtime parameters provided when the workflow is triggered. Each input
+    # can specify:
+    #   - name: Unique identifier for the input
+    #   - type: Data type (string, number, boolean, array, object)
+    #   - required: Whether the input must be provided (default: false)
+    #   - default: Default value if not provided
+    # Reference inputs in steps using {{ inputs.input_name }} syntax
+    # ---------------------------------------------------------------------------
+    inputs:
+      - name: splunk_query
+        default: source="ep1data.json" host="SRVWIN01" index="omm-ep1" sourcetype="OMM"
+        type: string
 
 # ---------------------------------------------------------------------------
 # CONSTANTS
@@ -56,7 +55,6 @@ inputs:
 # ---------------------------------------------------------------------------
 consts:
   splunk_url: https://nlp.swiftcrypto.com:8089
-  splunk_auth: secret
 
 # ---------------------------------------------------------------------------
 # STEPS
@@ -81,14 +79,17 @@ steps:
   # - `url_encode` - URL-encodes string
   # - References workflow constant(s)
   # -------------------------------------------------------------------------
+  # TODO: create an HTTP connector in Kibana that holds your Splunk
+  # Basic/token Authorization header, then replace the placeholder below so
+  # the credential never appears in this YAML.
   - name: send_search_to_splunk
     type: http
+    connector-id: REPLACE_WITH_CONNECTOR_ID
     with:
       url: '{{consts.splunk_url}}/services/search/jobs'
       method: POST
       headers:
         Content-Type: application/x-www-form-urlencoded
-        Authorization: '{{consts.splunk_auth}}'
       body: 'search={{ ''search '' | append: inputs.splunk_query | url_encode }}&count=0&output_mode=json'
       timeout: 30s
       fetcher:
@@ -114,14 +115,16 @@ steps:
   # - References output from previous step(s)
   # - References workflow constant(s)
   # -------------------------------------------------------------------------
+  # TODO: create an HTTP connector in Kibana that holds your Splunk
+  # Basic/token Authorization header, then replace the placeholder below so
+  # the credential never appears in this YAML.
   - name: get-splunk-results
     type: http
+    connector-id: REPLACE_WITH_CONNECTOR_ID
     with:
       url: >-
         {{consts.splunk_url}}/services/search/jobs/{{steps.send_search_to_splunk.output.data.sid}}/results?output_mode=json&count=0
       method: GET
-      headers:
-        Authorization: '{{consts.splunk_auth}}'
       timeout: 30s
       fetcher:
         skip_ssl_verification: true

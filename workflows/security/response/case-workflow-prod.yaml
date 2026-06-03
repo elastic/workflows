@@ -238,11 +238,9 @@ steps:
       # - References output from previous step(s)
       # -------------------------------------------------------------------------
       - name: get_case_to_update
-        type: kibana.getCaseDefaultSpace
+        type: cases.getCase
         with:
-          caseId: "{{steps.find_similar_case_id.output}}"
-          fetcher:
-            skip_ssl_verification: true
+          case_id: "{{steps.find_similar_case_id.output}}"
 
       # -------------------------------------------------------------------------
       # STEP 10: update_case_tag
@@ -254,16 +252,14 @@ steps:
       # control.
       # -------------------------------------------------------------------------
       - name: update_case_tag
-        type: kibana.updateCaseDefaultSpace
+        type: cases.updateCase
         with:
-          cases:
-            - id: "{{steps.get_case_to_update.id}}"
-              tags:
-                - new-alert
-                - automatic
-              version: "{{steps.get_case_to_update.version}}"
-              fetcher:
-                skip_ssl_verification: true
+          case_id: "{{steps.get_case_to_update.output.case.id}}"
+          version: "{{steps.get_case_to_update.output.case.version}}"
+          updates:
+            tags:
+              - new-alert
+              - automatic
 
       # -------------------------------------------------------------------------
       # STEP 11: loop_trough_alerts_to_update
@@ -292,18 +288,15 @@ steps:
           # - References current item in foreach loop
           # -------------------------------------------------------------------------
           - name: add_alert_to_case_update #logic to add the alert to the case
-            type: kibana.addCaseCommentDefaultSpace
+            type: cases.addAlerts
             with:
-              alertId: "{{foreach.item._id}}"
-              index: .alerts-security.alerts-*
-              owner: securitySolution
-              rule:
-                id: "{{foreach.item.signal.rule.id}}"
-                name: "{{foreach.item.signal.rule.name}}"
-              type: alert
-              caseId: "{{steps.find_similar_case_id.output}}"
-              fetcher:
-                skip_ssl_verification: true
+              case_id: "{{steps.find_similar_case_id.output}}"
+              alerts:
+                - alertId: "{{foreach.item._id}}"
+                  index: .alerts-security.alerts-*
+                  rule:
+                    id: "{{foreach.item.signal.rule.id}}"
+                    name: "{{foreach.item.signal.rule.name}}"
 
           # -------------------------------------------------------------------------
           # STEP 13: update_alert_statuss
@@ -459,7 +452,7 @@ steps:
       # incidents.
       # Required: title, description, owner (e.g., "securitySolution"), tags,
       # severity.
-      # Output: {{ steps.kibana_createCaseDefaultSpace_step.output.id }} contains
+      # Output: {{ steps.kibana_createCaseDefaultSpace_step.output.case.id }} contains
       # the new case ID.
       # Liquid syntax used:
       # - `default` - Provides fallback value if nil
@@ -469,13 +462,8 @@ steps:
       # - References trigger event data (e.g., alert details)
       # -------------------------------------------------------------------------
       - name: kibana_createCaseDefaultSpace_step
-        type: kibana.createCaseDefaultSpace
+        type: cases.createCase
         with:
-          connector:
-            fields: null
-            id: none
-            name: none
-            type: .none
           description: |
             > **What is the actual date of the alert:**
             signal.original_time: `{{ event.alerts[0].signal.original_time | date: "%Y-%m-%d %H:%M:%S.%L", "Europe/Amsterdam" | default: "niet beschikbaar" }}`
@@ -535,7 +523,7 @@ steps:
             {{ value[0]   | date: "%Y-%m-%d %H:%M:%S.%L", "Europe/Amsterdam" | default: "niet beschikbaar" }} | Aantal triggers: `{{ value[1] | default: "niet beschikbaar" }}` | laatste op: `{{ value[2] | default: "niet beschikbaar" }}` | hit op: `{{ value[3] | default: "niet beschikbaar" }}`
             {% endfor %}
             >**Analysis**
-                  AI Response {{steps.ask_ai_for_summary.output.data}}
+                  AI Response: TODO: add an ai.prompt step named "ask_ai_for_summary" (or equivalent) before this step to populate the AI summary here; the original workflow referenced steps.ask_ai_for_summary.output.data which does not exist in this file.
             >**Conclusion**
           owner: securitySolution
           settings:
@@ -544,8 +532,6 @@ steps:
           tags:
             - Automatic
           title: "{{steps.create_case_title.output}}"
-          fetcher:
-            skip_ssl_verification: true
 
       # -------------------------------------------------------------------------
       # STEP 22: esql_get_case_id
@@ -604,18 +590,15 @@ steps:
           # - References current item in foreach loop
           # -------------------------------------------------------------------------
           - name: add_alert_to_case
-            type: kibana.addCaseCommentDefaultSpace
+            type: cases.addAlerts
             with:
-              alertId: "{{foreach.item._id}}"
-              index: .alerts-security.alerts-*
-              owner: securitySolution
-              rule:
-                id: "{{foreach.item.signal.rule.id}}"
-                name: "{{foreach.item.signal.rule.name}}"
-              type: alert
-              caseId: "{{steps.kibana_createCaseDefaultSpace_step.output.id}}"
-              fetcher:
-                skip_ssl_verification: true
+              case_id: "{{steps.kibana_createCaseDefaultSpace_step.output.case.id}}"
+              alerts:
+                - alertId: "{{foreach.item._id}}"
+                  index: .alerts-security.alerts-*
+                  rule:
+                    id: "{{foreach.item.signal.rule.id}}"
+                    name: "{{foreach.item.signal.rule.name}}"
 
           # -------------------------------------------------------------------------
           # STEP 26: update_alert_status

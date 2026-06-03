@@ -26,6 +26,10 @@ enabled: true
 # ---------------------------------------------------------------------------
 triggers:
   - type: manual
+    inputs:
+      - name: alertid
+        type: string
+        default: "abc123"
 
 # ---------------------------------------------------------------------------
 # INPUTS
@@ -38,10 +42,6 @@ triggers:
 #   - default: Default value if not provided
 # Reference inputs in steps using {{ inputs.input_name }} syntax
 # ---------------------------------------------------------------------------
-inputs:
-  - name: alertid
-    type: string
-    default: "abc123"
 
 # ---------------------------------------------------------------------------
 # STEPS

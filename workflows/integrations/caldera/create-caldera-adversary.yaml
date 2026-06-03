@@ -31,31 +31,6 @@ description:
 # ---------------------------------------------------------------------------
 consts:
   caldera_base_url: http://example.com:8888
-  caldera_api_key: API-key
-
-# ---------------------------------------------------------------------------
-# INPUTS
-# ---------------------------------------------------------------------------
-# Runtime parameters provided when the workflow is triggered. Each input
-# can specify:
-#   - name: Unique identifier for the input
-#   - type: Data type (string, number, boolean, array, object)
-#   - required: Whether the input must be provided (default: false)
-#   - default: Default value if not provided
-# Reference inputs in steps using {{ inputs.input_name }} syntax
-# ---------------------------------------------------------------------------
-inputs:
-  - name: adversary_name
-    type: string
-    description: The name of the adversary profile to create
-    required: true
-  - name: description
-    type: string
-    description: A short and concise description about the adversary collection and what it does
-  - name: ability_ids
-    type: array
-    description: Array of ability ID's that will be used in the adversary, in the order of execution
-    required: true
 
 # ---------------------------------------------------------------------------
 # TRIGGERS
@@ -67,6 +42,29 @@ inputs:
 # ---------------------------------------------------------------------------
 triggers:
   - type: manual
+    # ---------------------------------------------------------------------------
+    # INPUTS
+    # ---------------------------------------------------------------------------
+    # Runtime parameters provided when the workflow is triggered. Each input
+    # can specify:
+    #   - name: Unique identifier for the input
+    #   - type: Data type (string, number, boolean, array, object)
+    #   - required: Whether the input must be provided (default: false)
+    #   - default: Default value if not provided
+    # Reference inputs in steps using {{ inputs.input_name }} syntax
+    # ---------------------------------------------------------------------------
+    inputs:
+      - name: adversary_name
+        type: string
+        description: The name of the adversary profile to create
+        required: true
+      - name: description
+        type: string
+        description: A short and concise description about the adversary collection and what it does
+      - name: ability_ids
+        type: array
+        description: Array of ability ID's that will be used in the adversary, in the order of execution
+        required: true
 
 # ---------------------------------------------------------------------------
 # STEPS
@@ -91,13 +89,15 @@ steps:
   # - References workflow input parameter(s)
   # - References workflow constant(s)
   # -------------------------------------------------------------------------
+  # TODO: create an HTTP connector in Kibana that holds your Caldera API key (the KEY
+  # header), then replace the placeholder below so the credential never appears in this YAML.
   - name: create_adversary
     type: http
+    connector-id: REPLACE_WITH_CONNECTOR_ID
     with:
       url: "{{ consts.caldera_base_url }}/api/v2/adversaries"
       method: POST
       headers:
-        KEY: "{{ consts.caldera_api_key }}"
         Content-Type: application/json
       body:
         name: "{{ inputs.adversary_name }}"

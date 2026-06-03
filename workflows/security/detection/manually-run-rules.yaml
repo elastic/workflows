@@ -26,6 +26,11 @@ enabled: true
 # ---------------------------------------------------------------------------
 triggers:
   - type: manual
+    inputs:
+      - name: ruleids
+        default:
+          - 0cf84558-943e-4739-b469-9c504b168f51
+        type: array
 
 # ---------------------------------------------------------------------------
 # TAGS
@@ -37,11 +42,6 @@ triggers:
 #   - Grouping related workflows together
 # ---------------------------------------------------------------------------
 tags: []
-inputs:
-  - name: ruleids
-    default:
-      - 0cf84558-943e-4739-b469-9c504b168f51
-    type: array
 
 # ---------------------------------------------------------------------------
 # STEPS
@@ -91,14 +91,17 @@ steps:
       # - `minus` - Subtracts number
       # - References current item in foreach loop
       # -------------------------------------------------------------------------
+      # TODO: create an HTTP connector in Kibana that holds your Elastic Cloud
+      # Authorization header (e.g. an API key), then replace the placeholder below so
+      # the credential never appears in this YAML.
       - name: run_rule_manually
         type: http
+        connector-id: REPLACE_WITH_CONNECTOR_ID
         with:
           url: >-
             https://your-deployment.elastic-cloud.com
           method: POST
           headers:
-            Authorization: secret
             kbn-xsrf: kibana
             x-elastic-internal-origin: Kibana
           timeout: 30s

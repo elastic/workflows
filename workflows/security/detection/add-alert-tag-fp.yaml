@@ -24,22 +24,21 @@ enabled: true
 # ---------------------------------------------------------------------------
 triggers:
   - type: manual
-
-# ---------------------------------------------------------------------------
-# INPUTS
-# ---------------------------------------------------------------------------
-# Runtime parameters provided when the workflow is triggered. Each input
-# can specify:
-#   - name: Unique identifier for the input
-#   - type: Data type (string, number, boolean, array, object)
-#   - required: Whether the input must be provided (default: false)
-#   - default: Default value if not provided
-# Reference inputs in steps using {{ inputs.input_name }} syntax
-# ---------------------------------------------------------------------------
-inputs:
-  - name: alertid
-    type: string
-    default: "abc123"
+    # -------------------------------------------------------------------------
+    # INPUTS
+    # -------------------------------------------------------------------------
+    # Runtime parameters provided when the workflow is triggered. Each input
+    # can specify:
+    #   - name: Unique identifier for the input
+    #   - type: Data type (string, number, boolean, array, object)
+    #   - required: Whether the input must be provided (default: false)
+    #   - default: Default value if not provided
+    # Reference inputs in steps using {{ inputs.input_name }} syntax
+    # -------------------------------------------------------------------------
+    inputs:
+      - name: alertid
+        type: string
+        default: "abc123"
 
 # ---------------------------------------------------------------------------
 # STEPS

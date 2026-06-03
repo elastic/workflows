@@ -26,21 +26,17 @@ tags:
   - Case Management
 
 # ---------------------------------------------------------------------------
-# INPUTS
-# ---------------------------------------------------------------------------
-inputs:
-  - name: requirements
-    type: string
-    description: >
-      Comma-separated PCI requirement IDs to check (e.g. "8.3.4,4.1,2.2.4").
-      Use "all" for a full assessment.
-    default: all
-
-# ---------------------------------------------------------------------------
 # TRIGGERS
 # ---------------------------------------------------------------------------
 triggers:
   - type: manual
+    inputs:
+      - name: requirements
+        type: string
+        description: >
+          Comma-separated PCI requirement IDs to check (e.g. "8.3.4,4.1,2.2.4").
+          Use "all" for a full assessment.
+        default: all
   - type: scheduled
     with:
       rrule:
@@ -116,13 +112,8 @@ steps:
     condition: 'steps.run_check.output.message: *RED*'
     steps:
       - name: create_case
-        type: kibana.createCaseDefaultSpace
+        type: cases.createCase
         with:
-          connector:
-            fields: null
-            id: none
-            name: none
-            type: .none
           description: |
             ## PCI DSS v4.0.1 Compliance Violations Detected
 

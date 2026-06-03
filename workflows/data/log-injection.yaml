@@ -27,6 +27,14 @@ enabled: true
 tags: []
 triggers:
   - type: manual
+    inputs:
+      - name: phase_results
+        type: string
+        default: >-
+          {"@timestamp": "2025-11-15T10:30:00Z","event.category": ["file"],"event.type": ["creation"],"event.action":
+          "creation","host.name": "abc","host.ip": "1.2.3.4","file.path": "123","file.name": "hello","file.extension":
+          "com","file.directory": "123","process.name": "process","process.command_line": "oh no command","tags":
+          ["emulated", "log-injection"],"smeagol.emulation_id": "123","smeagol.phase": 1}
 
 # ---------------------------------------------------------------------------
 # INPUTS
@@ -39,15 +47,6 @@ triggers:
 #   - default: Default value if not provided
 # Reference inputs in steps using {{ inputs.input_name }} syntax
 # ---------------------------------------------------------------------------
-inputs:
-  - name: phase_results
-    type: string
-    default: >-
-      {"@timestamp": "2025-11-15T10:30:00Z","event.category": ["file"],"event.type": ["creation"],"event.action":
-      "creation","host.name": "abc","host.ip": "1.2.3.4","file.path": "123","file.name": "hello","file.extension":
-      "com","file.directory": "123","process.name": "process","process.command_line": "oh no command","tags":
-      ["emulated", "log-injection"],"smeagol.emulation_id": "123","smeagol.phase": 1}
-
 # ---------------------------------------------------------------------------
 # STEPS
 # ---------------------------------------------------------------------------
@@ -71,12 +70,13 @@ steps:
   # Liquid syntax used:
   # - References workflow input parameter(s)
   # -------------------------------------------------------------------------
+  # TODO: create an Elasticsearch connector in Kibana (Stack Management -> Connectors)
+  # that holds the Authorization credentials for this request, then replace the placeholder
+  # below so the credential never appears in this YAML.
   - name: elasticsearch_request_step
     type: elasticsearch.request
+    connector-id: REPLACE_WITH_CONNECTOR_ID
     with:
       method: POST
       path: emulation-logs/_doc?pipeline=smeagol-log-injection
-      headers:
-        Authorization: secret
-        content-type: application/json
       body: ${{inputs.phase_results}}

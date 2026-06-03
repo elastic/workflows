@@ -46,7 +46,6 @@ triggers:
 consts:
   splunk_url: <YOUR_SPLUNK_URL>/services/search/jobs
   splunk_auth_token: <BASE64_ENCODED_CREDENTIALS>
-  vt_api_key: <YOUR_VIRUSTOTAL_API_KEY>
   kibana_base_url: <YOUR_KIBANA_URL>
 
 
@@ -76,23 +75,15 @@ steps:
 # - References trigger event data (e.g., alert details)
 # -------------------------------------------------------------------------
 - name: create_case
-  type: kibana.request
+  type: cases.createCase
   with:
-    method: POST
-    path: /api/cases
-    body:
-      title: "Investigation: {{ event.rule.name }}"
-      description: "Auto-generated case for alert investigation. Rule: {{ event.rule.name }}, Severity: {{ event.alerts[0].kibana.alert.severity }}, User: {{ event.alerts[0].user.name }}, Source IP: {{ event.alerts[0].source.ip }}, Destination IP: {{ event.alerts[0].destination.ip }}"
-      tags: ["automated", "splunk-enriched", "virustotal", "ai-analyzed"]
-      severity: "high"
-      owner: "securitySolution"
-      connector:
-        id: "none"
-        name: "none"
-        type: ".none"
-        fields: null
-      settings:
-        syncAlerts: true
+    title: "Investigation: {{ event.rule.name }}"
+    description: "Auto-generated case for alert investigation. Rule: {{ event.rule.name }}, Severity: {{ event.alerts[0].kibana.alert.severity }}, User: {{ event.alerts[0].user.name }}, Source IP: {{ event.alerts[0].source.ip }}, Destination IP: {{ event.alerts[0].destination.ip }}"
+    tags: ["automated", "splunk-enriched", "virustotal", "ai-analyzed"]
+    severity: "high"
+    owner: "securitySolution"
+    settings:
+      syncAlerts: true
 
 
 # -------------------------------------------------------------------------
@@ -108,18 +99,15 @@ steps:
 # - References trigger event data (e.g., alert details)
 # -------------------------------------------------------------------------
 - name: attach_alert
-  type: kibana.request
+  type: cases.addAlerts
   with:
-    method: POST
-    path: /api/cases/{{ steps.create_case.output.id }}/comments
-    body:
-      type: alert
-      alertId: "{{ event.alerts[0]._id }}"
-      index: "{{ event.alerts[0]._index }}"
-      owner: "securitySolution"
-      rule:
-        id: "{{ event.rule.id }}"
-        name: "{{ event.rule.name }}"
+    case_id: "{{ steps.create_case.output.case.id }}"
+    alerts:
+      - alertId: "{{ event.alerts[0]._id }}"
+        index: "{{ event.alerts[0]._index }}"
+        rule:
+          id: "{{ event.rule.id }}"
+          name: "{{ event.rule.name }}"
 
 
 # -------------------------------------------------------------------------
@@ -159,22 +147,18 @@ steps:
 # -------------------------------------------------------------------------
 # STEP 4: virustotal_lookup
 # -------------------------------------------------------------------------
-# Makes an API call to VirusTotal to check for malicious indicators.
-# Returns threat intelligence data including detection results and
-# reputation scores.
+# Retrieves the VirusTotal IP report for the destination IP.
+# Returns { id, attributes, reputation, country } directly (no data.data wrapper).
 # Liquid syntax used:
-# - References workflow constant(s)
 # - References trigger event data (e.g., alert details)
 # -------------------------------------------------------------------------
+# TODO: create a VirusTotal connector in Kibana (Stack Management → Connectors,
+# type: VirusTotal) that holds your x-apikey, then replace the placeholder below.
 - name: virustotal_lookup
-  type: http
+  type: virustotal.getIpReport
+  connector-id: REPLACE_WITH_CONNECTOR_ID
   with:
-    url: "https://www.virustotal.com/api/v3/ip_addresses/{{ event.alerts[0].destination.ip }}"
-    method: GET
-    headers:
-      Content-Type: application/json
-      x-apikey: "{{ consts.vt_api_key }}"
-    timeout: 30s
+    ip: "{{ event.alerts[0].destination.ip }}"
 
 
 # -------------------------------------------------------------------------
@@ -213,15 +197,11 @@ steps:
 # - References trigger event data (e.g., alert details)
 # -------------------------------------------------------------------------
 - name: ai_analysis
-  type: inference.unified_completion
+  type: ai.prompt
   connector-id: <YOUR_LLM_CONNECTOR_NAME>
   with:
-    body:
-      messages:
-        - role: "system"
-          content: "You are a senior SOC analyst specializing in threat detection and incident response."
-        - role: "user"
-          content: "Analyze this security alert, related logs, and threat intelligence to determine the attack chain and provide recommendations. Alert: {{ event.rule.name }} - User {{ event.alerts[0].user.name }} from source IP {{ event.alerts[0].source.ip }} connecting to destination {{ event.alerts[0].destination.ip }}. Splunk logs: {{ steps.query_splunk.output.data.results | json }}. VirusTotal results for destination IP {{ event.alerts[0].destination.ip }}: {{ steps.virustotal_lookup.output.data.data | json }}. Provide: 1) Attack timeline 2) Severity assessment based on VirusTotal reputation 3) Recommended response actions"
+    systemPrompt: "You are a senior SOC analyst specializing in threat detection and incident response."
+    prompt: "Analyze this security alert, related logs, and threat intelligence to determine the attack chain and provide recommendations. Alert: {{ event.rule.name }} - User {{ event.alerts[0].user.name }} from source IP {{ event.alerts[0].source.ip }} connecting to destination {{ event.alerts[0].destination.ip }}. Splunk logs: {{ steps.query_splunk.output.data.results | json }}. VirusTotal results for destination IP {{ event.alerts[0].destination.ip }}: {{ steps.virustotal_lookup.output | json }}. Provide: 1) Attack timeline 2) Severity assessment based on VirusTotal reputation 3) Recommended response actions"
 
 
 # -------------------------------------------------------------------------
@@ -236,14 +216,10 @@ steps:
 # - References trigger event data (e.g., alert details)
 # -------------------------------------------------------------------------
 - name: add_splunk_findings
-  type: kibana.request
+  type: cases.addComment
   with:
-    method: POST
-    path: /api/cases/{{ steps.create_case.output.id }}/comments
-    body:
-      type: user
-      owner: "securitySolution"
-      comment: "SPLUNK CONTEXT ENRICHMENT for user {{ event.alerts[0].user.name }}: {{ steps.query_splunk.output.data.results | json }}"
+    case_id: "{{ steps.create_case.output.case.id }}"
+    comment: "SPLUNK CONTEXT ENRICHMENT for user {{ event.alerts[0].user.name }}: {{ steps.query_splunk.output.data.results | json }}"
 
 
 # -------------------------------------------------------------------------
@@ -257,14 +233,10 @@ steps:
 # - References workflow constant(s)
 # -------------------------------------------------------------------------
 - name: add_discover_link
-  type: kibana.request
+  type: cases.addComment
   with:
-    method: POST
-    path: /api/cases/{{ steps.create_case.output.id }}/comments
-    body:
-      type: user
-      owner: "securitySolution"
-      comment: "Investigate related logs in Discover: {{ consts.kibana_base_url }}/app/discover#/view/{{ steps.create_saved_search.output.id }}"
+    case_id: "{{ steps.create_case.output.case.id }}"
+    comment: "Investigate related logs in Discover: {{ consts.kibana_base_url }}/app/discover#/view/{{ steps.create_saved_search.output.id }}"
 
 
 # -------------------------------------------------------------------------
@@ -279,14 +251,10 @@ steps:
 # - References trigger event data (e.g., alert details)
 # -------------------------------------------------------------------------
 - name: add_virustotal_findings
-  type: kibana.request
+  type: cases.addComment
   with:
-    method: POST
-    path: /api/cases/{{ steps.create_case.output.id }}/comments
-    body:
-      type: user
-      owner: "securitySolution"
-      comment: "VIRUSTOTAL ANALYSIS for {{ event.alerts[0].destination.ip }} -- Reputation Score: {{ steps.virustotal_lookup.output.data.data.attributes.reputation }} | Country: {{ steps.virustotal_lookup.output.data.data.attributes.country }} | ASN: {{ steps.virustotal_lookup.output.data.data.attributes.asn }} | AS Owner: {{ steps.virustotal_lookup.output.data.data.attributes.as_owner }} | Network: {{ steps.virustotal_lookup.output.data.data.attributes.network }} | Tags: {{ steps.virustotal_lookup.output.data.data.attributes.tags | json }} | Malicious: {{ steps.virustotal_lookup.output.data.data.attributes.last_analysis_stats.malicious }} | Suspicious: {{ steps.virustotal_lookup.output.data.data.attributes.last_analysis_stats.suspicious }} | Harmless: {{ steps.virustotal_lookup.output.data.data.attributes.last_analysis_stats.harmless }} | Community Votes - Malicious: {{ steps.virustotal_lookup.output.data.data.attributes.total_votes.malicious }}, Harmless: {{ steps.virustotal_lookup.output.data.data.attributes.total_votes.harmless }} | VT Link: https://www.virustotal.com/gui/ip-address/{{ event.alerts[0].destination.ip }}"
+    case_id: "{{ steps.create_case.output.case.id }}"
+    comment: "VIRUSTOTAL ANALYSIS for {{ event.alerts[0].destination.ip }} -- Reputation Score: {{ steps.virustotal_lookup.output.reputation }} | Country: {{ steps.virustotal_lookup.output.country }} | ASN: {{ steps.virustotal_lookup.output.attributes.asn }} | AS Owner: {{ steps.virustotal_lookup.output.attributes.as_owner }} | Network: {{ steps.virustotal_lookup.output.attributes.network }} | Tags: {{ steps.virustotal_lookup.output.attributes.tags | json }} | Malicious: {{ steps.virustotal_lookup.output.attributes.last_analysis_stats.malicious }} | Suspicious: {{ steps.virustotal_lookup.output.attributes.last_analysis_stats.suspicious }} | Harmless: {{ steps.virustotal_lookup.output.attributes.last_analysis_stats.harmless }} | Community Votes - Malicious: {{ steps.virustotal_lookup.output.attributes.total_votes.malicious }}, Harmless: {{ steps.virustotal_lookup.output.attributes.total_votes.harmless }} | VT Link: https://www.virustotal.com/gui/ip-address/{{ event.alerts[0].destination.ip }}"
 
 
 # -------------------------------------------------------------------------
@@ -299,14 +267,10 @@ steps:
 # - References output from previous step(s)
 # -------------------------------------------------------------------------
 - name: add_ai_summary
-  type: kibana.request
+  type: cases.addComment
   with:
-    method: POST
-    path: /api/cases/{{ steps.create_case.output.id }}/comments
-    body:
-      type: user
-      owner: "securitySolution"
-      comment: "AI INVESTIGATION SUMMARY: {{ steps.ai_analysis.output.choices[0].message.content }}"
+    case_id: "{{ steps.create_case.output.case.id }}"
+    comment: "AI INVESTIGATION SUMMARY: {{ steps.ai_analysis.output.content }}"
 
 
 # -------------------------------------------------------------------------
@@ -319,4 +283,4 @@ steps:
 - name: log_complete
   type: console
   with:
-    message: "Case created: {{ steps.create_case.output.id }} with Splunk, VirusTotal, saved search, and AI analysis"
+    message: "Case created: {{ steps.create_case.output.case.id }} with Splunk, VirusTotal, saved search, and AI analysis"

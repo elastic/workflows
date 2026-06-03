@@ -26,25 +26,24 @@ enabled: true
 # ---------------------------------------------------------------------------
 triggers:
   - type: manual
-
-# ---------------------------------------------------------------------------
-# INPUTS
-# ---------------------------------------------------------------------------
-# Runtime parameters provided when the workflow is triggered. Each input
-# can specify:
-#   - name: Unique identifier for the input
-#   - type: Data type (string, number, boolean, array, object)
-#   - required: Whether the input must be provided (default: false)
-#   - default: Default value if not provided
-# Reference inputs in steps using {{ inputs.input_name }} syntax
-# ---------------------------------------------------------------------------
-inputs:
-  - name: .index
-    required: true
-    type: string
-  - name: .id
-    required: true
-    type: string
+    # ---------------------------------------------------------------------------
+    # INPUTS
+    # ---------------------------------------------------------------------------
+    # Runtime parameters provided when the workflow is triggered. Each input
+    # can specify:
+    #   - name: Unique identifier for the input
+    #   - type: Data type (string, number, boolean, array, object)
+    #   - required: Whether the input must be provided (default: false)
+    #   - default: Default value if not provided
+    # Reference inputs in steps using {{ inputs.input_name }} syntax
+    # ---------------------------------------------------------------------------
+    inputs:
+      - name: .index
+        required: true
+        type: string
+      - name: .id
+        required: true
+        type: string
 
 # ---------------------------------------------------------------------------
 # STEPS
@@ -68,10 +67,10 @@ steps:
   # - References workflow input parameter(s)
   # -------------------------------------------------------------------------
   - name: analyze_exception_root_cause
-    type: inference.completion
+    type: ai.prompt
     connector-id: openai
     with:
-      input: |
+      prompt: |
         You are a senior software engineer experienced in debugging and root cause analysis.
         Your task is to analyze the given **exception stack trace** and explain the **most likely root cause** in 2–3 sentences.
 
@@ -103,4 +102,4 @@ steps:
       doc_as_upsert: true
       doc:
         attributes:
-          rootCause: ${{ steps.analyze_exception_root_cause.output.0.result }}
+          rootCause: ${{ steps.analyze_exception_root_cause.output.content }}

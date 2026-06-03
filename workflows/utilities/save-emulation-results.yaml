@@ -25,6 +25,67 @@ enabled: true
 # ---------------------------------------------------------------------------
 triggers:
   - type: manual
+    inputs:
+      - name: emulation_id
+        type: string
+        default: emul-2025-11-14-001
+      - name: conversation_id
+        type: string
+        default: f4fea889-bee5-4aa1-8576-f28d90b34508
+      - name: created_at
+        type: string
+        default: "2025-11-14T20:00:00Z"
+      - name: status
+        type: string
+        default: planned
+      - name: created_by
+        type: string
+        default: elastic
+      - name: emulation_content
+        type: string
+        default: testing
+      - name: plan_text
+        type: string
+        default: |
+          ## EMULATION_PLAN-testing!
+
+          ### METADATA
+          - Hosts: 3
+          - Rules: 3
+          ...
+      - name: target_hosts
+        type: array
+        default:
+          - srv-win-defend-ab-01
+          - srv-win-defend-ab-04
+          - srv-win-defend-ab-07
+      - name: target_rules
+        type: array
+        default:
+          - rule-id-1
+          - rule-id-2
+          - rule-id-3
+      - name: tactics
+        type: array
+        default:
+          - Lateral Movement
+          - Credential Access
+          - Execution
+      - name: techniques
+        type: array
+        default:
+          - T1003
+          - T1021
+          - T1059.001
+      - name: estimated_duration
+        type: string
+        default: "15 minutes"
+      - name: phase_count
+        type: number
+        default: 3
+      - name: phases_total
+        type: number
+        default: 3
 
 # ---------------------------------------------------------------------------
 # TAGS
@@ -36,67 +97,6 @@ triggers:
 #   - Grouping related workflows together
 # ---------------------------------------------------------------------------
 tags: []
-inputs:
-  - name: emulation_id
-    type: string
-    default: emul-2025-11-14-001
-  - name: conversation_id
-    type: string
-    default: f4fea889-bee5-4aa1-8576-f28d90b34508
-  - name: created_at
-    type: string
-    default: "2025-11-14T20:00:00Z"
-  - name: status
-    type: string
-    default: planned
-  - name: created_by
-    type: string
-    default: elastic
-  - name: emulation_content
-    type: string
-    default: testing
-  - name: plan_text
-    type: string
-    default: |
-      ## EMULATION_PLAN-testing!
-
-      ### METADATA
-      - Hosts: 3
-      - Rules: 3
-      ...
-  - name: target_hosts
-    type: array
-    default:
-      - srv-win-defend-ab-01
-      - srv-win-defend-ab-04
-      - srv-win-defend-ab-07
-  - name: target_rules
-    type: array
-    default:
-      - rule-id-1
-      - rule-id-2
-      - rule-id-3
-  - name: tactics
-    type: array
-    default:
-      - Lateral Movement
-      - Credential Access
-      - Execution
-  - name: techniques
-    type: array
-    default:
-      - T1003
-      - T1021
-      - T1059.001
-  - name: estimated_duration
-    type: string
-    default: "15 minutes"
-  - name: phase_count
-    type: number
-    default: 3
-  - name: phases_total
-    type: number
-    default: 3
 
 # ---------------------------------------------------------------------------
 # STEPS
@@ -115,18 +115,17 @@ steps:
   # -------------------------------------------------------------------------
   # STEP 1: elasticsearch_request_step
   # -------------------------------------------------------------------------
-  # Executes a search query against one or more Elasticsearch indices.
-  # Output: {{ steps.elasticsearch_request_step.output.hits }} contains
-  # matching documents.
+  # Indexes a document into the smeagol-emulation-history index.
+  # Output: {{ steps.elasticsearch_request_step.output }} contains
+  # the index response.
   # Liquid syntax used:
   # - References workflow input parameter(s)
   # -------------------------------------------------------------------------
   - name: elasticsearch_request_step
-    type: elasticsearch.request
+    type: elasticsearch.index
     with:
-      method: "POST"
-      path: "smeagol-emulation-history/_doc"
-      body:
+      index: "smeagol-emulation-history"
+      document:
         "emulation_id": "{{inputs.emulation_id}}"
         "conversation_id": "{{inputs.conversation_id}}"
         "created_at": "{{inputs.created_at}}"

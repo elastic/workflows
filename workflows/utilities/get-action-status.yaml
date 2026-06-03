@@ -28,22 +28,21 @@ enabled: true
 tags: []
 triggers:
   - type: manual
-
-# ---------------------------------------------------------------------------
-# INPUTS
-# ---------------------------------------------------------------------------
-# Runtime parameters provided when the workflow is triggered. Each input
-# can specify:
-#   - name: Unique identifier for the input
-#   - type: Data type (string, number, boolean, array, object)
-#   - required: Whether the input must be provided (default: false)
-#   - default: Default value if not provided
-# Reference inputs in steps using {{ inputs.input_name }} syntax
-# ---------------------------------------------------------------------------
-inputs:
-  - name: action_id
-    default: 7189af0c-161c-4b1b-8153-70fdf0cd7eb5
-    type: string
+    # ---------------------------------------------------------------------------
+    # INPUTS
+    # ---------------------------------------------------------------------------
+    # Runtime parameters provided when the workflow is triggered. Each input
+    # can specify:
+    #   - name: Unique identifier for the input
+    #   - type: Data type (string, number, boolean, array, object)
+    #   - required: Whether the input must be provided (default: false)
+    #   - default: Default value if not provided
+    # Reference inputs in steps using {{ inputs.input_name }} syntax
+    # ---------------------------------------------------------------------------
+    inputs:
+      - name: action_id
+        default: 7189af0c-161c-4b1b-8153-70fdf0cd7eb5
+        type: string
 
 # ---------------------------------------------------------------------------
 # STEPS
@@ -64,12 +63,15 @@ steps:
   # -------------------------------------------------------------------------
   # Retrieves data from an external API endpoint via HTTP GET request.
   # -------------------------------------------------------------------------
+  # TODO: create an HTTP connector in Kibana that holds your Authorization
+  # credential, then replace the placeholder below so the credential never appears
+  # in this YAML.
   - name: get_action_status
     type: http
+    connector-id: REPLACE_WITH_CONNECTOR_ID
     with:
       method: GET
       url: >-
         https://your-deployment.elastic-cloud.com
       headers:
-        Authorization: secret
         kbn-xsrf: kibana

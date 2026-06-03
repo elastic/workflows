@@ -45,25 +45,6 @@ consts:
 
 
 # ---------------------------------------------------------------------------
-# INPUTS
-# ---------------------------------------------------------------------------
-# Runtime parameters provided when the workflow is triggered. Each input
-# can specify:
-#   - name: Unique identifier for the input
-#   - type: Data type (string, number, boolean, array, object)
-#   - required: Whether the input must be provided (default: false)
-#   - default: Default value if not provided
-# Reference inputs in steps using {{ inputs.input_name }} syntax
-# ---------------------------------------------------------------------------
-inputs:
-  - name: elastic_endpoint
-    type: string
-    required: false
-    default: "https://o11y-project-c09e2f.kb.us-east-1.aws.elastic.cloud"
-    description: "Elastic endpoint URL"
-
-
-# ---------------------------------------------------------------------------
 # TRIGGERS
 # ---------------------------------------------------------------------------
 # Defines how and when this workflow is executed. Supported trigger types:
@@ -73,6 +54,23 @@ inputs:
 # ---------------------------------------------------------------------------
 triggers:
   - type: manual
+    # -------------------------------------------------------------------------
+    # INPUTS
+    # -------------------------------------------------------------------------
+    # Runtime parameters provided when the workflow is triggered. Each input
+    # can specify:
+    #   - name: Unique identifier for the input
+    #   - type: Data type (string, number, boolean, array, object)
+    #   - required: Whether the input must be provided (default: false)
+    #   - default: Default value if not provided
+    # Reference inputs in steps using {{ inputs.input_name }} syntax
+    # -------------------------------------------------------------------------
+    inputs:
+      - name: elastic_endpoint
+        type: string
+        required: false
+        default: "https://o11y-project-c09e2f.kb.us-east-1.aws.elastic.cloud"
+        description: "Elastic endpoint URL"
 
 
 # ---------------------------------------------------------------------------

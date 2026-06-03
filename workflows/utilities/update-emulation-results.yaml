@@ -26,6 +26,67 @@ enabled: true
 # ---------------------------------------------------------------------------
 triggers:
   - type: manual
+    inputs:
+      - name: status
+        type: string
+        default: completed
+      - name: executed_at
+        type: string
+        default: '2025-11-14T20:05:00Z'
+      - name: completed_at
+        type: string
+        default: '2025-11-14T20:20:00Z'
+      - name: results_text
+        type: string
+        default: |
+          ## EXECUTION_RESULTS
+
+          ### SUMMARY
+          Emulation executed successfully.
+      - name: emulation_content
+        type: string
+        default: >
+          TESTING Lateral Movement Emulation Plan - COMPLETED. Executed on 3 Windows Server 2022 hosts. Results: 2/3 phases
+          successful, 2/3 alerts triggered (66% success rate). LSASS dump blocked by AV. WinRM lateral movement and registry
+          hive dump succeeded. Duration: 15 minutes.
+      - name: phases_completed
+        type: number
+        default: 2
+      - name: alerts_triggered
+        type: number
+        default: 2
+      - name: alerts_expected
+        type: number
+        default: 3
+      - name: success_rate
+        type: number
+        default: 0.66
+      - name: duration_seconds
+        type: number
+        default: 900
+      - name: triggered_alert_ids
+        type: array
+        default:
+          - alert-id-1
+          - alert-id-2
+      - name: triggered_alert_names
+        type: array
+        default:
+          - WinRM Remote Execution
+          - Registry Hive Dump
+      - name: missed_alerts
+        type: array
+        default:
+          - LSASS Memory Dump
+      - name: phase_results
+        type: string
+        default: >-
+          {"phase_number": 1, "phase_title": "Initial Compromise", "status": "success", "host": "srv-win-defend-ab-01",
+          "command": "cmd.exe /c whoami", "output": "NT AUTHORITY\\SYSTEM", "alert_triggered": true, "alert_name": "Whoami
+          Process Activity", "timestamp": "2025-11-14T20:05:30Z"}
+      - name: doc_id
+        type: string
+        default: PF_nhJoBxy6JWUIcZutB
 
 # ---------------------------------------------------------------------------
 # TAGS
@@ -37,67 +98,6 @@ triggers:
 #   - Grouping related workflows together
 # ---------------------------------------------------------------------------
 tags: []
-inputs:
-  - name: status
-    type: string
-    default: completed
-  - name: executed_at
-    type: string
-    default: '2025-11-14T20:05:00Z'
-  - name: completed_at
-    type: string
-    default: '2025-11-14T20:20:00Z'
-  - name: results_text
-    type: string
-    default: |
-      ## EXECUTION_RESULTS
-
-      ### SUMMARY
-      Emulation executed successfully.
-  - name: emulation_content
-    type: string
-    default: >
-      TESTING Lateral Movement Emulation Plan - COMPLETED. Executed on 3 Windows Server 2022 hosts. Results: 2/3 phases
-      successful, 2/3 alerts triggered (66% success rate). LSASS dump blocked by AV. WinRM lateral movement and registry
-      hive dump succeeded. Duration: 15 minutes.
-  - name: phases_completed
-    type: number
-    default: 2
-  - name: alerts_triggered
-    type: number
-    default: 2
-  - name: alerts_expected
-    type: number
-    default: 3
-  - name: success_rate
-    type: number
-    default: 0.66
-  - name: duration_seconds
-    type: number
-    default: 900
-  - name: triggered_alert_ids
-    type: array
-    default:
-      - alert-id-1
-      - alert-id-2
-  - name: triggered_alert_names
-    type: array
-    default:
-      - WinRM Remote Execution
-      - Registry Hive Dump
-  - name: missed_alerts
-    type: array
-    default:
-      - LSASS Memory Dump
-  - name: phase_results
-    type: string
-    default: >-
-      {"phase_number": 1, "phase_title": "Initial Compromise", "status": "success", "host": "srv-win-defend-ab-01",
-      "command": "cmd.exe /c whoami", "output": "NT AUTHORITY\\SYSTEM", "alert_triggered": true, "alert_name": "Whoami
-      Process Activity", "timestamp": "2025-11-14T20:05:30Z"}
-  - name: doc_id
-    type: string
-    default: PF_nhJoBxy6JWUIcZutB
 
 # ---------------------------------------------------------------------------
 # STEPS
@@ -116,32 +116,32 @@ steps:
   # -------------------------------------------------------------------------
   # STEP 1: elasticsearch_request_step
   # -------------------------------------------------------------------------
-  # Executes a search query against one or more Elasticsearch indices.
-  # Output: {{ steps.elasticsearch_request_step.output.hits }} contains
-  # matching documents.
+  # Updates a document in the emulation-history Elasticsearch index.
+  # Output: {{ steps.elasticsearch_request_step.output }} contains the update result.
   # Liquid syntax used:
   # - References workflow input parameter(s)
   # -------------------------------------------------------------------------
+  # TODO: create an Elasticsearch connector in Kibana (Stack Management -> Connectors)
+  # configured for your cluster, then replace the placeholder below so credentials are never
+  # stored in this YAML (the hardcoded Authorization header has been removed).
   - name: elasticsearch_request_step
-    type: elasticsearch.request
+    type: elasticsearch.update
+    connector-id: REPLACE_WITH_CONNECTOR_ID
     with:
-      method: POST
-      path: smeagol-emulation-history/_update/{{inputs.doc_id}}
-      headers:
-        Authorization: secret
-      body:
-        doc:
-          status: '{{inputs.status}}'
-          executed_at: '{{inputs.executed_at}}'
-          completed_at: '{{inputs.completed_at}}'
-          results_text: '{{inputs.results_text}}'
-          emulation_content: '{{inputs.emulation_content}}'
-          phases_completed: '{{inputs.phases_completed}}'
-          alerts_triggered: '{{inputs.alerts_triggered}}'
-          alerts_expected: '{{inputs.alerts_expected}}'
-          success_rate: '{{inputs.success_rate}}'
-          duration_seconds: '{{inputs.duration_seconds}}'
-          triggered_alert_ids: ${{inputs.triggered_alert_ids}}
-          triggered_alert_names: ${{inputs.triggered_alert_names}}
-          missed_alerts: ${{inputs.missed_alerts}}
-          phase_results: '{{inputs.phase_results}}'
+      index: smeagol-emulation-history
+      id: '{{inputs.doc_id}}'
+      doc:
+        status: '{{inputs.status}}'
+        executed_at: '{{inputs.executed_at}}'
+        completed_at: '{{inputs.completed_at}}'
+        results_text: '{{inputs.results_text}}'
+        emulation_content: '{{inputs.emulation_content}}'
+        phases_completed: '{{inputs.phases_completed}}'
+        alerts_triggered: '{{inputs.alerts_triggered}}'
+        alerts_expected: '{{inputs.alerts_expected}}'
+        success_rate: '{{inputs.success_rate}}'
+        duration_seconds: '{{inputs.duration_seconds}}'
+        triggered_alert_ids: ${{inputs.triggered_alert_ids}}
+        triggered_alert_names: ${{inputs.triggered_alert_names}}
+        missed_alerts: ${{inputs.missed_alerts}}
+        phase_results: '{{inputs.phase_results}}'
