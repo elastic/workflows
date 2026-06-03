@@ -26,6 +26,13 @@ enabled: true
 # ---------------------------------------------------------------------------
 triggers:
   - type: manual
+    inputs:
+      - name: caseDescription
+        required: true
+        type: string
+      - name: caseTitle
+        required: true
+        type: string
 
 # ---------------------------------------------------------------------------
 # TAGS
@@ -37,13 +44,6 @@ triggers:
 #   - Grouping related workflows together
 # ---------------------------------------------------------------------------
 tags: ["Observability", "AgentTool"]
-inputs:
-  - name: caseDescription
-    required: true
-    type: string
-  - name: caseTitle
-    required: true
-    type: string
 
 
 # ---------------------------------------------------------------------------
@@ -74,13 +74,8 @@ steps:
   # - References workflow input parameter(s)
   # -------------------------------------------------------------------------
   - name: kibana_createCaseDefaultSpace_step
-    type: kibana.createCaseDefaultSpace
+    type: cases.createCase
     with:
-      connector:
-        fields: null
-        id: none
-        name: none
-        type: .none
       description: |
         "{{ inputs.caseDescription }}"
       owner: observability

@@ -40,8 +40,6 @@ tags:
 #   - Values that may need to change across environments
 # ---------------------------------------------------------------------------
 consts:
-  api: redeacted
-  url: https://es:9200/api/workflows
   workflows:
     - workflow-9a9b4d98-481b-4d59-a643-1071f4e0e78d
     - workflow-bf7bb199-4040-4d55-9f43-16ac42d1f38a
@@ -88,22 +86,16 @@ steps:
      # -------------------------------------------------------------------------
      # STEP 2: run workflow
      # -------------------------------------------------------------------------
-     # Sends data to an external API endpoint via HTTP POST request.
+     # Executes the target workflow and waits for it to complete.
+     # Uses the built-in workflow.execute step (R3/R4: replaces the former http
+     # POST to /api/workflows/<id>/run with the native named action).
      # Liquid syntax used:
-     # - References workflow constant(s)
      # - References current item in foreach loop
      # -------------------------------------------------------------------------
      - name: run workflow
-       type: http
+       type: workflow.execute
        with:
-        url: "{{consts.url}}/{{foreach.item}}/run"
-        body:
-          {"inputs":{}}
-        method: POST
-        headers: 
-          Content-Type: application/json
-          Authorization: ApiKey {{consts.api}}
-          kbn-xsrf: workflow
-          x-elastic-internal-origin: Kibana
+         workflow-id: "{{foreach.item}}"
+         inputs: {}
 
 

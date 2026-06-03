@@ -124,21 +124,18 @@ steps:
           # -------------------------------------------------------------------------
           # STEP 5: index_article
           # -------------------------------------------------------------------------
-          # Executes a search query against one or more Elasticsearch indices.
-          # Output: {{ steps.index_article.output.hits }} contains matching
-          # documents.
+          # Indexes a single parsed RSS article into Elasticsearch.
           # Liquid syntax used:
           # - `json` - Converts object to JSON string
           # - `date` - Formats date/time value
           # - References current item in foreach loop
           # -------------------------------------------------------------------------
           - name: index_article
-            type: elasticsearch.request
+            type: elasticsearch.index
             with:
-              method: "POST"
-              path: "/logs/_bulk"
-              headers: 
-                content-type: application/x-ndjson
-              body: |
-                { "create": {} }
-                {"rss.title": {{ foreach.items[foreach.index].title | json }}, "@timestamp": {{ foreach.items[foreach.index].pubDate | date: "%Y-%m-%dT%H:%M:%S%z" | json }}, "rss.link": {{ foreach.items[foreach.index].link | json }}, "rss.message": {{ foreach.items[foreach.index].description | json }}}
+              index: logs
+              document:
+                rss.title: "{{ foreach.items[foreach.index].title }}"
+                "@timestamp": "{{ foreach.items[foreach.index].pubDate | date: \"%Y-%m-%dT%H:%M:%S%z\" }}"
+                rss.link: "{{ foreach.items[foreach.index].link }}"
+                rss.message: "{{ foreach.items[foreach.index].description }}"

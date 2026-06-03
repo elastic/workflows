@@ -29,33 +29,11 @@ description: Creates and executes a Caldera attack simulation operation using a 
 # ---------------------------------------------------------------------------
 consts:
   caldera_base_url: https://example.com:8888
-  caldera_api_key: API-KEY
   default_source_id: ""
   default_planner_id: atomic
   default_group: red
   default_jitter: 2/8
   default_obsfucator: base64
-
-# ---------------------------------------------------------------------------
-# INPUTS
-# ---------------------------------------------------------------------------
-# Runtime parameters provided when the workflow is triggered. Each input
-# can specify:
-#   - name: Unique identifier for the input
-#   - type: Data type (string, number, boolean, array, object)
-#   - required: Whether the input must be provided (default: false)
-#   - default: Default value if not provided
-# Reference inputs in steps using {{ inputs.input_name }} syntax
-# ---------------------------------------------------------------------------
-inputs:
-  - name: operation_name
-    type: string
-    description: The name of the operation to create
-    required: true
-  - name: adversary_id
-    type: string
-    description: The ID of the adversary profile to use for this operation
-    required: true
 
 # ---------------------------------------------------------------------------
 # TRIGGERS
@@ -67,6 +45,26 @@ inputs:
 # ---------------------------------------------------------------------------
 triggers:
   - type: manual
+    # ---------------------------------------------------------------------------
+    # INPUTS
+    # ---------------------------------------------------------------------------
+    # Runtime parameters provided when the workflow is triggered. Each input
+    # can specify:
+    #   - name: Unique identifier for the input
+    #   - type: Data type (string, number, boolean, array, object)
+    #   - required: Whether the input must be provided (default: false)
+    #   - default: Default value if not provided
+    # Reference inputs in steps using {{ inputs.input_name }} syntax
+    # ---------------------------------------------------------------------------
+    inputs:
+      - name: operation_name
+        type: string
+        description: The name of the operation to create
+        required: true
+      - name: adversary_id
+        type: string
+        description: The ID of the adversary profile to use for this operation
+        required: true
 
 # ---------------------------------------------------------------------------
 # STEPS
@@ -91,13 +89,16 @@ steps:
   # - References workflow input parameter(s)
   # - References workflow constant(s)
   # -------------------------------------------------------------------------
+  # TODO: create an HTTP connector in Kibana that holds your Caldera API key (the KEY
+  # header with value matching your Caldera REST API key), then replace REPLACE_WITH_CONNECTOR_ID
+  # below with that connector's id so the credential never appears in this YAML.
   - name: create_operation
     type: http
+    connector-id: REPLACE_WITH_CONNECTOR_ID
     with:
       url: "{{ consts.caldera_base_url }}/api/v2/operations"
       method: POST
       headers:
-        KEY: "{{ consts.caldera_api_key }}"
         Content-Type: application/json
       body:
         name: "{{ inputs.operation_name }}"

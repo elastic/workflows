@@ -29,27 +29,7 @@ description: Scan URLs for threats and malicious content using URLScan.io public
 # ---------------------------------------------------------------------------
 consts:
   history_query: datasource=scans&q=page.url # This can be configured depending on the history you want to retrieve
-  urlscan_api_key: API_KEY
   urlscan_base_url: https://urlscan.io/api/v1
-
-# ---------------------------------------------------------------------------
-# INPUTS
-# ---------------------------------------------------------------------------
-# Runtime parameters provided when the workflow is triggered. Each input
-# can specify:
-#   - name: Unique identifier for the input
-#   - type: Data type (string, number, boolean, array, object)
-#   - required: Whether the input must be provided (default: false)
-#   - default: Default value if not provided
-# Reference inputs in steps using {{ inputs.input_name }} syntax
-# ---------------------------------------------------------------------------
-inputs:
-  - name: target_url
-    type: string
-    description:
-      The URL to scan for malicious content, phishing, or other threats
-      (e.g., https://example.com)
-    required: true
 
 # ---------------------------------------------------------------------------
 # TRIGGERS
@@ -61,6 +41,13 @@ inputs:
 # ---------------------------------------------------------------------------
 triggers:
   - type: manual
+    inputs:
+      - name: target_url
+        type: string
+        description:
+          The URL to scan for malicious content, phishing, or other threats
+          (e.g., https://example.com)
+        required: true
 
 # ---------------------------------------------------------------------------
 # STEPS
@@ -86,13 +73,15 @@ steps:
   # - References workflow input parameter(s)
   # - References workflow constant(s)
   # -------------------------------------------------------------------------
+  # TODO: create an HTTP connector in Kibana that holds your URLScan.io API key (the
+  # api-key header), then replace the placeholder below so the credential never appears in this YAML.
   - name: submit_url_scan
     type: http
+    connector-id: REPLACE_WITH_CONNECTOR_ID
     with:
       url: "{{ consts.urlscan_base_url }}/scan/"
       method: POST
       headers:
-        api-key: "{{ consts.urlscan_api_key }}"
         Content-Type: application/json
       body:
         url: "{{ inputs.target_url }}"

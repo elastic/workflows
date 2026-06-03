@@ -15,25 +15,6 @@ name: create JIRA ticket
 enabled: true
 
 # ---------------------------------------------------------------------------
-# INPUTS
-# ---------------------------------------------------------------------------
-# Runtime parameters provided when the workflow is triggered. Each input
-# can specify:
-#   - name: Unique identifier for the input
-#   - type: Data type (string, number, boolean, array, object)
-#   - required: Whether the input must be provided (default: false)
-#   - default: Default value if not provided
-# Reference inputs in steps using {{ inputs.input_name }} syntax
-# ---------------------------------------------------------------------------
-inputs:
-  - name: summary
-    default: Ticket opened by AutoRemedy
-    type: string
-  - name: description
-    default: This ticket was opened by AutoRemedy using APIs
-    type: string
-
-# ---------------------------------------------------------------------------
 # CONSTANTS
 # ---------------------------------------------------------------------------
 # Reusable configuration values defined once and referenced throughout the
@@ -58,6 +39,13 @@ consts:
 # ---------------------------------------------------------------------------
 triggers:
   - type: manual
+    inputs:
+      - name: summary
+        default: Ticket opened by AutoRemedy
+        type: string
+      - name: description
+        default: This ticket was opened by AutoRemedy using APIs
+        type: string
 
 # ---------------------------------------------------------------------------
 # STEPS
@@ -81,8 +69,12 @@ steps:
   # - References workflow input parameter(s)
   # - References workflow constant(s)
   # -------------------------------------------------------------------------
+  # TODO: create an HTTP connector in Kibana that holds your Jira Basic
+  # auth credentials (Authorization header with base64-encoded user:token), then
+  # replace the placeholder below so the credential never appears in this YAML.
   - name: open ticket
     type: http
+    connector-id: REPLACE_WITH_CONNECTOR_ID
     with:
       url: '{{consts.url}}'
       method: POST
@@ -90,7 +82,6 @@ steps:
       headers:
         Accept: application/json
         Content-Type: application/json
-        Authorization: secret
       body:
         serviceDeskId: '1'
         requestTypeId: '1'

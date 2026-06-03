@@ -25,6 +25,15 @@ enabled: true
 # ---------------------------------------------------------------------------
 triggers:
   - type: manual
+    inputs:
+      - name: agent_id
+        type: string
+        description: The ID of the agent to invoke
+        required: true
+      - name: question
+        type: string
+        description: The question or prompt to send to the subagent
+        required: true
 
 # ---------------------------------------------------------------------------
 # INPUTS
@@ -37,15 +46,6 @@ triggers:
 #   - default: Default value if not provided
 # Reference inputs in steps using {{ inputs.input_name }} syntax
 # ---------------------------------------------------------------------------
-inputs:
-  - name: agent_id
-    type: string
-    description: The ID of the agent to invoke
-    required: true
-  - name: question
-    type: string
-    description: The question or prompt to send to the subagent
-    required: true
 
 # ---------------------------------------------------------------------------
 # STEPS

@@ -27,47 +27,46 @@ enabled: true
 # ---------------------------------------------------------------------------
 triggers:
   - type: manual
-
-# ---------------------------------------------------------------------------
-# INPUTS
-# ---------------------------------------------------------------------------
-# Runtime parameters provided when the workflow is triggered. Each input
-# can specify:
-#   - name: Unique identifier for the input
-#   - type: Data type (string, number, boolean, array, object)
-#   - required: Whether the input must be provided (default: false)
-#   - default: Default value if not provided
-# Reference inputs in steps using {{ inputs.input_name }} syntax
-# ---------------------------------------------------------------------------
-inputs:
-  - name: ability_name
-    description: Descriptive name for the ability
-    required: true
-    type: string
-  - name: ability_description
-    description: Brief purpose description of the ability
-    required: true
-    type: string
-  - name: tactic
-    description: MITRE ATT&CK tactic
-    required: false
-    type: string
-  - name: technique_name
-    description: MITRE ATT&CK technique name
-    required: false
-    type: string
-  - name: technique_id
-    description: MITRE ATT&CK technique ID (e.g., "T1021.002")
-    required: false
-    type: string
-  - name: linux_command
-    description: Bash command for Linux target
-    required: false
-    type: string
-  - name: windows_command
-    description: PowerShell command for Windows target
-    required: false
-    type: string
+    # ---------------------------------------------------------------------------
+    # INPUTS
+    # ---------------------------------------------------------------------------
+    # Runtime parameters provided when the workflow is triggered. Each input
+    # can specify:
+    #   - name: Unique identifier for the input
+    #   - type: Data type (string, number, boolean, array, object)
+    #   - required: Whether the input must be provided (default: false)
+    #   - default: Default value if not provided
+    # Reference inputs in steps using {{ inputs.input_name }} syntax
+    # ---------------------------------------------------------------------------
+    inputs:
+      - name: ability_name
+        description: Descriptive name for the ability
+        required: true
+        type: string
+      - name: ability_description
+        description: Brief purpose description of the ability
+        required: true
+        type: string
+      - name: tactic
+        description: MITRE ATT&CK tactic
+        required: false
+        type: string
+      - name: technique_name
+        description: MITRE ATT&CK technique name
+        required: false
+        type: string
+      - name: technique_id
+        description: MITRE ATT&CK technique ID (e.g., "T1021.002")
+        required: false
+        type: string
+      - name: linux_command
+        description: Bash command for Linux target
+        required: false
+        type: string
+      - name: windows_command
+        description: PowerShell command for Windows target
+        required: false
+        type: string
 
 # ---------------------------------------------------------------------------
 # CONSTANTS
@@ -81,7 +80,6 @@ inputs:
 # ---------------------------------------------------------------------------
 consts:
   caldera_base_url: https://example.com:8888
-  caldera_api_key: API-KEY
 
 # ---------------------------------------------------------------------------
 # STEPS
@@ -127,13 +125,15 @@ steps:
           # - References workflow input parameter(s)
           # - References workflow constant(s)
           # -------------------------------------------------------------------------
+          # TODO: create an HTTP connector in Kibana that holds your Caldera API key (the
+          # KEY header), then replace the placeholder below so the credential stays out of this YAML.
           - name: create_ability_both
             type: http
+            connector-id: REPLACE_WITH_CONNECTOR_ID
             with:
               url: "{{ consts.caldera_base_url }}/api/v2/abilities"
               method: POST
               headers:
-                KEY: "{{ consts.caldera_api_key }}"
                 Content-Type: application/json
               body:
                 tactic: "{{ inputs.tactic }}"
@@ -227,13 +227,15 @@ steps:
               # - References workflow input parameter(s)
               # - References workflow constant(s)
               # -------------------------------------------------------------------------
+              # TODO: create an HTTP connector in Kibana that holds your Caldera API key (the
+              # KEY header), then replace the placeholder below so the credential stays out of this YAML.
               - name: create_ability_linux
                 type: http
+                connector-id: REPLACE_WITH_CONNECTOR_ID
                 with:
                   url: "{{ consts.caldera_base_url }}/api/v2/abilities"
                   method: POST
                   headers:
-                    KEY: "{{ consts.caldera_api_key }}"
                     Content-Type: application/json
                   body:
                     tactic: "{{ inputs.tactic }}"
@@ -299,13 +301,15 @@ steps:
               # - References workflow input parameter(s)
               # - References workflow constant(s)
               # -------------------------------------------------------------------------
+              # TODO: create an HTTP connector in Kibana that holds your Caldera API key (the
+              # KEY header), then replace the placeholder below so the credential stays out of this YAML.
               - name: create_ability_windows
                 type: http
+                connector-id: REPLACE_WITH_CONNECTOR_ID
                 with:
                   url: "{{ consts.caldera_base_url }}/api/v2/abilities"
                   method: POST
                   headers:
-                    KEY: "{{ consts.caldera_api_key }}"
                     Content-Type: application/json
                   body:
                     tactic: "{{ inputs.tactic }}"

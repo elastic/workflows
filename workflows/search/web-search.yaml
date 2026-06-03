@@ -24,23 +24,22 @@ enabled: true
 # ---------------------------------------------------------------------------
 triggers:
   - type: manual
-
-# ---------------------------------------------------------------------------
-# INPUTS
-# ---------------------------------------------------------------------------
-# Runtime parameters provided when the workflow is triggered. Each input
-# can specify:
-#   - name: Unique identifier for the input
-#   - type: Data type (string, number, boolean, array, object)
-#   - required: Whether the input must be provided (default: false)
-#   - default: Default value if not provided
-# Reference inputs in steps using {{ inputs.input_name }} syntax
-# ---------------------------------------------------------------------------
-inputs:
-  - name: query
-    default: what is the population of Malta?
-    description: query to pass into google search
-    type: string
+    # ---------------------------------------------------------------------------
+    # INPUTS
+    # ---------------------------------------------------------------------------
+    # Runtime parameters provided when the workflow is triggered. Each input
+    # can specify:
+    #   - name: Unique identifier for the input
+    #   - type: Data type (string, number, boolean, array, object)
+    #   - required: Whether the input must be provided (default: false)
+    #   - default: Default value if not provided
+    # Reference inputs in steps using {{ inputs.input_name }} syntax
+    # ---------------------------------------------------------------------------
+    inputs:
+      - name: query
+        default: what is the population of Malta?
+        description: query to pass into google search
+        type: string
 
 # ---------------------------------------------------------------------------
 # STEPS
@@ -60,15 +59,14 @@ steps:
   # STEP 1: web_search
   # -------------------------------------------------------------------------
   # Performs a web search using the Brave Search API.
-  # Liquid syntax used:
-  # - `url_encode` - URL-encodes string
+  # Converted from http (R3): brave-search connector handles auth
+  # (X-Subscription-Token) and the API URL; param q replaces url_encode.
   # -------------------------------------------------------------------------
+  # TODO: create a Brave Search connector in Kibana (Stack Management ->
+  # Connectors, type "Brave Search") with your X-Subscription-Token API key,
+  # then replace the connector-id placeholder below with its id.
   - name: web_search
-    type: http
+    type: brave-search.webSearch
+    connector-id: REPLACE_WITH_CONNECTOR_ID
     with:
-      url: https://api.search.brave.com/res/v1/web/search inputs.query | url_encode}}
-      method: GET
-      headers:
-        Accept: application/json
-        Accept-Encoding: gzip
-        X-Subscription-Token: secret
+      q: "{{ inputs.query }}"

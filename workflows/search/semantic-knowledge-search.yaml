@@ -19,44 +19,6 @@ description: Search for similar knowledge using semantic search with optional na
 
 
 # ---------------------------------------------------------------------------
-# INPUTS
-# ---------------------------------------------------------------------------
-# Runtime parameters provided when the workflow is triggered. Each input
-# can specify:
-#   - name: Unique identifier for the input
-#   - type: Data type (string, number, boolean, array, object)
-#   - required: Whether the input must be provided (default: false)
-#   - default: Default value if not provided
-# Reference inputs in steps using {{ inputs.input_name }} syntax
-# ---------------------------------------------------------------------------
-inputs:
-  - name: query_text
-    type: string
-    description: Description of the knowledge you're looking for in natural semantic language.
-    required: true
-  - name: namespace_root
-    type: string
-    description: |
-      Optional root namespace filter:
-      - "integration" for integration-specific knowledge
-      - "kibana" for Kibana patterns
-      - "elasticsearch" for Elasticsearch patterns
-    required: false
-  - name: namespace_scope
-    type: string
-    description: |
-      Optional scope filter:
-      - When root="integration": integration name (e.g., "1password", "kubernetes")
-      - When root="kibana": product area (e.g., "visualizations", "dashboards")
-      - When root="elasticsearch": product area (e.g., "pipelines")
-    required: false
-  - name: knowledge_type
-    type: string
-    description: Optional filter (e.g., 'security_use_case', 'field_group', 'detection_pattern')
-    required: false
-
-
-# ---------------------------------------------------------------------------
 # CONSTANTS
 # ---------------------------------------------------------------------------
 # Reusable configuration values defined once and referenced throughout the
@@ -80,6 +42,42 @@ consts:
 # ---------------------------------------------------------------------------
 triggers:
   - type: manual
+    # ---------------------------------------------------------------------------
+    # INPUTS
+    # ---------------------------------------------------------------------------
+    # Runtime parameters provided when the workflow is triggered. Each input
+    # can specify:
+    #   - name: Unique identifier for the input
+    #   - type: Data type (string, number, boolean, array, object)
+    #   - required: Whether the input must be provided (default: false)
+    #   - default: Default value if not provided
+    # Reference inputs in steps using {{ inputs.input_name }} syntax
+    # ---------------------------------------------------------------------------
+    inputs:
+      - name: query_text
+        type: string
+        description: Description of the knowledge you're looking for in natural semantic language.
+        required: true
+      - name: namespace_root
+        type: string
+        description: |
+          Optional root namespace filter:
+          - "integration" for integration-specific knowledge
+          - "kibana" for Kibana patterns
+          - "elasticsearch" for Elasticsearch patterns
+        required: false
+      - name: namespace_scope
+        type: string
+        description: |
+          Optional scope filter:
+          - When root="integration": integration name (e.g., "1password", "kubernetes")
+          - When root="kibana": product area (e.g., "visualizations", "dashboards")
+          - When root="elasticsearch": product area (e.g., "pipelines")
+        required: false
+      - name: knowledge_type
+        type: string
+        description: Optional filter (e.g., 'security_use_case', 'field_group', 'detection_pattern')
+        required: false
 
 
 # ---------------------------------------------------------------------------

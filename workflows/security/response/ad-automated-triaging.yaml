@@ -83,7 +83,7 @@ steps:
       # - References current item in foreach loop
       # -------------------------------------------------------------------------
       - name: create_case
-        type: kibana.createCaseDefaultSpace
+        type: cases.createCase
         with:
           owner: securitySolution
           title: '[Attack Discovery] {{foreach.item.attack_discovery.title_with_replacements}}'
@@ -109,11 +109,6 @@ steps:
           settings:
             syncAlerts: false
           severity: high
-          connector:
-            id: none
-            name: none
-            type: .none
-            fields: null
 
       # -------------------------------------------------------------------------
       # STEP 3: foreach_alert_in_ad
@@ -147,51 +142,39 @@ steps:
           # -------------------------------------------------------------------------
           # STEP 5: add_to_case
           # -------------------------------------------------------------------------
-          # Attaches a security alert to a case via POST
-          # /api/cases/{caseId}/comments.
+          # Attaches a security alert to a case via cases.addAlerts.
           # Links the alert to the case for consolidated investigation tracking.
-          # Required fields: alertId, index, rule (id and name), owner, type:
-          # "alert".
+          # Required fields: case_id, alerts[].alertId, alerts[].index,
+          # alerts[].rule (id and name).
           # Liquid syntax used:
           # - References output from previous step(s)
-          # - References workflow constant(s)
           # - References current item in foreach loop
           # -------------------------------------------------------------------------
           - name: add_to_case
-            type: kibana.request
+            type: cases.addAlerts
             with:
-              method: POST
-              path: /api/cases/{{ steps.create_case.output.id }}/comments
-              body:
-                type: alert
-                alertId: '{{ foreach.item}}'
-                index: .alerts-security.alerts-default
-                rule:
-                  name: '{{ steps.get_details.output.hits.hits._source.kibana.alert.rule.name }}'
-                  id: '{{ steps.get_details.output.hits.hits._source.kibana.alert.rule.uuid }}'
-                owner: securitySolution
-              headers:
-                kbn-xsrf: string
-                Content-Type: application/json
-                Authorization: '{{ consts.secret }}'
+              case_id: '{{ steps.create_case.output.case.id }}'
+              alerts:
+                - alertId: '{{ foreach.item }}'
+                  index: .alerts-security.alerts-default
+                  rule:
+                    name: '{{ steps.get_details.output.hits.hits._source.kibana.alert.rule.name }}'
+                    id: '{{ steps.get_details.output.hits.hits._source.kibana.alert.rule.uuid }}'
 
       # -------------------------------------------------------------------------
       # STEP 6: triage_agent
       # -------------------------------------------------------------------------
-      # Sends data to an external API endpoint via HTTP POST request.
+      # Calls the Kibana Security AI Assistant chat/complete endpoint via
+      # kibana.request (Kibana internal API; no external auth header needed).
       # Liquid syntax used:
       # - `json` - Converts object to JSON string
       # - References workflow constant(s)
       # -------------------------------------------------------------------------
       - name: triage_agent
-        type: http
+        type: kibana.request
         with:
-          url: '{{ consts.kibana }}/api/security_ai_assistant/chat/complete'
           method: POST
-          headers:
-            kbn-xsrf: string
-            Content-Type: application/json
-            Authorization: '{{ consts.secret }}'
+          path: /api/security_ai_assistant/chat/complete
           body:
             isStream: false
             persist: false
@@ -209,51 +192,44 @@ steps:
                   anything else to appropriate stitch these commands together. Output any commands as individual code
                   blocks.
 
-                  - NEVER Render any videos/gifs. 
+                  - NEVER Render any videos/gifs.
 
                   - Generate sophisticated, performant ES|QL queries with the appropriate ES|QL tool to help me triage
-                  further (format them as "esql" appropriately). Make sure to use the logs-* index pattern 
+                  further (format them as "esql" appropriately). Make sure to use the logs-* index pattern
 
                   - ALWAYS Reference Elastic Security labs for any matching attacks
 
                   - Include a confidence score of the true positive ratio of the attack. This output will be shared will
                   all relevant team members.
 
-                  - Make sure to never include references or citations 
+                  - Make sure to never include references or citations
 
                   </instructions>
 
 
                   <detected attack>
 
-                      {{ event | json(2)}}
+                      {{ event | json: 2 }}
 
                   </detected attack>
           timeout: 10m
+          headers:
+            kbn-xsrf: string
 
       # -------------------------------------------------------------------------
       # STEP 7: add_analysis_to_case
       # -------------------------------------------------------------------------
-      # Adds a comment to a case via POST /api/cases/{caseId}/comments.
+      # Adds a comment to a case via cases.addComment.
       # Comments document investigation findings, analyst notes, or action
       # summaries.
       # Liquid syntax used:
       # - References output from previous step(s)
-      # - References workflow constant(s)
       # -------------------------------------------------------------------------
       - name: add_analysis_to_case
-        type: kibana.request
+        type: cases.addComment
         with:
-          method: POST
-          path: /api/cases/{{ steps.create_case.output.id }}/comments
-          body:
-            type: user
-            owner: securitySolution
-            comment: '{{ steps.triage_agent.output.data.data | safe }}'
-          headers:
-            kbn-xsrf: string
-            Content-Type: application/json
-            Authorization: '{{ consts.secret }}'
+          case_id: '{{ steps.create_case.output.case.id }}'
+          comment: '{{ steps.triage_agent.output.data.data }}'
 
       # -------------------------------------------------------------------------
       # STEP 8: get_host_details
@@ -289,20 +265,18 @@ steps:
               - role: user
                 content: |
                   <instructions>
-                   Can you generate a one-to-two-sentence summary of the attack above? Make sure the summary captures key details of this attack. This output will be used as content for a Slack message, so make sure sure everything an analyst needs is captured succinctly and very clearly. When references entites like hosts and users, put them in apostrophes (`) like like `hostname`   
+                   Can you generate a one-to-two-sentence summary of the attack above? Make sure the summary captures key details of this attack. This output will be used as content for a Slack message, so make sure sure everything an analyst needs is captured succinctly and very clearly. When references entites like hosts and users, put them in apostrophes (`) like like `hostname`
 
                    MAKE SURE TO ONLY OUTPUT THE SUMMARY message
                   </instructions>
 
                    <detected attack>
 
-                       {{ event | json(2)}}
+                       {{ event | json: 2 }}
 
                    </detected attack>
           headers:
             kbn-xsrf: string
-            Content-Type: application/json
-            Authorization: '{{ consts.secret }}'
 
       # -------------------------------------------------------------------------
       # STEP 10: isolate_host
@@ -326,11 +300,9 @@ steps:
               Based on my analysis so far, I've isolated the host in question pending further investigation and
               analysis. As a next step, I'll notify the team.
             case_ids:
-              - '{{ steps.create_case.output.id }}'
+              - '{{ steps.create_case.output.case.id }}'
           headers:
             kbn-xsrf: string
-            Content-Type: application/json
-            Authorization: '{{ consts.secret }}'
 
       # -------------------------------------------------------------------------
       # STEP 11: notify_team
@@ -399,7 +371,7 @@ steps:
                   "elements": [
                     {
                       "type": "mrkdwn",
-                      "text": "Case ID: `{{steps.create_case.output.id}}` | {{foreach.item.attack_discovery.alerts_context_count}} related alerts | MITRE: {{foreach.item.attack_discovery.mitre_attack_tactics}}"
+                      "text": "Case ID: `{{steps.create_case.output.case.id}}` | {{foreach.item.attack_discovery.alerts_context_count}} related alerts | MITRE: {{foreach.item.attack_discovery.mitre_attack_tactics}}"
                     }
                   ]
                 },
@@ -426,7 +398,7 @@ steps:
                         "text": "📁 Go to Case",
                         "emoji": true
                       },
-                      "url": "{{consts.kibana}}/app/security/cases/{{steps.create_case.output.id}}"
+                      "url": "{{consts.kibana}}/app/security/cases/{{steps.create_case.output.case.id}}"
                     },
                     {
                       "type": "button",
@@ -465,7 +437,6 @@ steps:
 consts:
   schedule_id: b95cef68-a542-4596-a65f-5da4a933e5b5
   kibana: https://your-deployment.elastic-cloud.com
-  secret: "YOUR-SECRET-HERE"
   sonnet: 37603de7-4abc-4cf5-b440-8713b7f9045b
   endpoint_id: 345d5ffc-80a8-413c-9a5d-829687e8a5f2
   slack_web_hook: https://hooks.slack.YOUR-API-KEY-HERE

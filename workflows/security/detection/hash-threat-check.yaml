@@ -27,7 +27,6 @@ description: Check file hashes (MD5, SHA-1, SHA-256) against VirusTotal database
 #   - Values that may need to change across environments
 # ---------------------------------------------------------------------------
 consts:
-  virustotal_api_key: API-KEY
   virustotal_base_url: https://www.virustotal.com/api/v3
 
 # ---------------------------------------------------------------------------
@@ -41,14 +40,6 @@ consts:
 #   - default: Default value if not provided
 # Reference inputs in steps using {{ inputs.input_name }} syntax
 # ---------------------------------------------------------------------------
-inputs:
-  - name: file_hash
-    type: string
-    description:
-      The file hash to check (MD5, SHA-1, or SHA-256 format) for malware
-      and threat intelligence
-    required: true
-
 # ---------------------------------------------------------------------------
 # TRIGGERS
 # ---------------------------------------------------------------------------
@@ -59,6 +50,13 @@ inputs:
 # ---------------------------------------------------------------------------
 triggers:
   - type: manual
+    inputs:
+      - name: file_hash
+        type: string
+        description:
+          The file hash to check (MD5, SHA-1, or SHA-256 format) for malware
+          and threat intelligence
+        required: true
 
 # ---------------------------------------------------------------------------
 # STEPS
@@ -85,14 +83,13 @@ steps:
 # - References workflow input parameter(s)
 # - References workflow constant(s)
 # -------------------------------------------------------------------------
+# TODO: create a VirusTotal connector in Kibana (Stack Management -> Connectors,
+# type: VirusTotal) configured with your API key, then replace the placeholder below.
 - name: lookup_file_hash
-  type: http
+  type: virustotal.scanFileHash
+  connector-id: REPLACE_WITH_CONNECTOR_ID
   with:
-    url: "{{ consts.virustotal_base_url }}/files/{{ inputs.file_hash }}"
-    method: GET
-    headers:
-      x-apikey: "{{ consts.virustotal_api_key }}"
-      Accept: application/json
+    hash: "{{ inputs.file_hash }}"
   on-failure:
     retry:
       max-attempts: 2
@@ -110,13 +107,16 @@ steps:
 # - References workflow input parameter(s)
 # - References workflow constant(s)
 # -------------------------------------------------------------------------
+# TODO: configure this HTTP connector in Kibana with the x-apikey header set to your
+# VirusTotal API key. The /behaviours endpoint has no named virustotal.* connector action,
+# so this step uses the http escape hatch with a connector that supplies the auth header.
 - name: get_detailed_analysis
   type: http
+  connector-id: REPLACE_WITH_CONNECTOR_ID
   with:
     url: "{{ consts.virustotal_base_url }}/files/{{ inputs.file_hash }}/behaviours"
     method: GET
     headers:
-      x-apikey: "{{ consts.virustotal_api_key }}"
       Accept: application/json
   on-failure:
     continue: true
@@ -138,35 +138,35 @@ steps:
     message: |
       === File Hash Threat Analysis Report ===
       File Hash: {{ inputs.file_hash }}
-      
+
       VirusTotal Analysis:
-      - File Name: {{ steps.lookup_file_hash.output.data.data.attributes.meaningful_name }}
-      - File Type: {{ steps.lookup_file_hash.output.data.data.attributes.type_description }}
-      - File Size: {{ steps.lookup_file_hash.output.data.data.attributes.size }} bytes
-      - First Seen: {{ steps.lookup_file_hash.output.data.data.attributes.first_submission_date }}
-      - Last Analysis: {{ steps.lookup_file_hash.output.data.data.attributes.last_analysis_date }}
-      
+      - File Name: {{ steps.lookup_file_hash.output.attributes.meaningful_name }}
+      - File Type: {{ steps.lookup_file_hash.output.attributes.type_description }}
+      - File Size: {{ steps.lookup_file_hash.output.attributes.size }} bytes
+      - First Seen: {{ steps.lookup_file_hash.output.attributes.first_submission_date }}
+      - Last Analysis: {{ steps.lookup_file_hash.output.attributes.last_analysis_date }}
+
       Detection Results:
-      - Malicious Detections: {{ steps.lookup_file_hash.output.data.data.attributes.last_analysis_stats.malicious }}
-      - Suspicious Detections: {{ steps.lookup_file_hash.output.data.data.attributes.last_analysis_stats.suspicious }}
-      - Undetected: {{ steps.lookup_file_hash.output.data.data.attributes.last_analysis_stats.undetected }}
-      - Total Scans: {{ steps.lookup_file_hash.output.data.data.attributes.last_analysis_stats.malicious | plus: steps.lookup_file_hash.output.data.data.attributes.last_analysis_stats.suspicious | plus: steps.lookup_file_hash.output.data.data.attributes.last_analysis_stats.undetected }}
-      
+      - Malicious Detections: {{ steps.lookup_file_hash.output.stats.malicious }}
+      - Suspicious Detections: {{ steps.lookup_file_hash.output.stats.suspicious }}
+      - Undetected: {{ steps.lookup_file_hash.output.stats.undetected }}
+      - Total Scans: {{ steps.lookup_file_hash.output.stats.malicious | plus: steps.lookup_file_hash.output.stats.suspicious | plus: steps.lookup_file_hash.output.stats.undetected }}
+
       File Hashes (Cross-reference):
-      - MD5: {{ steps.lookup_file_hash.output.data.data.attributes.md5 }}
-      - SHA-1: {{ steps.lookup_file_hash.output.data.data.attributes.sha1 }}
-      - SHA-256: {{ steps.lookup_file_hash.output.data.data.attributes.sha256 }}
+      - MD5: {{ steps.lookup_file_hash.output.attributes.md5 }}
+      - SHA-1: {{ steps.lookup_file_hash.output.attributes.sha1 }}
+      - SHA-256: {{ steps.lookup_file_hash.output.attributes.sha256 }}
 
       Community Reputation:
-      - Reputation Score: {{ steps.lookup_file_hash.output.data.data.attributes.reputation }}
-      - Total Votes: {{ steps.lookup_file_hash.output.data.data.attributes.total_votes.harmless | plus: steps.lookup_file_hash.output.data.data.attributes.total_votes.malicious }}
-      
+      - Reputation Score: {{ steps.lookup_file_hash.output.attributes.reputation }}
+      - Total Votes: {{ steps.lookup_file_hash.output.attributes.total_votes.harmless | plus: steps.lookup_file_hash.output.attributes.total_votes.malicious }}
+
       Threat Assessment:
-      {% if steps.lookup_file_hash.output.data.data.attributes.last_analysis_stats.malicious > 5 %}
-      � MALWARE DETECTED - Multiple AV engines flagged this file as malicious
-      {% elsif steps.lookup_file_hash.output.data.data.attributes.last_analysis_stats.malicious > 0 %}
+      {% if steps.lookup_file_hash.output.stats.malicious > 5 %}
+      🚨 MALWARE DETECTED - Multiple AV engines flagged this file as malicious
+      {% elsif steps.lookup_file_hash.output.stats.malicious > 0 %}
       ⚠️ POTENTIALLY MALICIOUS - Some AV engines detected threats
-      {% elsif steps.lookup_file_hash.output.data.data.attributes.last_analysis_stats.suspicious > 0 %}
+      {% elsif steps.lookup_file_hash.output.stats.suspicious > 0 %}
       ⚡ SUSPICIOUS - File shows suspicious characteristics
       {% else %}
       ✓ CLEAN - No malicious detections found

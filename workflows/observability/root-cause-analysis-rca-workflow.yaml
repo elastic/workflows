@@ -143,18 +143,13 @@ steps:
   # incidents.
   # Required: title, description, owner (e.g., "securitySolution"), tags,
   # severity.
-  # Output: {{ steps.create_case.output.id }} contains the new case ID.
+  # Output: {{ steps.create_case.output.case.id }} contains the new case ID.
   # Liquid syntax used:
   # - References output from previous step(s)
   # -------------------------------------------------------------------------
   - name: create_case
-    type: kibana.createCaseDefaultSpace
+    type: cases.createCase
     with:
-      connector:
-        fields: null
-        id: none
-        name: none
-        type: .none
       description: "{{ steps.create_case_description.output.response.message }}"
       owner: observability
       settings:
@@ -168,30 +163,23 @@ steps:
   # -------------------------------------------------------------------------
   # STEP 5: add_alert_to_case
   # -------------------------------------------------------------------------
-  # Attaches a security alert to a case via POST
-  # /api/cases/{caseId}/comments.
+  # Attaches a security alert to a case using the cases.addAlerts step.
   # Links the alert to the case for consolidated investigation tracking.
-  # Required fields: alertId, index, rule (id and name), owner, type:
-  # "alert".
+  # Required fields: case_id, alerts[] (alertId, index, rule).
   # Liquid syntax used:
   # - References output from previous step(s)
   # - References trigger event data (e.g., alert details)
   # -------------------------------------------------------------------------
   - name: add_alert_to_case
-    type: kibana.request
+    type: cases.addAlerts
     with:
-      method: "POST"
-      path: "/api/cases/{{ steps.create_case.output.id }}/comments"
-      headers:
-        kbn-xsrf: "true"
-      body:
-        type: alert
-        owner: observability
-        alertId: "{{event.alerts[0]._id}}"
-        index: "{{event.alerts[0]._index}}"
-        rule:
-          id: "{{event.rule.id}}"
-          name: "{{event.rule.name}}"
+      case_id: "{{ steps.create_case.output.case.id }}"
+      alerts:
+        - alertId: "{{event.alerts[0]._id}}"
+          index: "{{event.alerts[0]._index}}"
+          rule:
+            id: "{{event.rule.id}}"
+            name: "{{event.rule.name}}"
    
   
 
@@ -227,56 +215,52 @@ steps:
   # - References workflow constant(s)
   # -------------------------------------------------------------------------
   - name: addReasoningToCase
-    type: kibana.request
+    type: cases.addComment
     with:
-      method: "POST"
-      path: "/api/cases/{{ steps.create_case.output.id }}/comments"
-      body:
-        type: user
-        owner: observability
-        comment: |
-          ## 🔍 AI Investigation Summary
-          [View Full Conversation]({{ context.kibanaUrl }}/app/agent_builder/conversations/{{ steps.get_conversation.output.id }})
-        
-          ### Investigation Steps
-          
-          {%- assign step_number = 0 %}
-          {%- for round in steps.getConversation.output.rounds %}
-          {%- for step in round.steps %}
-          {%- if step.type == "reasoning" %}
-          {%- assign step_number = step_number | plus: 1 %}
-          
-          **{{ step_number }}. Reasoning**
-          > {{ step.reasoning }}
-          
-          {%- elsif step.type == "tool_call" %}
-          {%- assign query_esql = "" %}
-          {%- assign result_count = 0 %}
-          {%- assign has_error = false %}
-          {%- assign error_message = "" %}
-          {%- for result in step.results %}
-          {%- if result.type == "error" %}
-          {%- assign has_error = true %}
-          {%- assign error_message = result.data.message %}
-          {%- elsif result.type == "query" %}
-          {%- assign query_esql = result.data.esql %}
-          {%- elsif result.type == "tabular_data" %}
-          {%- assign result_count = result.data.values | size %}
-          {%- endif %}
-          {%- endfor %}
-          
-          **Action:** `{{ step.tool_id }}`
-          {%- if has_error %}
-          - ❌ **Error:** {{ error_message }}
-          {%- elsif query_esql != "" %}
-          - ✅ **Found {{ result_count }} results** → [View in Discover]({{ context.kibanaUrl }}/{{consts.basePath}}app/discover#/?_a=(dataSource:(type:esql),query:(esql:'{{ query_esql | url_encode }}')))
-          {%- else %}
-          - ✅ **Completed**
-          {%- endif %}
-          
-          {%- endif %}
-          {%- endfor %}
-          {%- endfor %}
+      case_id: "{{ steps.create_case.output.case.id }}"
+      comment: |
+        ## 🔍 AI Investigation Summary
+        [View Full Conversation]({{ context.kibanaUrl }}/app/agent_builder/conversations/{{ steps.getConversation.output.id }})
+
+        ### Investigation Steps
+
+        {%- assign step_number = 0 %}
+        {%- for round in steps.getConversation.output.rounds %}
+        {%- for step in round.steps %}
+        {%- if step.type == "reasoning" %}
+        {%- assign step_number = step_number | plus: 1 %}
+
+        **{{ step_number }}. Reasoning**
+        > {{ step.reasoning }}
+
+        {%- elsif step.type == "tool_call" %}
+        {%- assign query_esql = "" %}
+        {%- assign result_count = 0 %}
+        {%- assign has_error = false %}
+        {%- assign error_message = "" %}
+        {%- for result in step.results %}
+        {%- if result.type == "error" %}
+        {%- assign has_error = true %}
+        {%- assign error_message = result.data.message %}
+        {%- elsif result.type == "query" %}
+        {%- assign query_esql = result.data.esql %}
+        {%- elsif result.type == "tabular_data" %}
+        {%- assign result_count = result.data.values | size %}
+        {%- endif %}
+        {%- endfor %}
+
+        **Action:** `{{ step.tool_id }}`
+        {%- if has_error %}
+        - ❌ **Error:** {{ error_message }}
+        {%- elsif query_esql != "" %}
+        - ✅ **Found {{ result_count }} results** → [View in Discover]({{ context.kibanaUrl }}/{{consts.basePath}}app/discover#/?_a=(dataSource:(type:esql),query:(esql:'{{ query_esql | url_encode }}')))
+        {%- else %}
+        - ✅ **Completed**
+        {%- endif %}
+
+        {%- endif %}
+        {%- endfor %}
+        {%- endfor %}
 
 
 
@@ -290,14 +274,8 @@ steps:
   # - References output from previous step(s)
   # -------------------------------------------------------------------------
   - name: add_rca_as_comment
-    type: kibana.request
+    type: cases.addComment
     with:
-      method: "POST"
-      path: "/api/cases/{{ steps.create_case.output.id }}/comments"
-      headers:
-        kbn-xsrf: "true"
-      body:
-        type: user
-        owner: observability
-        comment: "{{ steps.rca_analysis.output.response.message }}"
+      case_id: "{{ steps.create_case.output.case.id }}"
+      comment: "{{ steps.rca_analysis.output.response.message }}"
  

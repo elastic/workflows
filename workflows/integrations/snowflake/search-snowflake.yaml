@@ -28,23 +28,11 @@ enabled: true
 triggers:
   - type: manual
     enabled: true
-
-# ---------------------------------------------------------------------------
-# INPUTS
-# ---------------------------------------------------------------------------
-# Runtime parameters provided when the workflow is triggered. Each input
-# can specify:
-#   - name: Unique identifier for the input
-#   - type: Data type (string, number, boolean, array, object)
-#   - required: Whether the input must be provided (default: false)
-#   - default: Default value if not provided
-# Reference inputs in steps using {{ inputs.input_name }} syntax
-# ---------------------------------------------------------------------------
-inputs:
-  - name: snowflake_query
-    default: SELECT * FROM SECURITY_EVENTS ORDER BY timestamp DESC LIMIT 10
-    type: string
-    description: SQL query to execute against Snowflake
+    inputs:
+      - name: snowflake_query
+        default: SELECT * FROM SECURITY_EVENTS ORDER BY timestamp DESC LIMIT 10
+        type: string
+        description: SQL query to execute against Snowflake
 
 # ---------------------------------------------------------------------------
 # CONSTANTS
@@ -52,17 +40,12 @@ inputs:
 # Reusable configuration values defined once and referenced throughout the
 # workflow using {{ consts.key_name }} syntax. Use constants for:
 #   - API endpoints and URLs
-#   - API keys and authentication tokens (use secrets in production)
 #   - Environment-specific configuration
 #   - Values that may need to change across environments
+# NOTE: snowflake_url, pat_token, database, schema, warehouse, and role are
+# now configured inside the Kibana Snowflake connector (Stack Management ->
+# Connectors). They no longer belong in consts.
 # ---------------------------------------------------------------------------
-consts:
-  snowflake_url: YOUR_URL_HERE
-  pat_token: secret
-  database: YOUR_DB_HERE
-  schema: YOUR_SCHEMA_HERE
-  warehouse: YOUR_URL_HERE
-  role: YOUR_ROLE_HERE
 
 # ---------------------------------------------------------------------------
 # STEPS
@@ -81,31 +64,27 @@ steps:
   # -------------------------------------------------------------------------
   # STEP 1: execute_snowflake_query
   # -------------------------------------------------------------------------
-  # Executes a SQL query against Snowflake data warehouse.
+  # Executes a SQL query against Snowflake data warehouse via synchronous HTTP
+  # POST. The Snowflake SQL API returns resultSetMetaData + data on HTTP 200.
   # Liquid syntax used:
   # - References workflow input parameter(s)
-  # - References workflow constant(s)
   # -------------------------------------------------------------------------
+  # TODO: create an HTTP connector in Kibana (Stack Management ->
+  # Connectors) configured with your Snowflake account URL as the base URL and
+  # a PAT/OAuth Bearer token in the Authorization header, then replace the
+  # placeholder below. The connector handles auth so no credentials appear here.
   - name: execute_snowflake_query
     type: http
+    connector-id: REPLACE_WITH_CONNECTOR_ID
     with:
-      url: '{{ consts.snowflake_url }}'
+      url: https://YOUR_SNOWFLAKE_ACCOUNT.snowflakecomputing.com/api/v2/statements
       method: POST
       headers:
         Content-Type: application/json
         Accept: application/json
-        Authorization: Bearer {{ consts.pat_token }}
-        User-Agent: ElasticWorkflows/1.0
-      body: |
-        {
-          "statement": "{{ inputs.snowflake_query }}",
-          "timeout": 60,
-          "database": "{{ consts.database }}",
-          "schema": "{{ consts.schema }}",
-          "warehouse": "{{ consts.warehouse }}",
-          "role": "{{ consts.role }}"
-        }
-      timeout: 90s
+      body:
+        statement: '{{ inputs.snowflake_query }}'
+        timeout: 60
 
   # -------------------------------------------------------------------------
   # STEP 2: log_results

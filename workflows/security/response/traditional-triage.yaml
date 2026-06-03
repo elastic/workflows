@@ -28,33 +28,21 @@ enabled: true
 # ---------------------------------------------------------------------------
 triggers:
   - type: manual
+    inputs:
+      - name: description
+        type: string
+        default: this is a test case
+      - name: title
+        type: string
+        default: Test Case
+      - name: tags
+        type: array
+        default:
+          - automation
+          - test
+      - name: severity
+        type: string
   - type: alert
-
-# ---------------------------------------------------------------------------
-# INPUTS
-# ---------------------------------------------------------------------------
-# Runtime parameters provided when the workflow is triggered. Each input
-# can specify:
-#   - name: Unique identifier for the input
-#   - type: Data type (string, number, boolean, array, object)
-#   - required: Whether the input must be provided (default: false)
-#   - default: Default value if not provided
-# Reference inputs in steps using {{ inputs.input_name }} syntax
-# ---------------------------------------------------------------------------
-inputs:
-  - name: description
-    type: string
-    default: this is a test case
-  - name: title
-    type: string
-    default: Test Case
-  - name: tags
-    type: array
-    default:
-      - automation
-      - test
-  - name: severity
-    type: string
 
 # ---------------------------------------------------------------------------
 # CONSTANTS
@@ -66,8 +54,7 @@ inputs:
 #   - Environment-specific configuration
 #   - Values that may need to change across environments
 # ---------------------------------------------------------------------------
-consts:
-  slack_token: "YOUR-SECRET-HERE"
+# (slack_token removed per R6 — credentials belong in an HTTP connector, not in YAML consts)
 
 # ---------------------------------------------------------------------------
 # STEPS
@@ -121,13 +108,8 @@ steps:
       # - References trigger event data (e.g., alert details)
       # -------------------------------------------------------------------------
       - name: createCase
-        type: kibana.createCaseDefaultSpace
+        type: cases.createCase
         with:
-          connector:
-            fields: null
-            id: none
-            name: none
-            type: .none
           description: This case is automatically being created due to a confirmed malicious file being detected.
           owner: securitySolution
           settings:
@@ -140,28 +122,19 @@ steps:
       # -------------------------------------------------------------------------
       # STEP 4: create_alert_comment
       # -------------------------------------------------------------------------
-      # Attaches a security alert to a case via POST
-      # /api/cases/{caseId}/comments.
+      # Attaches a security alert to a case via cases.addAlerts.
       # Links the alert to the case for consolidated investigation tracking.
-      # Required fields: alertId, index, rule (id and name), owner, type:
-      # "alert".
-      # Liquid syntax used:
-      # - References output from previous step(s)
-      # - References trigger event data (e.g., alert details)
       # -------------------------------------------------------------------------
       - name: create_alert_comment
-        type: kibana.request
+        type: cases.addAlerts
         with:
-          method: POST
-          path: /api/cases/{{steps.createCase.output.id}}/comments
-          body:
-            type: alert
-            alertId: '{{event.alerts[0]._id}}'
-            index: '{{event.alerts[0]._index}}'
-            rule:
-              id: '{{event.rule.id}}'
-              name: '{{event.rule.name}}'
-            owner: securitySolution
+          case_id: '{{steps.createCase.output.case.id}}'
+          alerts:
+            - alertId: '{{event.alerts[0]._id}}'
+              index: '{{event.alerts[0]._index}}'
+              rule:
+                id: '{{event.rule.id}}'
+                name: '{{event.rule.name}}'
 
       # -------------------------------------------------------------------------
       # STEP 5: isolate_host
@@ -181,9 +154,9 @@ steps:
           body:
             endpoint_ids:
               - '{{event.alerts[0].elastic.agent.id}}'
-            comment: Automated Isolation due to Malware Infection - Case ID {{steps.createCase.output.id}}
+            comment: Automated Isolation due to Malware Infection - Case ID {{steps.createCase.output.case.id}}
             case_ids:
-              - '{{steps.createCase.output.id}}'
+              - '{{steps.createCase.output.case.id}}'
             alert_ids:
               - '{{event.alerts[0]._id}}'
 
@@ -212,7 +185,7 @@ steps:
       # -------------------------------------------------------------------------
       # STEP 7: add_history_search_comment
       # -------------------------------------------------------------------------
-      # Adds a comment to a case via POST /api/cases/{caseId}/comments.
+      # Adds a comment to a case via cases.addComment.
       # Comments document investigation findings, analyst notes, or action
       # summaries.
       # Liquid syntax used:
@@ -220,21 +193,17 @@ steps:
       # - References trigger event data (e.g., alert details)
       # -------------------------------------------------------------------------
       - name: add_history_search_comment
-        type: kibana.request
+        type: cases.addComment
         with:
-          method: POST
-          path: /api/cases/{{steps.createCase.output.id}}/comments
-          body:
-            type: user
-            owner: securitySolution
-            comment: >
-              This hash is present {{steps.Historical_search.output.values[0][0]}} times in our logs. Run the following
-              query to get more details:
+          case_id: '{{steps.createCase.output.case.id}}'
+          comment: >
+            This hash is present {{steps.Historical_search.output.values[0][0]}} times in our logs. Run the following
+            query to get more details:
 
-                ```
-                FROM logs-* | WHERE file.hash.sha256 == "{{event.alerts[0].file.hash.sha256}}" | KEEP @timestamp,process.name,process.parent.name,host.name,user.name,file.hash.sha256 | LIMIT 1000
+              ```
+              FROM logs-* | WHERE file.hash.sha256 == "{{event.alerts[0].file.hash.sha256}}" | KEEP @timestamp,process.name,process.parent.name,host.name,user.name,file.hash.sha256 | LIMIT 1000
 
-               ```
+             ```
 
       # -------------------------------------------------------------------------
       # STEP 8: get_on_call
@@ -257,16 +226,18 @@ steps:
       # Creates a new Slack channel using the Slack API.
       # Liquid syntax used:
       # - `date` - Formats date/time value
-      # - References workflow constant(s)
       # -------------------------------------------------------------------------
+      # TODO: create an HTTP connector in Kibana that holds your Slack API token
+      # (the Authorization: Bearer header), then replace the placeholder below so the
+      # credential never appears in this YAML.
       - name: create-slack-channel
         type: http
+        connector-id: REPLACE_WITH_CONNECTOR_ID
         with:
           url: https://slack.com/api/conversations.create
           method: POST
           headers:
             Content-Type: application/json; charset=utf-8
-            Authorization: Bearer {{ consts.slack_token }}
           body:
             name: 'malware-incident-{{ ''now'' | date: ''%Y-%m-%d'' }}'
             is_private: false
@@ -278,15 +249,15 @@ steps:
       # Looks up a Slack user by their email address.
       # Liquid syntax used:
       # - References output from previous step(s)
-      # - References workflow constant(s)
       # -------------------------------------------------------------------------
+      # TODO: reuse the same HTTP connector created for the Slack API token
+      # (see step 9 comment), then replace the placeholder below.
       - name: lookup_user_by_email
         type: http
+        connector-id: REPLACE_WITH_CONNECTOR_ID
         with:
           url: https://slack.com/api/users.lookupByEmail?email={{ steps.get_on_call.output.values[0][0] }}
           method: GET
-          headers:
-            Authorization: Bearer {{ consts.slack_token }}
           timeout: 30s
 
       # -------------------------------------------------------------------------
@@ -295,16 +266,17 @@ steps:
       # Invites users to a Slack channel.
       # Liquid syntax used:
       # - References output from previous step(s)
-      # - References workflow constant(s)
       # -------------------------------------------------------------------------
+      # TODO: reuse the same HTTP connector created for the Slack API token
+      # (see step 9 comment), then replace the placeholder below.
       - name: invite-users-to-channel
         type: http
+        connector-id: REPLACE_WITH_CONNECTOR_ID
         with:
           url: https://slack.com/api/conversations.invite
           method: POST
           headers:
             Content-Type: application/json; charset=utf-8
-            Authorization: Bearer {{ consts.slack_token }}
           body:
             channel: '{{steps.create-slack-channel.output.data.channel.id}}'
             users: '{{ steps.lookup_user_by_email.output.data.user.id }}'
@@ -317,43 +289,43 @@ steps:
       # Liquid syntax used:
       # - `replace` - Replaces substring occurrences
       # - References output from previous step(s)
-      # - References workflow constant(s)
       # -------------------------------------------------------------------------
+      # TODO: reuse the same HTTP connector created for the Slack API token
+      # (see step 9 comment), then replace the placeholder below.
       - name: post-welcome-message
         type: http
+        connector-id: REPLACE_WITH_CONNECTOR_ID
         with:
           url: https://slack.com/api/chat.postMessage
           method: POST
           headers:
             Content-Type: application/json; charset=utf-8
-            Authorization: Bearer {{ consts.slack_token }}
           body:
             channel: '{{steps.create-slack-channel.output.data.channel.id}}'
             text: >-
               <@{{ steps.lookup_user_by_email.output.data.user.id | replace: ',', '> <@' }}>  You have been added to
-              this channel to deal with an <{{kibanaUrl}}/app/security/cases/{{steps.createCase.output.id}}|Elastic
+              this channel to deal with an <{{kibanaUrl}}/app/security/cases/{{steps.createCase.output.case.id}}|Elastic
               Security Case>
           timeout: 30s
 
       # -------------------------------------------------------------------------
       # STEP 13: post_slack_message_rich_dynamic
       # -------------------------------------------------------------------------
-      # Makes an API call to VirusTotal to check for malicious indicators.
-      # Returns threat intelligence data including detection results and
-      # reputation scores.
+      # Sends a rich Slack message with malware incident details.
       # Liquid syntax used:
       # - References output from previous step(s)
-      # - References workflow constant(s)
       # - References trigger event data (e.g., alert details)
       # -------------------------------------------------------------------------
+      # TODO: reuse the same HTTP connector created for the Slack API token
+      # (see step 9 comment), then replace the placeholder below.
       - name: post_slack_message_rich_dynamic
         type: http
+        connector-id: REPLACE_WITH_CONNECTOR_ID
         with:
           url: https://slack.com/api/chat.postMessage
           method: POST
           headers:
             Content-Type: application/json; charset=utf-8
-            Authorization: Bearer {{ consts.slack_token }}
           body:
             channel: '{{steps.create-slack-channel.output.data.channel.id}}'
             text: Details
@@ -368,7 +340,7 @@ steps:
               Security case created\n• Endpoint isolated\n• Historical hash search executed\n• On-call analyst
               notified"}},{"type":"actions","elements":[{"type":"button","text":{"type":"plain_text","text":"View
               Elastic
-              Case","emoji":true},"style":"primary","url":"{{kibanaUrl}}/app/security/cases/{{steps.createCase.output.id}}"},{"type":"button","text":{"type":"plain_text","text":"View
+              Case","emoji":true},"style":"primary","url":"{{kibanaUrl}}/app/security/cases/{{steps.createCase.output.case.id}}"},{"type":"button","text":{"type":"plain_text","text":"View
               VirusTotal
               Report","emoji":true},"url":"https://www.virustotal.com/gui/file/{{event.alerts[0].file.hash.sha256}}"}]},{"type":"context","elements":[{"type":"mrkdwn","text":"⏱️
               Detected via Elastic Security | Automated Traditional Triage workflow"}]}]
@@ -395,42 +367,36 @@ steps:
       # -------------------------------------------------------------------------
       # STEP 15: get_latest_case_version
       # -------------------------------------------------------------------------
-      # Retrieves case details via GET /api/cases/{caseId}.
+      # Retrieves case details via cases.getCase.
       # Returns the full case object including status, comments, and linked
       # alerts.
       # Liquid syntax used:
       # - References output from previous step(s)
       # -------------------------------------------------------------------------
       - name: get_latest_case_version
-        type: kibana.request
+        type: cases.getCase
         with:
-          method: GET
-          path: /api/cases/{{steps.createCase.output.id}}
+          case_id: '{{steps.createCase.output.case.id}}'
 
       # -------------------------------------------------------------------------
       # STEP 16: assign_case_to_oncall
       # -------------------------------------------------------------------------
-      # Updates an existing case via PATCH /api/cases.
-      # Can modify status, severity, title, description, assignees, or tags.
+      # Assigns an on-call analyst to the case via cases.assignCase.
       # Liquid syntax used:
       # - References output from previous step(s)
       # -------------------------------------------------------------------------
       - name: assign_case_to_oncall
-        type: kibana.request
+        type: cases.assignCase
         with:
-          method: PATCH
-          path: /api/cases
-          body:
-            cases:
-              - id: '{{steps.createCase.output.id}}'
-                version: '{{steps.get_latest_case_version.output.version}}'
-                assignees:
-                  - uid: '{{steps.suggest_oncall_user_profile.output.profiles[0].uid}}'
+          case_id: '{{steps.createCase.output.case.id}}'
+          version: '{{steps.get_latest_case_version.output.case.version}}'
+          assignees:
+            - uid: '{{steps.suggest_oncall_user_profile.output.profiles[0].uid}}'
 
       # -------------------------------------------------------------------------
       # STEP 17: add_comment
       # -------------------------------------------------------------------------
-      # Adds a comment to a case via POST /api/cases/{caseId}/comments.
+      # Adds a comment to a case via cases.addComment.
       # Comments document investigation findings, analyst notes, or action
       # summaries.
       # Liquid syntax used:
@@ -438,19 +404,15 @@ steps:
       # - References output from previous step(s)
       # -------------------------------------------------------------------------
       - name: add_comment
-        type: kibana.request
+        type: cases.addComment
         with:
-          method: POST
-          path: /api/cases/{{steps.createCase.output.id}}/comments
-          body:
-            type: user
-            owner: securitySolution
-            comment: >
-              {{steps.lookup_user_by_email.output.data.user.real_name}} is currently on call. Slack Channel
-              [malware-incident-{{ 'now' | date: '%Y-%m-%d'
-              }}](https://swiftcrypto.slack.com/archives/{{steps.create-slack-channel.output.data.channel.id}}) has been
-              created, and *{{steps.lookup_user_by_email.output.data.user.real_name}}* added. They have also been
-              assigned to this case.
+          case_id: '{{steps.createCase.output.case.id}}'
+          comment: >
+            {{steps.lookup_user_by_email.output.data.user.real_name}} is currently on call. Slack Channel
+            [malware-incident-{{ 'now' | date: '%Y-%m-%d'
+            }}](https://swiftcrypto.slack.com/archives/{{steps.create-slack-channel.output.data.channel.id}}) has been
+            created, and *{{steps.lookup_user_by_email.output.data.user.real_name}}* added. They have also been
+            assigned to this case.
     else:
 
       # -------------------------------------------------------------------------

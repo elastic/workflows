@@ -27,6 +27,17 @@ enabled: true
 # ---------------------------------------------------------------------------
 triggers:
   - type: manual
+    inputs:
+      - name: endpointids
+        default:
+          - 7189af0c-161c-4b1b-8153-70fdf0cd7eb5
+        type: array
+      - name: comment
+        default: This command is being run to emulate behavior
+        type: string
+      - name: command
+        default: curl.exe icanhazip.com
+        type: string
 
 # ---------------------------------------------------------------------------
 # TAGS
@@ -38,17 +49,6 @@ triggers:
 #   - Grouping related workflows together
 # ---------------------------------------------------------------------------
 tags: []
-inputs:
-  - name: endpointids
-    default:
-      - 7189af0c-161c-4b1b-8153-70fdf0cd7eb5
-    type: array
-  - name: comment
-    default: This command is being run to emulate behavior
-    type: string
-  - name: command
-    default: curl.exe icanhazip.com
-    type: string
 
 # ---------------------------------------------------------------------------
 # STEPS
@@ -103,12 +103,15 @@ steps:
   # -------------------------------------------------------------------------
   # Retrieves data from an external API endpoint via HTTP GET request.
   # -------------------------------------------------------------------------
+  # TODO: create an HTTP connector in Kibana that holds the Authorization
+  # credential for your deployment, then replace the connector-id placeholder below
+  # so the credential never appears in this YAML.
   - name: get_action_status
     type: http
+    connector-id: REPLACE_WITH_CONNECTOR_ID
     with:
       method: GET
       url: >-
         https://your-deployment.elastic-cloud.com
       headers:
-        Authorization: secret
         kbn-xsrf: kibana

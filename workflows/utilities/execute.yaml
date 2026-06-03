@@ -27,28 +27,27 @@ enabled: true
 tags: []
 triggers:
   - type: manual
-
-# ---------------------------------------------------------------------------
-# INPUTS
-# ---------------------------------------------------------------------------
-# Runtime parameters provided when the workflow is triggered. Each input
-# can specify:
-#   - name: Unique identifier for the input
-#   - type: Data type (string, number, boolean, array, object)
-#   - required: Whether the input must be provided (default: false)
-#   - default: Default value if not provided
-# Reference inputs in steps using {{ inputs.input_name }} syntax
-# ---------------------------------------------------------------------------
-inputs:
-  - name: endpointids
-    default: ["7189af0c-161c-4b1b-8153-70fdf0cd7eb5"]
-    type: array
-  - name: comment
-    default: This command is being run to emulate behavior
-    type: string
-  - name: command
-    type: string
-    default: curl.exe icanhazip.com
+    # ---------------------------------------------------------------------------
+    # INPUTS
+    # ---------------------------------------------------------------------------
+    # Runtime parameters provided when the workflow is triggered. Each input
+    # can specify:
+    #   - name: Unique identifier for the input
+    #   - type: Data type (string, number, boolean, array, object)
+    #   - required: Whether the input must be provided (default: false)
+    #   - default: Default value if not provided
+    # Reference inputs in steps using {{ inputs.input_name }} syntax
+    # ---------------------------------------------------------------------------
+    inputs:
+      - name: endpointids
+        default: ["7189af0c-161c-4b1b-8153-70fdf0cd7eb5"]
+        type: array
+      - name: comment
+        default: This command is being run to emulate behavior
+        type: string
+      - name: command
+        type: string
+        default: curl.exe icanhazip.com
 
 # ---------------------------------------------------------------------------
 # STEPS

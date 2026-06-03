@@ -27,6 +27,11 @@ description: Query Splunk and output results
 # ---------------------------------------------------------------------------
 triggers:
 - type: manual
+  inputs:
+  - name: search_term
+    type: string
+    description: The term to search for in Splunk
+    required: true
 
 
 # ---------------------------------------------------------------------------
@@ -41,25 +46,6 @@ triggers:
 # ---------------------------------------------------------------------------
 consts:
   splunk_url: https://your-splunk-instance/services/search/jobs
-  splunk_auth_token: base64-encoded-credentials
-
-
-# ---------------------------------------------------------------------------
-# INPUTS
-# ---------------------------------------------------------------------------
-# Runtime parameters provided when the workflow is triggered. Each input
-# can specify:
-#   - name: Unique identifier for the input
-#   - type: Data type (string, number, boolean, array, object)
-#   - required: Whether the input must be provided (default: false)
-#   - default: Default value if not provided
-# Reference inputs in steps using {{ inputs.input_name }} syntax
-# ---------------------------------------------------------------------------
-inputs:
-- name: search_term
-  type: string
-  description: The term to search for in Splunk
-  required: true
 
 
 # ---------------------------------------------------------------------------
@@ -84,13 +70,16 @@ steps:
 # - References workflow input parameter(s)
 # - References workflow constant(s)
 # -------------------------------------------------------------------------
+# TODO: create an HTTP connector in Kibana that holds your Splunk Basic auth credentials
+# (the Authorization header), then replace the placeholder below so the credential never
+# appears in this YAML.
 - name: query_splunk
   type: http
+  connector-id: REPLACE_WITH_CONNECTOR_ID
   with:
     url: '{{ consts.splunk_url }}'
     method: POST
     headers:
-      Authorization: Basic {{ consts.splunk_auth_token }}
       Content-Type: application/x-www-form-urlencoded
     body: search=search index=main {{ inputs.search_term }} | head 10&output_mode=json&exec_mode=oneshot
     timeout: 60s

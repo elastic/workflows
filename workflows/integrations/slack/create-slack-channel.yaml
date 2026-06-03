@@ -25,35 +25,21 @@ enabled: true
 # ---------------------------------------------------------------------------
 triggers:
   - type: manual
-
-# ---------------------------------------------------------------------------
-# INPUTS
-# ---------------------------------------------------------------------------
-# Runtime parameters provided when the workflow is triggered. Each input
-# can specify:
-#   - name: Unique identifier for the input
-#   - type: Data type (string, number, boolean, array, object)
-#   - required: Whether the input must be provided (default: false)
-#   - default: Default value if not provided
-# Reference inputs in steps using {{ inputs.input_name }} syntax
-# ---------------------------------------------------------------------------
-inputs:
-  - name: channel_name
-    default: test-channel
-    type: string
-
-# ---------------------------------------------------------------------------
-# CONSTANTS
-# ---------------------------------------------------------------------------
-# Reusable configuration values defined once and referenced throughout the
-# workflow using {{ consts.key_name }} syntax. Use constants for:
-#   - API endpoints and URLs
-#   - API keys and authentication tokens (use secrets in production)
-#   - Environment-specific configuration
-#   - Values that may need to change across environments
-# ---------------------------------------------------------------------------
-consts:
-  slack_token: "YOUR-SECRET-HERE"
+    # ---------------------------------------------------------------------------
+    # INPUTS
+    # ---------------------------------------------------------------------------
+    # Runtime parameters provided when the workflow is triggered. Each input
+    # can specify:
+    #   - name: Unique identifier for the input
+    #   - type: Data type (string, number, boolean, array, object)
+    #   - required: Whether the input must be provided (default: false)
+    #   - default: Default value if not provided
+    # Reference inputs in steps using {{ inputs.input_name }} syntax
+    # ---------------------------------------------------------------------------
+    inputs:
+      - name: channel_name
+        default: test-channel
+        type: string
 
 # ---------------------------------------------------------------------------
 # STEPS
@@ -72,20 +58,17 @@ steps:
   # -------------------------------------------------------------------------
   # STEP 1: create-slack-channel
   # -------------------------------------------------------------------------
-  # Creates a new Slack channel using the Slack API.
+  # Creates a new Slack channel using the Slack (v2) connector spec action.
   # Liquid syntax used:
   # - References workflow input parameter(s)
-  # - References workflow constant(s)
   # -------------------------------------------------------------------------
+  # TODO: configure a Slack (v2) connector in Kibana (Stack Management
+  # -> Connectors, type "Slack API"), then replace REPLACE_WITH_CONNECTOR_ID
+  # below with that connector's id. See the pattern in
+  # integrations/slack/add-users-to-slack-channel.yaml.
   - name: create-slack-channel
-    type: http
+    type: slack2.createConversation
+    connector-id: REPLACE_WITH_CONNECTOR_ID
     with:
-      url: https://slack.com/api/conversations.create
-      method: POST
-      headers:
-        Content-Type: application/json; charset=utf-8
-        Authorization: Bearer {{ consts.slack_token }}
-      body:
-        name: '{{ inputs.channel_name }}'
-        is_private: false
-      timeout: 30s
+      name: '{{ inputs.channel_name }}'
+      isPrivate: false

@@ -86,16 +86,16 @@ steps:
   # -------------------------------------------------------------------------
   # STEP 2: formatMessage
   # -------------------------------------------------------------------------
-  # Executes the inference.completion action with the configured parameters.
+  # Executes the ai.prompt action with the configured parameters.
   # Liquid syntax used:
   # - `json` - Converts object to JSON string
   # - References output from previous step(s)
   # -------------------------------------------------------------------------
   - name: formatMessage
-    type: inference.completion
+    type: ai.prompt
     connector-id: openai
     with:
-      input: "Take this JSON output of the top 10 HackerNews posts from today and format it nicely so it can be sent as a Slack message.\n\nOrder by the score of the post, higher score first.\n\n```json\n{{ steps.getHackernewsPosts.output.data.data.json.results | json }}\n```\n\nHere are some guidelines from Slack, on how to format the message:\nFormatting\n\nBold\tSurround text with asterisks: \n*your text*\nItalic\tSurround text with underscores:\n_your text_\nStrikethrough\tSurround text with tildes:\n~your text~\nCode\tSurround text with backticks:\n`your text`\nBlock quote\tAdd an angled bracket in front of text:\n>your text\nCode block\tSurround text with three backticks:\n```your text```\nLink\t\nSurround text with brackets, then surround the link with parentheses:\n[your text](the link)\n\nYour response should include ONLY the message to be sent to Slack and nothing else besides that.\nAlso, The message should always start with \"🗞️ Here's your Daily HN Digest by One Workflow:\"\n"
+      prompt: "Take this JSON output of the top 10 HackerNews posts from today and format it nicely so it can be sent as a Slack message.\n\nOrder by the score of the post, higher score first.\n\n```json\n{{ steps.getHackernewsPosts.output.data.data.json.results | json }}\n```\n\nHere are some guidelines from Slack, on how to format the message:\nFormatting\n\nBold\tSurround text with asterisks: \n*your text*\nItalic\tSurround text with underscores:\n_your text_\nStrikethrough\tSurround text with tildes:\n~your text~\nCode\tSurround text with backticks:\n`your text`\nBlock quote\tAdd an angled bracket in front of text:\n>your text\nCode block\tSurround text with three backticks:\n```your text```\nLink\t\nSurround text with brackets, then surround the link with parentheses:\n[your text](the link)\n\nYour response should include ONLY the message to be sent to Slack and nothing else besides that.\nAlso, The message should always start with \"🗞️ Here's your Daily HN Digest by One Workflow:\"\n"
 
   # -------------------------------------------------------------------------
   # STEP 3: sendSlack
@@ -108,4 +108,4 @@ steps:
     type: slack
     connector-id: slacky
     with:
-      message: '{{steps.formatMessage.output[0].result}}'
+      message: '{{steps.formatMessage.output.content}}'

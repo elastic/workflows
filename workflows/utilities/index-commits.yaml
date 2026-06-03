@@ -46,7 +46,6 @@ triggers:
 #   - Values that may need to change across environments
 # ---------------------------------------------------------------------------
 consts:
-  gh_token: secret
   repo: elastic/kibana
   index_name: indexed_commits_v1
 
@@ -67,44 +66,42 @@ steps:
   # -------------------------------------------------------------------------
   # STEP 1: create_index
   # -------------------------------------------------------------------------
-  # Executes a search query against one or more Elasticsearch indices.
-  # Output: {{ steps.create_index.output.hits }} contains matching documents.
+  # Creates the Elasticsearch index with mappings and settings.
+  # Output: {{ steps.create_index.output.acknowledged }}
   # Liquid syntax used:
   # - References workflow constant(s)
   # -------------------------------------------------------------------------
   - name: create_index
-    type: elasticsearch.request
+    type: elasticsearch.indices.create
     on-failure:
       continue: true
     with:
-      method: PUT
-      path: /{{consts.index_name}}
-      body:
-        mappings:
-          properties:
-            commit:
-              properties:
-                message:
-                  type: text
-                  analyzer: standard
-                  fields:
-                    keyword:
-                      type: keyword
-                      ignore_above: 256
-                author:
-                  properties:
-                    date:
-                      type: date
-                      format: strict_date_optional_time||epoch_millis
-        settings:
-          index:
-            number_of_shards: 1
-            number_of_replicas: 0
-          analysis:
-            analyzer:
-              standard:
-                type: standard
-                stopwords: _none_
+      index: "{{consts.index_name}}"
+      mappings:
+        properties:
+          commit:
+            properties:
+              message:
+                type: text
+                analyzer: standard
+                fields:
+                  keyword:
+                    type: keyword
+                    ignore_above: 256
+              author:
+                properties:
+                  date:
+                    type: date
+                    format: strict_date_optional_time||epoch_millis
+      settings:
+        index:
+          number_of_shards: 1
+          number_of_replicas: 0
+        analysis:
+          analyzer:
+            standard:
+              type: standard
+              stopwords: _none_
 
   # -------------------------------------------------------------------------
   # STEP 2: search_last_commit
@@ -116,15 +113,13 @@ steps:
   # - References workflow constant(s)
   # -------------------------------------------------------------------------
   - name: search_last_commit
-    type: elasticsearch.request
+    type: elasticsearch.search
     with:
-      method: GET
-      path: /{{consts.index_name}}/_search
-      body:
-        size: 1
-        sort:
-          - commit.author.date:
-              order: desc
+      index: "{{consts.index_name}}"
+      size: 1
+      sort:
+        - commit.author.date:
+            order: desc
 
   # -------------------------------------------------------------------------
   # STEP 3: since_date_var
@@ -168,15 +163,18 @@ steps:
       # - References workflow constant(s)
       # - References current item in foreach loop
       # -------------------------------------------------------------------------
+      # TODO: create an HTTP connector in Kibana that holds your GitHub
+      # Bearer token (Authorization header), then replace the placeholder below
+      # so the credential never appears in this YAML.
       - name: fetch_commits
         type: http
+        connector-id: REPLACE_WITH_CONNECTOR_ID
         with:
           url: >-
             https://api.github.com/repos/{{consts.repo}}/commits?page={{foreach.item}}&per_page=100&since={{steps.since_date_var.output
             | strip | strip_newlines}}
           method: GET
           headers:
-            Authorization: Bearer {{consts.gh_token}}
             Accept: application/vnd.github+json
 
       # -------------------------------------------------------------------------
