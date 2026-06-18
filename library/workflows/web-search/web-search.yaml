@@ -1,0 +1,44 @@
+template-metadata:
+  slug: web-search
+  version: "1.0.0"
+  availability: ">=9.5.0"
+  name: "Web Search (Brave)"
+  description: >-
+    Run a web search via the Brave Search API and return the raw result
+    set. Useful as a building block for enrichment, research, or
+    LLM-grounding workflows.
+  category: search
+  tags: [search, web, brave]
+  icon: brave
+  install:
+    form:
+      - name: brave-search-connector
+        label: "Brave Search connector"
+        description: >-
+          The Brave Search connector used to perform the query. If you
+          don't have one yet, click "Create new" and configure it with
+          your Brave Search subscription token
+          (https://brave.com/search/api/).
+        inputType: connector
+        connectorType: .brave-search
+        required: true
+
+name: Web Search
+description: Perform a web search using the Brave Search API.
+
+triggers:
+  - type: manual
+    inputs:
+      - name: query
+        type: string
+        description: The query string to send to Brave Search.
+        required: true
+
+steps:
+  # Run the search via the dedicated Brave step type. The subscription
+  # token lives in the connector configuration.
+  - name: web_search
+    type: brave-search.webSearch
+    connector-id: __install__.brave-search-connector
+    with:
+      q: "{{ inputs.query }}"

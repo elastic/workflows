@@ -1,0 +1,53 @@
+template-metadata:
+  slug: create-slack-channel
+  version: "1.0.0"
+  availability: ">=9.5.0"
+  name: "Create Slack Channel"
+  description: >-
+    Create a new Slack channel (public or private) via the Slack v2 API.
+    Useful as a building block for incident-response workflows that spin
+    up a dedicated war-room channel per case or alert.
+  category: automation
+  tags: [slack, channel, automation, integration]
+  icon: slack
+  install:
+    form:
+      - name: slack-connector
+        label: "Slack (v2) connector"
+        description: >-
+          The Slack (v2) connector used to create the channel. If you
+          don't have one yet, click "Create new" and configure it with a
+          Slack bot token that has the `channels:manage` and
+          `groups:write` scopes.
+        inputType: connector
+        connectorType: .slack2
+        required: true
+
+name: Create Slack Channel
+description: Create a new Slack channel via the Slack v2 API.
+
+triggers:
+  - type: manual
+    inputs:
+      - name: channel_name
+        type: string
+        description: >-
+          Name of the channel to create. Lowercase letters, numbers,
+          hyphens, and underscores only; 80 characters or fewer.
+        required: true
+      - name: is_private
+        type: boolean
+        description: >-
+          Whether to create a private channel. Defaults to false (public).
+        required: false
+        default: false
+
+steps:
+  # Create the channel via the dedicated Slack v2 step type. The bot
+  # token lives in the connector configuration.
+  - name: create_channel
+    type: slack2.createConversation
+    connector-id: __install__.slack-connector
+    with:
+      name: "{{ inputs.channel_name }}"
+      isPrivate: "{{ inputs.is_private }}"

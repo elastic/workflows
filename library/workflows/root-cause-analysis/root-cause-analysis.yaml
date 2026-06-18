@@ -1,0 +1,153 @@
+template-metadata:
+  slug: root-cause-analysis
+  version: "1.0.0"
+  availability: ">=9.5.0"
+  name: "Root Cause Analysis (Agent Builder)"
+  description: >-
+    On every triggering alert, ask an Agent Builder agent to investigate
+    possible root causes, then file a Case with the agent's analysis,
+    a generated title and description, the alert attached, and a
+    structured summary of the agent's reasoning steps as comments.
+  category: automation
+  tags: [observability, rca, ai, agent-builder, cases]
+  install:
+    form:
+      - name: agent-id
+        label: "Agent Builder agent ID"
+        description: >-
+          The Agent Builder agent that performs the root-cause analysis.
+          The default "sre-agent" matches the out-of-the-box SRE agent;
+          point it at a different agent if you have a custom one
+          configured for your environment.
+        inputType: text
+        required: true
+        default: "sre-agent"
+
+name: Root Cause Analysis
+description: Use an Agent Builder agent to investigate alerts and document findings as a Case.
+
+triggers:
+  - type: alert
+
+steps:
+  # Phase 1: ask the agent to investigate the triggering alert. `create-conversation: true`
+  # opens a conversation that subsequent steps continue via `conversation_id`.
+  - name: rca_analysis
+    type: ai.agent
+    agent-id: __install__.agent-id
+    create-conversation: true
+    with:
+      message: |
+        Investigate the following alerts: {{ event | json }} and provide possible root causes.
+        To not blow up your context window please keep your analysis and data exploration brief.
+
+        You may use emojis in your response.
+    timeout: 10m
+
+  # Phase 2: derive a Case title from the analysis (continues the same conversation).
+  - name: create_case_title
+    type: ai.agent
+    agent-id: __install__.agent-id
+    with:
+      conversation_id: "{{ steps.rca_analysis.output.conversation_id }}"
+      message: |
+        based on this analysis i am going to create a case. please come up with a case title for me that is clear and informative. only return the case title NOTHING ELSE.
+    timeout: 10m
+
+  # Phase 3: derive a Case description from the same conversation.
+  - name: create_case_description
+    type: ai.agent
+    agent-id: __install__.agent-id
+    with:
+      conversation_id: "{{ steps.rca_analysis.output.conversation_id }}"
+      message: |
+        based on this analysis i am going to create a case. please come up with a case description for me that is clear and informative. only return the case description NOTHING ELSE.
+    timeout: 10m
+
+  # Phase 4: open the Case with the generated title and description.
+  - name: create_case
+    type: cases.createCase
+    with:
+      title: "{{ steps.create_case_title.output.message }}"
+      description: "{{ steps.create_case_description.output.message }}"
+      owner: observability
+      severity: low
+      tags:
+        - rca
+      settings:
+        syncAlerts: false
+
+  # Phase 5: attach the triggering alert to the new Case.
+  - name: add_alert_to_case
+    type: cases.addAlerts
+    with:
+      case_id: "{{ steps.create_case.output.case.id }}"
+      alerts:
+        - alertId: "{{ event.alerts[0]._id }}"
+          index: "{{ event.alerts[0]._index }}"
+          rule:
+            id: "{{ event.rule.id }}"
+            name: "{{ event.rule.name }}"
+
+  # Phase 6: fetch the full agent conversation so its reasoning can be summarized.
+  - name: get_conversation
+    type: kibana.request
+    with:
+      method: GET
+      path: "/api/agent_builder/conversations/{{ steps.rca_analysis.output.conversation_id }}"
+
+  # Phase 7: append a structured summary of the agent's reasoning steps as a comment.
+  - name: add_reasoning_to_case
+    type: cases.addComment
+    with:
+      case_id: "{{ steps.create_case.output.case.id }}"
+      comment: |
+        ## 🔍 AI Investigation Summary
+        [View Full Conversation]({{ context.kibanaUrl }}/app/agent_builder/conversations/{{ steps.get_conversation.output.id }})
+
+        ### Investigation Steps
+
+        {%- assign step_number = 0 %}
+        {%- for round in steps.get_conversation.output.rounds %}
+        {%- for step in round.steps %}
+        {%- if step.type == "reasoning" %}
+        {%- assign step_number = step_number | plus: 1 %}
+
+        **{{ step_number }}. Reasoning**
+        > {{ step.reasoning }}
+
+        {%- elsif step.type == "tool_call" %}
+        {%- assign query_esql = "" %}
+        {%- assign result_count = 0 %}
+        {%- assign has_error = false %}
+        {%- assign error_message = "" %}
+        {%- for result in step.results %}
+        {%- if result.type == "error" %}
+        {%- assign has_error = true %}
+        {%- assign error_message = result.data.message %}
+        {%- elsif result.type == "query" %}
+        {%- assign query_esql = result.data.esql %}
+        {%- elsif result.type == "tabular_data" %}
+        {%- assign result_count = result.data.values | size %}
+        {%- endif %}
+        {%- endfor %}
+
+        **Action:** `{{ step.tool_id }}`
+        {%- if has_error %}
+        - ❌ **Error:** {{ error_message }}
+        {%- elsif query_esql != "" %}
+        - ✅ **Found {{ result_count }} results** → [View in Discover]({{ context.kibanaUrl }}/app/discover#/?_a=(dataSource:(type:esql),query:(esql:'{{ query_esql | url_encode }}')))
+        {%- else %}
+        - ✅ **Completed**
+        {%- endif %}
+
+        {%- endif %}
+        {%- endfor %}
+        {%- endfor %}
+
+  # Phase 8: append the original RCA analysis as a final comment on the Case.
+  - name: add_rca_as_comment
+    type: cases.addComment
+    with:
+      case_id: "{{ steps.create_case.output.case.id }}"
+      comment: "{{ steps.rca_analysis.output.message }}"

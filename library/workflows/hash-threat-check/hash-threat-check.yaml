@@ -1,0 +1,93 @@
+template-metadata:
+  slug: hash-threat-check
+  version: "1.0.0"
+  availability: ">=9.5.0"
+  name: "Hash Threat Check (VirusTotal)"
+  description: >-
+    Check a file hash (MD5, SHA-1, or SHA-256) against the VirusTotal
+    database and produce a human-readable threat report covering file
+    metadata, AV detection counts, community reputation, and an overall
+    threat verdict.
+  solutions: [security]
+  category: detection
+  tags: [detection, threat-intel, virustotal, hash, malware]
+  icon: virustotal
+  install:
+    form:
+      - name: virustotal-connector
+        label: "VirusTotal connector"
+        description: >-
+          The VirusTotal connector used to look up the file hash. If you
+          don't have one yet, click "Create new" and configure it with
+          your VirusTotal API key (https://www.virustotal.com/gui/my-apikey).
+        inputType: connector
+        connectorType: .virustotal
+        required: true
+
+name: Hash Threat Check
+description: Check file hashes (MD5, SHA-1, SHA-256) against VirusTotal for malware detection.
+
+triggers:
+  - type: manual
+    inputs:
+      - name: file_hash
+        type: string
+        description: >-
+          The file hash to check (MD5, SHA-1, or SHA-256 format) for malware
+          and threat intelligence.
+        required: true
+
+steps:
+  # Query VirusTotal via the dedicated step type. The API key lives in the
+  # connector configuration, so no credential appears in this YAML.
+  - name: lookup_file_hash
+    type: virustotal.scanFileHash
+    connector-id: __install__.virustotal-connector
+    with:
+      hash: "{{ inputs.file_hash }}"
+    on-failure:
+      retry:
+        max-attempts: 2
+        delay: 3s
+      continue: true
+
+  # Format and emit a human-readable report to the workflow execution logs.
+  - name: format_results
+    type: console
+    with:
+      message: |
+        === File Hash Threat Analysis Report ===
+        File Hash: {{ inputs.file_hash }}
+
+        VirusTotal Analysis:
+        - File Name: {{ steps.lookup_file_hash.output.attributes.meaningful_name }}
+        - File Type: {{ steps.lookup_file_hash.output.attributes.type_description }}
+        - File Size: {{ steps.lookup_file_hash.output.attributes.size }} bytes
+        - First Seen: {{ steps.lookup_file_hash.output.attributes.first_submission_date }}
+        - Last Analysis: {{ steps.lookup_file_hash.output.attributes.last_analysis_date }}
+
+        Detection Results:
+        - Malicious Detections: {{ steps.lookup_file_hash.output.stats.malicious }}
+        - Suspicious Detections: {{ steps.lookup_file_hash.output.stats.suspicious }}
+        - Undetected: {{ steps.lookup_file_hash.output.stats.undetected }}
+        - Total Scans: {{ steps.lookup_file_hash.output.stats.malicious | plus: steps.lookup_file_hash.output.stats.suspicious | plus: steps.lookup_file_hash.output.stats.undetected }}
+
+        File Hashes (Cross-reference):
+        - MD5: {{ steps.lookup_file_hash.output.attributes.md5 }}
+        - SHA-1: {{ steps.lookup_file_hash.output.attributes.sha1 }}
+        - SHA-256: {{ steps.lookup_file_hash.output.attributes.sha256 }}
+
+        Community Reputation:
+        - Reputation Score: {{ steps.lookup_file_hash.output.attributes.reputation }}
+        - Total Votes: {{ steps.lookup_file_hash.output.attributes.total_votes.harmless | plus: steps.lookup_file_hash.output.attributes.total_votes.malicious }}
+
+        Threat Assessment:
+        {% if steps.lookup_file_hash.output.stats.malicious > 5 %}
+        🚨 MALWARE DETECTED - Multiple AV engines flagged this file as malicious
+        {% elsif steps.lookup_file_hash.output.stats.malicious > 0 %}
+        ⚠️ POTENTIALLY MALICIOUS - Some AV engines detected threats
+        {% elsif steps.lookup_file_hash.output.stats.suspicious > 0 %}
+        ⚡ SUSPICIOUS - File shows suspicious characteristics
+        {% else %}
+        ✅ CLEAN - No malicious detections found
+        {% endif %}

@@ -1,0 +1,91 @@
+template-metadata:
+  slug: semantic-knowledge-search
+  version: "1.0.0"
+  availability: ">=9.5.0"
+  name: "Semantic Knowledge Search"
+  description: >-
+    Run a semantic search against a knowledge-base index using a natural
+    language query, with optional namespace and knowledge-type filters
+    applied as Elasticsearch term clauses.
+  category: search
+  tags: [search, semantic, knowledge-base, elasticsearch]
+  install:
+    form:
+      - name: knowledge-base-index
+        label: "Knowledge base index"
+        description: >-
+          The Elasticsearch index that holds your knowledge-base documents.
+          The default ("knowledge_base") matches the out-of-the-box layout;
+          change it to point at your own index.
+        inputType: esIndex
+        required: true
+        default: "knowledge_base"
+
+name: Semantic Knowledge Search
+description: Search for similar knowledge using semantic search with optional namespace and type filters.
+
+triggers:
+  - type: manual
+    inputs:
+      - name: query_text
+        type: string
+        description: Natural-language description of the knowledge you're looking for.
+        required: true
+      - name: namespace_root
+        type: string
+        description: |
+          Optional root namespace filter:
+          - "integration" for integration-specific knowledge
+          - "kibana" for Kibana patterns
+          - "elasticsearch" for Elasticsearch patterns
+        required: false
+      - name: namespace_scope
+        type: string
+        description: |
+          Optional scope filter:
+          - When root="integration": integration name (e.g., "1password", "kubernetes")
+          - When root="kibana": product area (e.g., "visualizations", "dashboards")
+          - When root="elasticsearch": product area (e.g., "pipelines")
+        required: false
+      - name: knowledge_type
+        type: string
+        description: Optional filter (e.g., 'security_use_case', 'field_group', 'detection_pattern').
+        required: false
+
+steps:
+  # Build the array of Elasticsearch term-filter clauses from the optional
+  # inputs. Liquid renders the JSON string, which `data.parseJson` then
+  # converts into a structured array consumable by the query DSL below.
+  - name: filters
+    type: data.parseJson
+    source: |
+      {% assign filters = "" | split: "" %}
+      {% if inputs.knowledge_type %}
+        {% assign filter_obj = '{"term": {"knowledge_type": "' | append: inputs.knowledge_type | append: '"}}' %}
+        {% assign filters = filters | push: filter_obj %}
+      {% endif %}
+      {% if inputs.namespace_root %}
+        {% assign filter_obj = '{"term": {"namespace.root": "' | append: inputs.namespace_root | append: '"}}' %}
+        {% assign filters = filters | push: filter_obj %}
+      {% endif %}
+      {% if inputs.namespace_scope %}
+        {% assign filter_obj = '{"term": {"namespace.scope": "' | append: inputs.namespace_scope | append: '"}}' %}
+        {% assign filters = filters | push: filter_obj %}
+      {% endif %}
+      [{{ filters | join: "," }}]
+
+  # Execute the semantic search, combining a `semantic` clause on the query
+  # text with the optional term filters built above.
+  - name: search_knowledge
+    type: elasticsearch.search
+    with:
+      index: __install__.knowledge-base-index
+      size: 5
+      query:
+        bool:
+          should:
+            - semantic:
+                field: semantic_summary
+                query: "{{ inputs.query_text }}"
+          must: ${{ steps.filters.output }}
+          minimum_should_match: 1
