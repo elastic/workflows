@@ -9,8 +9,7 @@ template-metadata:
     threat report including abuse confidence score, total reports, geographic
     origin, ISP, and a low / medium / high risk classification.
   solutions: [security]
-  category: enrichment
-  tags: [enrichment, threat-intel, ip-reputation]
+  categories: [enrichment, threat-intel]
   icon: abuseipdb
   install:
     form:

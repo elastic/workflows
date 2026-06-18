@@ -9,8 +9,7 @@ template-metadata:
     metadata, AV detection counts, community reputation, and an overall
     threat verdict.
   solutions: [security]
-  category: detection
-  tags: [detection, threat-intel, virustotal, hash, malware]
+  categories: [detection, enrichment, threat-intel]
   icon: virustotal
   install:
     form:

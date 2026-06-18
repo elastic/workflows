@@ -7,8 +7,7 @@ template-metadata:
     Create a new Slack channel (public or private) via the Slack v2 API.
     Useful as a building block for incident-response workflows that spin
     up a dedicated war-room channel per case or alert.
-  category: automation
-  tags: [slack, channel, automation, integration]
+  categories: [integration]
   icon: slack
   install:
     form:

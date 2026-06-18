@@ -7,8 +7,8 @@ template-metadata:
     Run a semantic search against a knowledge-base index using a natural
     language query, with optional namespace and knowledge-type filters
     applied as Elasticsearch term clauses.
-  category: search
-  tags: [search, semantic, knowledge-base, elasticsearch]
+  solutions: [search]
+  categories: [search]
   install:
     form:
       - name: knowledge-base-index

@@ -8,8 +8,7 @@ template-metadata:
     Detection Engine API. Useful as a quick triage action or as a building
     block for larger response workflows.
   solutions: [security]
-  category: detection
-  tags: [detection, alerts, triage, acknowledge]
+  categories: [response]
 
 name: Mark Alert as Acknowledged
 description: Set the status of a Security detection alert to "acknowledged".
