@@ -8,6 +8,7 @@ template-metadata:
     possible root causes, then file a Case with the agent's analysis,
     a generated title and description, the alert attached, and a
     structured summary of the agent's reasoning steps as comments.
+  solutions: [security, observability]
   categories: [root-cause-analysis, ai-agent, case-management]
   install:
     form:

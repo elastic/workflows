@@ -7,6 +7,7 @@ template-metadata:
     Run a web search via the Brave Search API and return the raw result
     set. Useful as a building block for enrichment, research, or
     LLM-grounding workflows.
+  solutions: []
   categories: [search]
   icon: brave
   install:

@@ -73,7 +73,7 @@ The simplest way to import a single workflow.
 
 ### Example: Importing Hash Threat Check
 
-1. Open [`workflows/security/detection/hash-threat-check.yaml`](../workflows/security/detection/hash-threat-check.yaml)
+1. Open [`examples/security/detection/hash-threat-check.yaml`](../examples/security/detection/hash-threat-check.yaml)
 2. Copy the content
 3. In Kibana, create new workflow and paste
 4. Update the VirusTotal API key:
@@ -104,7 +104,7 @@ curl -X POST "https://YOUR_KIBANA_URL/api/workflows" \
 
 ```bash
 # Read file and escape for JSON
-YAML_CONTENT=$(cat workflows/detection/hash-threat-check.yaml)
+YAML_CONTENT=$(cat examples/security/detection/hash-threat-check.yaml)
 
 curl -X POST "https://YOUR_KIBANA_URL/api/workflows" \
   -H "kbn-xsrf: true" \
@@ -123,7 +123,7 @@ EOF
 ```bash
 # Install jq if not available: brew install jq (macOS) or apt install jq (Linux)
 
-cat workflows/detection/hash-threat-check.yaml | \
+cat examples/security/detection/hash-threat-check.yaml | \
   jq -Rs '{yaml: .}' | \
   curl -X POST "https://YOUR_KIBANA_URL/api/workflows" \
     -H "kbn-xsrf: true" \
@@ -239,7 +239,7 @@ Import multiple workflows at once.
 
 KIBANA_URL="${KIBANA_URL:-https://your-kibana-url}"
 API_KEY="${API_KEY:-your-api-key}"
-WORKFLOW_DIR="${1:-workflows}"
+WORKFLOW_DIR="${1:-examples}"
 
 import_workflow() {
   local file="$1"
@@ -280,10 +280,10 @@ echo "Import complete!"
 
 ```bash
 # Import all workflows
-./bulk_import.sh workflows/
+./bulk_import.sh examples/
 
 # Import specific category
-./bulk_import.sh workflows/detection/
+./bulk_import.sh examples/security/detection/
 
 # With environment variables
 KIBANA_URL=https://my-kibana.example.com API_KEY=abc123 ./bulk_import.sh
@@ -364,7 +364,7 @@ def bulk_import(directory):
     print(f"Import complete: {success} succeeded, {failed} failed")
 
 if __name__ == "__main__":
-    directory = sys.argv[1] if len(sys.argv) > 1 else "workflows"
+    directory = sys.argv[1] if len(sys.argv) > 1 else "examples"
     bulk_import(directory)
 ```
 
@@ -470,7 +470,7 @@ Error: YAML parsing failed
 
 **Solution:** Validate YAML with an online validator or `yamllint`:
 ```bash
-yamllint workflows/detection/my-workflow.yaml
+yamllint examples/security/detection/my-workflow.yaml
 ```
 
 #### 2. Missing Required Fields
