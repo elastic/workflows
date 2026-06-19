@@ -1,0 +1,61 @@
+# Workflow Template Library — categories vocabulary
+#
+# Single source of truth for the closed-vocabulary `categories: [...]` field
+# on every template's `template-metadata` block. The publish CI parses this
+# file and rejects any template whose `categories` entries are not declared
+# here.
+#
+# Adding a new category is a PR that adds an entry below. Categories are
+# orthogonal to solutions: a `notification` template can serve any solution;
+# a `monitoring` template can be security- or observability-flavored. Do
+# not couple category IDs to specific solutions.
+
+categories:
+  - id: enrichment
+    name: "Enrichment"
+    description: "Augment data with external intelligence."
+  - id: detection
+    name: "Detection"
+    description: "Identify threats, anomalies, or events of interest."
+  - id: response
+    name: "Response"
+    description: "Take action on incidents (acknowledge, close, escalate, isolate)."
+  - id: hunting
+    name: "Hunting"
+    description: "Proactively search for indicators of compromise or anomalies."
+  - id: threat-intel
+    name: "Threat intelligence"
+    description: "Indicators, attribution, reputation, threat actor context."
+  - id: notification
+    name: "Notification"
+    description: "Send messages to people or channels (Slack, Teams, email, paging)."
+  - id: case-management
+    name: "Case management"
+    description: "Create, update, or enrich cases / incidents / tickets."
+  - id: monitoring
+    name: "Monitoring"
+    description: "Health, status, and threshold-based observation."
+  - id: root-cause-analysis
+    name: "Root cause analysis"
+    description: "Investigate the underlying cause of an incident or anomaly."
+  - id: data-ingestion
+    name: "Data ingestion"
+    description: "Bring data into Elasticsearch from external systems."
+  - id: data-transformation
+    name: "Data transformation"
+    description: "Reshape, filter, or enrich data in place."
+  - id: reporting
+    name: "Reporting"
+    description: "Scheduled summaries, exports, or recurring digests."
+  - id: search
+    name: "Search"
+    description: "ES|QL, semantic search, knowledge retrieval workflows."
+  - id: ai-agent
+    name: "AI agent"
+    description: "Agentic workflows, LLM-driven automation, tool calling."
+  - id: integration
+    name: "Integration"
+    description: "Connect Elastic with external systems (CI, ITSM, comms)."
+  - id: utility
+    name: "Utility"
+    description: "Reusable helpers, demos, and getting-started workflows."

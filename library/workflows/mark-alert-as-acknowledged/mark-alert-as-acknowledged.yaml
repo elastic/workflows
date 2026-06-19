@@ -1,0 +1,33 @@
+template-metadata:
+  slug: mark-alert-as-acknowledged
+  version: "1.0.0"
+  availability: ">=9.5.0"
+  name: "Mark Alert as Acknowledged"
+  description: >-
+    Set the status of a detection alert to "acknowledged" via the Security
+    Detection Engine API. Useful as a quick triage action or as a building
+    block for larger response workflows.
+  solutions: [security]
+  categories: [response]
+
+name: Mark Alert as Acknowledged
+description: Set the status of a Security detection alert to "acknowledged".
+
+triggers:
+  - type: manual
+    inputs:
+      - name: alert_id
+        type: string
+        description: >-
+          The alert ID to acknowledge. Use the `_id` field from the alert
+          document or the `kibana.alert.uuid` value.
+        required: true
+
+steps:
+  # Acknowledge the alert via the Security step
+  - name: acknowledge_alert
+    type: security.setAlertStatus
+    with:
+      status: acknowledged
+      alert_ids: 
+        - "{{ inputs.alert_id }}"

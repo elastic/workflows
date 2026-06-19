@@ -1,0 +1,114 @@
+template-metadata:
+  slug: ip-reputation-check
+  version: "1.0.0"
+  availability: ">=9.5.0"
+  name: "IP Reputation Check (AbuseIPDB)"
+  description: >-
+    Assess the reputation of an IP address using AbuseIPDB and enrich the
+    result with geolocation data from IP-API. Produces a human-readable
+    threat report including abuse confidence score, total reports, geographic
+    origin, ISP, and a low / medium / high risk classification.
+  solutions: [security]
+  categories: [enrichment, threat-intel]
+  icon: abuseipdb
+  install:
+    form:
+      - name: abuseipdb-connector
+        label: "AbuseIPDB connector"
+        description: >-
+          The AbuseIPDB connector used to query IP reputation. If you don't
+          have one yet, click "Create new" and configure it with your
+          AbuseIPDB API key (https://www.abuseipdb.com/account/api).
+        inputType: connector
+        connectorType: .abuseipdb
+        required: true
+      - name: max-age-in-days
+        label: "Lookback window (days)"
+        description: >-
+          Maximum age of abuse reports to consider when scoring the IP, in
+          days. The default of 90 is a sensible starting point for most SOC
+          workflows; lower it for fresher signal, raise it for broader
+          historical context.
+        inputType: number
+        required: true
+        default: 90
+
+name: IP Reputation Check
+description: Check IP address reputation using AbuseIPDB and enrich with geolocation data.
+
+triggers:
+  - type: manual
+    inputs:
+      - name: ip_address
+        type: string
+        description: >-
+          The IP address to check for malicious activity and threat
+          intelligence (e.g., 8.8.8.8).
+        required: true
+
+steps:
+  # Query AbuseIPDB via the dedicated step type. The API key lives in the
+  # connector configuration, so no credential appears in this YAML.
+  - name: check_abuseipdb
+    type: abuseipdb.checkIp
+    connector-id: __install__.abuseipdb-connector
+    with:
+      ipAddress: "{{ inputs.ip_address }}"
+      maxAgeInDays: __install__.max-age-in-days
+    on-failure:
+      retry:
+        max-attempts: 2
+        delay: 3s
+      continue: true
+
+  # Geolocation enrichment via the public IP-API service. No auth required.
+  - name: get_geolocation
+    type: http
+    with:
+      url: http://ip-api.com/json
+      path: "{{ inputs.ip_address }}"
+      method: GET
+      query:
+        fields: "status,message,country,countryCode,region,regionName,city,zip,lat,lon,timezone,isp,org,as,asname,mobile,proxy,hosting"
+    on-failure:
+      retry:
+        max-attempts: 2
+        delay: 2s
+      continue: true
+
+  # Format and emit a human-readable report to the workflow execution logs.
+  - name: format_results
+    type: console
+    with:
+      message: |
+        === IP Threat Intelligence Report ===
+        IP Address: {{ inputs.ip_address }}
+
+        AbuseIPDB Results:
+        - Abuse Confidence Score: {{ steps.check_abuseipdb.output.data.abuseConfidenceScore }}%
+        - Total Reports: {{ steps.check_abuseipdb.output.data.totalReports }}
+        - Is Whitelisted: {{ steps.check_abuseipdb.output.data.isWhitelisted }}
+        - Country: {{ steps.check_abuseipdb.output.data.countryCode }}
+        - Usage Type: {{ steps.check_abuseipdb.output.data.usageType }}
+        - ISP: {{ steps.check_abuseipdb.output.data.isp }}
+        - Domain: {{ steps.check_abuseipdb.output.data.domain }}
+
+        Geolocation Results:
+        - Country: {{ steps.get_geolocation.output.data.country }} ({{ steps.get_geolocation.output.data.countryCode }})
+        - Region: {{ steps.get_geolocation.output.data.regionName }}
+        - City: {{ steps.get_geolocation.output.data.city }}
+        - ISP: {{ steps.get_geolocation.output.data.isp }}
+        - Organization: {{ steps.get_geolocation.output.data.org }}
+        - AS Name: {{ steps.get_geolocation.output.data.asname }}
+        - Is Proxy: {{ steps.get_geolocation.output.data.proxy }}
+        - Is Hosting: {{ steps.get_geolocation.output.data.hosting }}
+        - Is Mobile: {{ steps.get_geolocation.output.data.mobile }}
+
+        Threat Assessment:
+        {% if steps.check_abuseipdb.output.data.abuseConfidenceScore > 75 %}
+        ⚠️ HIGH RISK - This IP has a high abuse confidence score
+        {% elsif steps.check_abuseipdb.output.data.abuseConfidenceScore > 25 %}
+        ⚡ MEDIUM RISK - This IP has been reported for abuse
+        {% else %}
+        ✅ LOW RISK - No significant abuse reports
+        {% endif %}
