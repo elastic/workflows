@@ -1,0 +1,29 @@
+{
+  "name": "@elastic/workflows-library",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Source repo for the Kibana Workflow Template Library",
+  "license": "Apache-2.0",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build:catalog": "node scripts/build-catalog.mjs",
+    "lint": "eslint .",
+    "lint:fix": "eslint . --fix",
+    "format": "prettier --write .",
+    "format:check": "prettier --check ."
+  },
+  "dependencies": {
+    "js-yaml": "^4.2.0",
+    "semver": "^7.8.4"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.39.1",
+    "eslint": "^9.39.1",
+    "eslint-config-prettier": "^10.1.8",
+    "globals": "^16.5.0",
+    "prettier": "^3.6.2"
+  }
+}
