@@ -1,0 +1,6 @@
+# Cursor already respects .gitignore (node_modules/, dist/, etc. are covered).
+# Add ONLY committed files that bloat AI context without adding value.
+
+# Binaries in docs/examples
+docs/**/*.{png,jpg,jpeg,gif,pdf,svg}
+examples/**/*.{png,jpg,jpeg,gif,pdf,svg}

@@ -8,7 +8,6 @@ template-metadata:
     Useful as a building block for incident-response workflows that spin
     up a dedicated war-room channel per case or alert.
   categories: [integration]
-  icon: slack
   install:
     form:
       - name: slack-connector

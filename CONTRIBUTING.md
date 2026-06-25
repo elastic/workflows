@@ -148,7 +148,7 @@ Two rules:
 
 ## Validating locally
 
-The repo ships a small Node script that walks every template, validates its `template-metadata` block, cross-checks `__install__.<name>` against `install.form`, verifies every `categories[]` entry against the vocab, and produces the per-Kibana-version catalogs the CDN serves.
+The repo ships a small Node script that walks every template, validates its `template-metadata` block, verifies every `categories[]` entry against the vocab, and produces the per-Kibana-version catalogs the CDN serves.
 
 ```bash
 npm install
@@ -182,9 +182,8 @@ The script enforces:
 - `slug` matches the parent directory name.
 - `version` is valid semver; `availability` is a valid semver range.
 - Every `categories[]` entry exists in `library/categories.yaml`.
-- Every `__install__.<name>` reference in the body has a matching `install.form` entry (and no orphan form fields).
 
-It does **not** yet validate the workflow body against the engine's step-type schema — that runs in a sibling CI job once the validator package is published. Until then, the safest check is to install your template into a local Kibana and run it.
+It does **not** re-validate what the sibling CI validation job already checks.
 
 ---
 
