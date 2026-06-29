@@ -271,7 +271,7 @@ steps:
                   note: |-
                     ## Host Enrichment - `censys.host_enrichment.{{ variables.field_name }}`
 
-                    **Target IP:** `{{ variables.host.ip }}` - [View on Censys](https://platform.censys.io/hosts/{{ variables.host.ip | url_encode }})
+                    **Host:** `{{ variables.host.ip }}` - [View on Censys](https://platform.censys.io/hosts/{{ variables.host.ip | url_encode }})
 
                     ### Summary
 
@@ -320,4 +320,5 @@ steps:
             with:
               message: |-
                 Censys enrichment for {{ variables.field_name }} ({{ variables.host.ip }}):
+                View on Censys: https://platform.censys.io/hosts/{{ variables.host.ip | url_encode }}
                 {{ variables.censys_subobj | json }}

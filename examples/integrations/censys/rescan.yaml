@@ -504,5 +504,10 @@ steps:
         with:
           message: |-
             Censys rescan ({{ inputs.type }}) tracked_scan_id={{ variables.tracked_scan_id }} completed={{ variables.scan_completed | default: false }}
+            {%- if inputs.type == 'service' %}
+            View on Censys: https://platform.censys.io/hosts/{{ variables.host.ip | url_encode }}
+            {%- elsif inputs.type == 'webproperty' %}
+            View on Censys: https://platform.censys.io/web/{{ variables.web.hostname | url_encode }}:{{ variables.web.port }}
+            {%- endif %}
             Refreshed record:
             {{ variables.censys_subobj | json }}

@@ -291,9 +291,10 @@ steps:
                       note: |-
                         ## Censys Host History - `{{ variables.request_host }}`
 
+                        {{ variables.displayed_count }} events were returned. To see the full event history navigate to the [Censys Platform](https://platform.censys.io/hosts/{{ variables.request_host | url_encode }}/events).
+                        
                         **Window:** `{{ variables.request_start }}` to `{{ variables.request_end }}`
 
-                        **Events displayed:** {{ variables.displayed_count }}
                         {%- if variables.fetch_incomplete %}
 
                         > **Incomplete:** history retrieval stopped early because a Censys API request failed; the results below may be missing older events.
@@ -360,7 +361,7 @@ steps:
                 with:
                   message: |-
                     Censys host history for {{ variables.request_host }} ({{ variables.request_start }} to {{ variables.request_end }}):
-                    Events displayed: {{ variables.displayed_count }}
+                    {{ variables.displayed_count }} events were returned. To see the full event history navigate to the Censys Platform: https://platform.censys.io/hosts/{{ variables.request_host | url_encode }}/events
                     {%- if variables.fetch_incomplete %}
                     (retrieval stopped early due to a Censys API error; results may be incomplete)
                     {%- endif %}

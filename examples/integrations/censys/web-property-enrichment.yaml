@@ -284,7 +284,7 @@ steps:
                   note: |-
                     ## Web Property Enrichment - `censys.webproperty_enrichment{% if variables.field_name != 'web_property' %}.{{ variables.field_name }}{% endif %}`
 
-                    **Target:** `{{ variables.web.hostname }}:{{ variables.web.port }}` - [View on Censys](https://platform.censys.io/web/{{ variables.web.hostname | url_encode }}:{{ variables.web.port }})
+                    **Web Property:** `{{ variables.web.hostname }}:{{ variables.web.port }}` - [View on Censys](https://platform.censys.io/web/{{ variables.web.hostname | url_encode }}:{{ variables.web.port }})
 
                     ### Summary
 
@@ -342,4 +342,5 @@ steps:
             with:
               message: |-
                 Censys web property enrichment for {{ variables.field_name }} ({{ variables.web.hostname }}:{{ variables.web.port }}):
+                View on Censys: https://platform.censys.io/web/{{ variables.web.hostname | url_encode }}:{{ variables.web.port }}
                 {{ variables.censys_subobj | json }}

@@ -248,4 +248,5 @@ steps:
             with:
               message: |-
                 Censys certificate enrichment for {{ variables.field_name }} ({{ variables.cert.fingerprint_sha256 }}):
+                View on Censys: https://platform.censys.io/certificates/{{ variables.cert.fingerprint_sha256 }}
                 {{ variables.censys_subobj | json }}

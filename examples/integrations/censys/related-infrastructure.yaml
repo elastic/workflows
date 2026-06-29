@@ -394,6 +394,13 @@ steps:
         with:
           message: |-
             Censys Related Infrastructure (job_id={{ variables.job_id }}, target_type={{ variables.target_type }}, state={{ variables.job_state }}):
+            {%- if variables.target_type == 'host' %}
+            View on Censys: https://platform.censys.io/hosts/{{ variables.target_host | url_encode }}
+            {%- elsif variables.target_type == 'certificate' %}
+            View on Censys: https://platform.censys.io/certificates/{{ variables.target_certificate }}
+            {%- elsif variables.target_type == 'webproperty' %}
+            View on Censys: https://platform.censys.io/web/{{ variables.target_hostname | url_encode }}:{{ variables.target_port }}
+            {%- endif %}
             {{ variables.censys_subobj | json }}
 
   # When the job never completed (failed, unknown, or the poll cap was hit),
