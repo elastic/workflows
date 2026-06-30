@@ -5,13 +5,12 @@
  * Reads:
  *   - kibana-versions.json    (policy: latest channel, oldest supported minor,
  *                              catalogue granularity)
- *   - library/categories.yaml (closed-vocab category registry)
  *   - library/workflows/<slug>/<slug>.yaml  (templates)
  *
  * Writes (under dist/v1/):
  *   - kibana-versions.json                          (resolved, consumer-facing)
  *   - <version-id>/catalogs/templates.json          (one per active Kibana version)
- *   - <version-id>/manifest.json                    (with effectiveKibanaSemver)
+ *   - <version-id>/manifest.json                    (with kibanaVersion)
  *   - templates/<slug>/<version>.yaml               (raw template body, version-keyed)
  *
  * Resolves the list of Kibana versions to catalogue dynamically:
@@ -20,9 +19,11 @@
  *   - Named minors are discovered from elastic/kibana's branch list via the
  *     GitHub API, filtered by `oldest` (semver floor) and `cataloguePer`.
  *
- * Fails closed: a malformed template, an unknown category, an unreachable
- * Kibana main, or a missing required field aborts the publish — never falls
- * back to stale data.
+ * This generator does not enforce authoring invariants (slug parity, semver
+ * ranges, categories-vocab membership, install-form references); those are
+ * delegated to the separate validation step (planned to run in CI). It still
+ * fails closed on a malformed template, a missing required field, or an
+ * unreachable Kibana main — never falling back to stale data.
  */
 
 import { readFile, writeFile, mkdir, readdir, rm } from 'node:fs/promises';
@@ -51,7 +52,7 @@ function sha256(buf) {
   return 'sha256:' + createHash('sha256').update(buf).digest('hex');
 }
 
-// --- Step 1: Load policy file --------------------------------------------
+// --- Load policy file --------------------------------------------
 
 async function loadPolicy() {
   const policy = await readJson(POLICY_FILE);
@@ -74,7 +75,7 @@ async function loadPolicy() {
   return policy;
 }
 
-// --- Step 2: Resolve `main`'s semver -------------------------------------
+// --- Resolve `main`'s semver -------------------------------------
 
 async function resolveMainKibanaSemver() {
   const override = process.env.KIBANA_MAIN_VERSION;
@@ -108,7 +109,7 @@ async function resolveMainKibanaSemver() {
   return clean;
 }
 
-// --- Step 3: Discover supported named minors from Kibana branches --------
+// --- Discover supported named minors from Kibana branches --------
 
 /**
  * Builds a multi-line, actionable error message for a non-2xx response from
@@ -259,7 +260,7 @@ async function discoverNamedMinors(oldest) {
   return minors;
 }
 
-// --- Step 4: Discover and validate every template ------------------------
+// --- Discover every template ------------------------
 
 async function loadTemplates() {
   const slugs = await readdir(TEMPLATES_DIR);
@@ -371,7 +372,7 @@ function deriveTriggerTypes(parsed) {
   return result;
 }
 
-// --- Step 6: Build the catalog -------------------------------------------
+// --- Build the catalog -------------------------------------------
 
 function pickTemplatesFor(kibanaSemver, allTemplates) {
   const bySlug = new Map();

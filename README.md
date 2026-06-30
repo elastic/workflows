@@ -82,7 +82,6 @@ template-metadata:
   description: "Assess the reputation of an IP address using AbuseIPDB."
   solutions: [security]                     # optional; omit for cross-solution
   categories: [enrichment, threat-intel]    # closed vocab; entries from library/categories.yaml
-  icon: abuseipdb                           # optional
   install:                                  # only when the body uses __install__.<name>
     form:
       - name: abuseipdb-connector
@@ -120,8 +119,8 @@ In Kibana 9.5+ (Tech Preview), the Workflows app reads the published catalogue f
 Consumers see:
 
 - `/v1/kibana-versions.json` — the resolved list of available catalogues.
-- `/v1/<version>/catalogs/templates.json` — the catalogue rows for a given Kibana version.
-- `/v1/templates/<slug>/<version>.yaml` — immutable, version-keyed template bodies.
+- `/v1/<version>/catalogs/templates.json` — the catalogue rows for a given Kibana version. Each row carries the template metadata plus generator-derived `stepTypes` / `triggerTypes`, which the Library UI uses to render step and trigger icons.
+- `/v1/templates/<slug>/<version>.yaml` — version-keyed template bodies. The URL for a given `(slug, version)` is stable, but the bytes may be republished in place to ship a fix, so they are not treated as immutable.
 
 The catalogue is republished on every merge to `main`.
 
