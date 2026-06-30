@@ -1,0 +1,346 @@
+version: '1'
+name: Censys Web Property Enrichment
+description: >-
+  Enrich an alert with Censys Platform getWebProperty data for every available
+  (hostname-or-IP, port) pair derived from ECS fields. Each pair is enriched
+  independently and written back under censys.webproperty_enrichment.<field>.*
+  on the alert document (censys.webproperty_enrichment.url.*,
+  censys.webproperty_enrichment.destination.*,
+  censys.webproperty_enrichment.source.*). The dedicated
+  webproperty_enrichment namespace keeps this workflow's output separate from
+  the host enrichment, which writes to censys.host_enrichment.<field>.*.
+  Manual runs use inputs.hostname and inputs.port; when alert_index and
+  alert_id are also provided the enrichment is written back to that document
+  under censys.webproperty_enrichment.*, otherwise the enriched object is
+  logged to the workflow console.
+tags:
+  - censys
+  - enrichment
+  - security
+  - threat-intel
+enabled: true
+
+consts:
+  empty_arr: []
+
+triggers:
+  - type: manual
+    inputs:
+      - name: hostname
+        type: string
+        required: false
+        description: >-
+          Hostname, domain, or IPv4/IPv6 address. Used only on manual runs.
+          Combined with `port` to form the web property identifier.
+      - name: port
+        type: number
+        required: false
+        description: >-
+          TCP/UDP port (1–65535). Required on manual runs alongside
+          `hostname`.
+      - name: alert_index
+        type: string
+        required: false
+        description: >-
+          Optional Elasticsearch index. When provided together with alert_id
+          on a manual run, the enrichment is written back to that document
+          under censys.webproperty_enrichment.*. Ignored on alert triggers.
+      - name: alert_id
+        type: string
+        required: false
+        description: >-
+          Optional Elasticsearch document ID. When provided together with
+          alert_index on a manual run, the enrichment is written back to
+          that document under censys.webproperty_enrichment.*. Ignored on
+          alert triggers.
+  # NOTE: On alert triggers this workflow reads event.alerts[0], i.e. only the
+  # FIRST alert in the batch. When adding this workflow as a rule action, enable
+  # the "Run per alert" toggle so the rule invokes the workflow once per alert
+  # and every alert's data is processed (otherwise only the first is enriched).
+  - type: alert
+
+
+steps:
+  # Decide which web properties to look up, as a list of {field, hostname, port}
+  # entries.
+  #   • Alert run  - one entry per non-blank (hostname/IP, port) pair on the
+  #     alert (url, destination, source), each enriched separately. For
+  #     destination the domain is preferred over the IP when both are present.
+  #   • Manual run - a single entry for the hostname + port you type in.
+  # The `field` value decides where the result is written later, under
+  # censys.webproperty_enrichment.
+  - name: build_targets
+    type: data.parseJson
+    source: |-
+      [
+      {%- if event.alerts[0] != blank -%}
+        {%- assign sep = '' -%}
+        {%- if event.alerts[0].url.domain != blank and event.alerts[0].url.port != blank -%}{{ sep }}{"field":"url","hostname":"{{ event.alerts[0].url.domain }}","port":{{ event.alerts[0].url.port }}}{%- assign sep = ',' -%}{%- endif -%}
+        {%- if event.alerts[0].destination.domain != blank and event.alerts[0].destination.port != blank -%}{{ sep }}{"field":"destination","hostname":"{{ event.alerts[0].destination.domain }}","port":{{ event.alerts[0].destination.port }}}{%- assign sep = ',' -%}{%- elsif event.alerts[0].destination.ip != blank and event.alerts[0].destination.port != blank -%}{{ sep }}{"field":"destination","hostname":"{{ event.alerts[0].destination.ip }}","port":{{ event.alerts[0].destination.port }}}{%- assign sep = ',' -%}{%- endif -%}
+        {%- if event.alerts[0].source.ip != blank and event.alerts[0].source.port != blank -%}{{ sep }}{"field":"source","hostname":"{{ event.alerts[0].source.ip }}","port":{{ event.alerts[0].source.port }}}{%- endif -%}
+      {%- elsif inputs.hostname != blank and inputs.port != blank -%}
+        {"field":"web_property","hostname":"{{ inputs.hostname }}","port":{{ inputs.port }}}
+      {%- endif -%}
+      ]
+    with: {}
+
+  # Work out which alert document to write results back to: the alert's own
+  # index/id on alert runs, or the optional alert_index/alert_id inputs on
+  # manual runs. If either is missing, results are logged to the console
+  # instead (see log_when_no_target_doc).
+  - name: resolve_target_doc
+    type: data.set
+    with:
+      target_index: "{{ event.alerts[0]._index | default: inputs.alert_index }}"
+      target_id: "{{ event.alerts[0]._id | default: inputs.alert_id }}"
+
+  # Run the enrichment below once per web property. `foreach.item` holds the
+  # current {field, hostname, port} entry.
+  - name: enrich_each_field
+    type: foreach
+    foreach: "${{ steps.build_targets.output }}"
+    steps:
+
+      # Look up this web property (hostname + port) in Censys.
+      - name: get_web_property
+        type: censys.getWebProperty
+        connector-id: <connector-id>
+        with:
+          hostname: "{{ foreach.item.hostname }}"
+          port: "${{ foreach.item.port }}"
+        on-failure:
+          continue: true
+
+      # If the Censys lookup failed, log the error and move on to the next web
+      # property. This prevents writing an empty enrichment and an empty note
+      # to the alert.
+      - name: skip_on_fetch_error
+        type: if
+        condition: "${{ steps.get_web_property.error != blank }}"
+        steps:
+          - name: log_fetch_error
+            type: console
+            with:
+              message: |-
+                Censys getWebProperty failed for {{ foreach.item.field }} ({{ foreach.item.hostname }}:{{ foreach.item.port }}); skipping enrichment.
+                {{ steps.get_web_property.error | json }}
+          - name: skip_iteration
+            type: loop.continue
+
+      # Save this iteration's web property data and field name for the steps below.
+      - name: stash_iter
+        type: data.set
+        with:
+          web: "${{ steps.get_web_property.output.result.resource }}"
+          field_name: "{{ foreach.item.field }}"
+
+      # Keep only the endpoint fields we store/display (type and path).
+      - name: normalize_endpoints
+        type: data.map
+        items: "${{ variables.web.endpoints | default: consts.empty_arr }}"
+        with:
+          fields:
+            endpoint_type: "${{ item.endpoint_type }}"
+            path: "${{ item.path }}"
+        on-failure:
+          continue: true
+
+      # Keep only the software fields we store/display (vendor, product, version).
+      - name: normalize_software
+        type: data.map
+        items: "${{ variables.web.software | default: consts.empty_arr }}"
+        with:
+          fields:
+            vendor: "${{ item.vendor }}"
+            product: "${{ item.product }}"
+            version: "${{ item.version }}"
+        on-failure:
+          continue: true
+
+      # Keep only the text value of each label.
+      - name: normalize_labels
+        type: data.map
+        items: "${{ variables.web.labels | default: consts.empty_arr }}"
+        with:
+          fields:
+            value: "${{ item.value }}"
+        on-failure:
+          continue: true
+
+      # Assemble the web property details to store/show for this entry.
+      - name: build_subobj
+        type: data.set
+        with:
+          censys_subobj:
+            hostname: "${{ variables.web.hostname }}"
+            port: "${{ variables.web.port }}"
+            scan_time: "${{ variables.web.scan_time }}"
+            endpoints: "${{ steps.normalize_endpoints.output }}"
+            software: "${{ steps.normalize_software.output }}"
+            labels: "${{ steps.normalize_labels.output }}"
+            threats: "${{ variables.web.threats }}"
+            vulns: "${{ variables.web.vulns }}"
+            cert:
+              fingerprint_sha256: "${{ variables.web.cert.fingerprint_sha256 }}"
+              parsed:
+                subject_dn: "${{ variables.web.cert.parsed.subject_dn }}"
+                issuer_dn: "${{ variables.web.cert.parsed.issuer_dn }}"
+                subject:
+                  common_name: "${{ variables.web.cert.parsed.subject.common_name }}"
+                validity_period:
+                  not_before: "${{ variables.web.cert.parsed.validity_period.not_before }}"
+                  not_after: "${{ variables.web.cert.parsed.validity_period.not_after }}"
+                signature:
+                  self_signed: "${{ variables.web.cert.parsed.signature.self_signed }}"
+
+      # Write the web property data onto the alert under the field it came from:
+      # censys.webproperty_enrichment.url / .destination / .source (or directly
+      # under censys.webproperty_enrichment for a manual run). The outer `if`
+      # only runs when a target document exists; the `switch` picks the slot by
+      # field name. To enrich an extra field, add a matching case below.
+      # Manual runs with no alert document skip this and log to the console.
+      - name: dispatch_writes
+        type: if
+        condition: "${{ variables.target_index != blank and variables.target_id != blank }}"
+        steps:
+          - name: route_by_field
+            type: switch
+            expression: "{{ variables.field_name }}"
+            cases:
+              - match: "url"
+                steps:
+                  - name: do_write_url
+                    type: elasticsearch.update
+                    with:
+                      index: "{{ variables.target_index }}"
+                      id: "{{ variables.target_id }}"
+                      doc:
+                        censys:
+                          webproperty_enrichment:
+                            url: "${{ variables.censys_subobj }}"
+                    on-failure:
+                      continue: true
+              - match: "web_property"
+                steps:
+                  - name: do_write_web_property
+                    type: elasticsearch.update
+                    with:
+                      index: "{{ variables.target_index }}"
+                      id: "{{ variables.target_id }}"
+                      doc:
+                        censys:
+                          webproperty_enrichment: "${{ variables.censys_subobj }}"
+                    on-failure:
+                      continue: true
+              - match: "destination"
+                steps:
+                  - name: do_write_destination
+                    type: elasticsearch.update
+                    with:
+                      index: "{{ variables.target_index }}"
+                      id: "{{ variables.target_id }}"
+                      doc:
+                        censys:
+                          webproperty_enrichment:
+                            destination: "${{ variables.censys_subobj }}"
+                    on-failure:
+                      continue: true
+              - match: "source"
+                steps:
+                  - name: do_write_source
+                    type: elasticsearch.update
+                    with:
+                      index: "{{ variables.target_index }}"
+                      id: "{{ variables.target_id }}"
+                      doc:
+                        censys:
+                          webproperty_enrichment:
+                            source: "${{ variables.censys_subobj }}"
+                    on-failure:
+                      continue: true
+            default:
+              - name: log_unknown_field
+                type: console
+                with:
+                  message: "Web property enrichment: unexpected field_name '{{ variables.field_name }}', no write performed."
+
+      # Add a readable note to the alert summarizing the web property - a
+      # Summary table plus Endpoints and Software tables - with a link to view
+      # it on Censys. One note per enriched field. Skipped on manual runs with
+      # no alert document.
+      - name: add_note_branch
+        type: if
+        condition: "${{ variables.target_index != blank and variables.target_id != blank }}"
+        steps:
+          - name: add_alert_note
+            type: kibana.request
+            with:
+              method: PATCH
+              path: /api/note
+              body:
+                note:
+                  timelineId: ""
+                  eventId: "{{ variables.target_id }}"
+                  note: |-
+                    ## Web Property Enrichment - `censys.webproperty_enrichment{% if variables.field_name != 'web_property' %}.{{ variables.field_name }}{% endif %}`
+
+                    **Web Property:** `{{ variables.web.hostname }}:{{ variables.web.port }}` - [View on Censys](https://platform.censys.io/web/{{ variables.web.hostname | url_encode }}:{{ variables.web.port }})
+
+                    ### Summary
+
+                    | Field | Value |
+                    | :--- | :--- |
+                    | Hostname | `{{ variables.web.hostname }}` |
+                    | Port | {{ variables.web.port }} |
+                    | Scan Time | {{ variables.web.scan_time }} |
+                    | Labels | {{ steps.normalize_labels.output | map: 'value' | join: ', ' }} |
+                    | Threats | {{ variables.web.threats | default: consts.empty_arr | map: 'name' | join: ', ' }} |
+                    | Vulnerabilities | {{ variables.web.vulns | default: consts.empty_arr | map: 'id' | join: ', ' }} |
+                    | Cert SHA-256 | `{{ variables.web.cert.fingerprint_sha256 }}` |
+                    | Cert Subject DN | {{ variables.web.cert.parsed.subject_dn }} |
+                    | Cert Issuer DN | {{ variables.web.cert.parsed.issuer_dn }} |
+                    | Cert Common Name | {{ variables.web.cert.parsed.subject.common_name }} |
+                    | Cert Not Before | {{ variables.web.cert.parsed.validity_period.not_before }} |
+                    | Cert Not After | {{ variables.web.cert.parsed.validity_period.not_after }} |
+                    | Cert Self-Signed | {{ variables.web.cert.parsed.signature.self_signed }} |
+
+                    {%- assign endpoints_count = steps.normalize_endpoints.output | size -%}
+                    {%- if endpoints_count > 0 %}
+
+                    ### Endpoints ({{ endpoints_count }})
+
+                    | Type | Path |
+                    | :--- | :--- |
+                    {%- for e in steps.normalize_endpoints.output %}
+                    | {{ e.endpoint_type }} | `{{ e.path }}` |
+                    {%- endfor %}
+                    {%- endif %}
+
+                    {%- assign software_count = steps.normalize_software.output | size -%}
+                    {%- if software_count > 0 %}
+
+                    ### Software ({{ software_count }})
+
+                    | Vendor | Product | Version |
+                    | :--- | :--- | :--- |
+                    {%- for s in steps.normalize_software.output %}
+                    | {{ s.vendor }} | {{ s.product }} | {{ s.version }} |
+                    {%- endfor %}
+                    {%- endif %}
+            on-failure:
+              continue: true
+
+      # Fallback when there is no alert document to update (e.g. a manual run
+      # without alert_index/alert_id): print the enrichment to the console so
+      # the result is still visible.
+      - name: log_when_no_target_doc
+        type: if
+        condition: "${{ variables.target_index == blank or variables.target_id == blank }}"
+        steps:
+          - name: console_log_enrichment
+            type: console
+            with:
+              message: |-
+                Censys web property enrichment for {{ variables.field_name }} ({{ variables.web.hostname }}:{{ variables.web.port }}):
+                View on Censys: https://platform.censys.io/web/{{ variables.web.hostname | url_encode }}:{{ variables.web.port }}
+                {{ variables.censys_subobj | json }}

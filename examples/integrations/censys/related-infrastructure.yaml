@@ -1,0 +1,416 @@
+version: '1'
+name: Censys Related Infrastructure
+description: >-
+  Pivot-based threat hunting via the Censys Censeye API. Submits a Censeye
+  related-infrastructure job for a single target (host IP, certificate
+  SHA-256, or web property), polls the job until it reaches a terminal state,
+  then fetches the related-infrastructure pivots. Because Censeye accepts
+  exactly ONE target per job, both paths select a single target by the same
+  precedence and the first non-blank field wins:
+  alert path -> host.ip -> certificate (tls.server.hash.sha256) -> web
+  property (url.domain + url.port); manual path -> inputs.host ->
+  inputs.certificate -> inputs.hostname (+ inputs.port). When no target
+  resolves the run logs a console error and stops.
+  The normalized pivots are written back under
+  censys.related_infrastructure.* on the alert document (results[] plus job
+  metadata) when inputs.alert_index/alert_id (or the alert's own _index/_id)
+  are present; otherwise the result is logged to the workflow console.
+  Requires Threat Hunting access on the configured Censys organization.
+tags:
+  - censys
+  - threat-hunting
+  - censeye
+  - related-infrastructure
+  - security
+enabled: true
+
+# Empty list used as a safe fallback (`| default: consts.empty_arr`) whenever a
+# Censys response leaves out an optional array such as the pivot results or
+# their field/value pairs. Keeps later steps from failing on missing data.
+consts:
+  empty_arr: []
+
+triggers:
+  - type: manual
+    inputs:
+      - name: host
+        type: string
+        required: false
+        description: >-
+          Host target. IPv4 or IPv6 address to run Censeye against. Highest
+          manual precedence - used first when non-blank. Ignored on alert
+          triggers.
+      - name: certificate
+        type: string
+        required: false
+        description: >-
+          Certificate target. SHA-256 fingerprint as a 64-character hex
+          string. Used when host is blank. Ignored on alert triggers.
+      - name: hostname
+        type: string
+        required: false
+        description: >-
+          Web property target. Hostname, domain, or IPv4/IPv6 address. Used
+          when both host and certificate are blank. Ignored on alert triggers.
+      - name: port
+        type: number
+        required: false
+        description: >-
+          Web property port number (1-65535), paired with hostname. Defaults
+          to 443 when omitted.
+      - name: alert_index
+        type: string
+        required: false
+        description: >-
+          Optional Elasticsearch index. When provided together with alert_id
+          on a manual run, the pivots are written back to that document under
+          censys.related_infrastructure.*. Ignored on alert triggers.
+      - name: alert_id
+        type: string
+        required: false
+        description: >-
+          Optional Elasticsearch document ID. When provided together with
+          alert_index on a manual run, the pivots are written back to that
+          document under censys.related_infrastructure.*. Ignored on alert
+          triggers.
+  # NOTE: On alert triggers this workflow reads event.alerts[0], i.e. only the
+  # FIRST alert in the batch. When adding this workflow as a rule action, enable
+  # the "Run per alert" toggle so the rule invokes the workflow once per alert
+  # and every alert's data is processed (otherwise only the first is processed).
+  - type: alert
+
+
+steps:
+
+  # Pick the ONE target to investigate (Censeye allows only one per
+  # job). Both paths use the same precedence and the first non-blank wins:
+  #   • Alert run  - host IP, then certificate (tls.server.hash.sha256),
+  #     then web property (url.domain + url.port).
+  #   • Manual run - inputs.host, then inputs.certificate, then
+  #     inputs.hostname (+ inputs.port).
+  # If nothing matches, the target is empty and the run stops with a console
+  # message (see submit_job default / abort_if_no_job_id).
+  - name: build_target
+    type: data.parseJson
+    source: |-
+      {
+      {%- if event.alerts[0] != blank -%}
+        {%- if event.alerts[0].host.ip != blank -%}
+          "type":"host","host":"{{ event.alerts[0].host.ip }}"
+        {%- elsif event.alerts[0].tls.server.hash.sha256 != blank -%}
+          "type":"certificate","certificate":"{{ event.alerts[0].tls.server.hash.sha256 }}"
+        {%- elsif event.alerts[0].url.domain != blank -%}
+          "type":"webproperty","hostname":"{{ event.alerts[0].url.domain }}","port":{{ event.alerts[0].url.port | default: 443 }}
+        {%- endif -%}
+      {%- elsif inputs.host != blank -%}
+        "type":"host","host":"{{ inputs.host }}"
+      {%- elsif inputs.certificate != blank -%}
+        "type":"certificate","certificate":"{{ inputs.certificate }}"
+      {%- elsif inputs.hostname != blank -%}
+        "type":"webproperty","hostname":"{{ inputs.hostname }}","port":{{ inputs.port | default: 443 }}
+      {%- endif -%}
+      }
+    with: {}
+
+  # Save the chosen target and the write-back document into variables for the
+  # steps below. `target_port` is for display only - the submit step reads the
+  # port straight from build_target.output to keep it a number. The write-back
+  # document is the alert's own index/id on alert runs, or the optional
+  # alert_index/alert_id inputs on manual runs; if either is missing, results
+  # are logged to the console instead.
+  - name: stash_target
+    type: data.set
+    with:
+      target_type: "{{ steps.build_target.output.type }}"
+      target_host: "{{ steps.build_target.output.host }}"
+      target_certificate: "{{ steps.build_target.output.certificate }}"
+      target_hostname: "{{ steps.build_target.output.hostname }}"
+      target_port: "{{ steps.build_target.output.port }}"
+      target_index: "{{ event.alerts[0]._index | default: inputs.alert_index }}"
+      target_id: "{{ event.alerts[0]._id | default: inputs.alert_id }}"
+
+  # Start the Censeye job for the chosen target. The `switch` sends the
+  # right fields for each target type (host / certificate / web property). A
+  # failed submit is tolerated here; the guard below catches it so the rest of
+  # the run is skipped cleanly.
+  - name: submit_job
+    type: switch
+    expression: "{{ variables.target_type }}"
+    cases:
+      - match: "host"
+        steps:
+          - name: submit_host
+            type: censys.censEyeCreateAnalysisJob
+            connector-id: <connector-id>
+            with:
+              type: "host"
+              host: "{{ variables.target_host }}"
+            on-failure:
+              continue: true
+      - match: "certificate"
+        steps:
+          - name: submit_certificate
+            type: censys.censEyeCreateAnalysisJob
+            connector-id: <connector-id>
+            with:
+              type: "certificate"
+              certificate: "{{ variables.target_certificate }}"
+            on-failure:
+              continue: true
+      - match: "webproperty"
+        steps:
+          - name: submit_webproperty
+            type: censys.censEyeCreateAnalysisJob
+            connector-id: <connector-id>
+            with:
+              type: "webproperty"
+              hostname: "{{ variables.target_hostname }}"
+              port: "${{ steps.build_target.output.port }}"
+            on-failure:
+              continue: true
+    default:
+      - name: log_no_target
+        type: console
+        with:
+          message: "Censys Related Infrastructure: no valid target resolved (type='{{ variables.target_type }}'), no Censeye job submitted."
+
+  # Save the job ID returned by whichever submit branch ran.
+  - name: stash_job_id
+    type: data.set
+    with:
+      job_id: "{{ steps.submit_host.output.result.job_id | default: steps.submit_certificate.output.result.job_id | default: steps.submit_webproperty.output.result.job_id }}"
+
+  # If no job ID came back (submit failed), log it and skip the poll, fetch,
+  # write-back, and note steps below.
+  - name: abort_if_no_job_id
+    type: if
+    condition: "${{ variables.job_id == blank }}"
+    steps:
+      - name: log_submit_failure
+        type: console
+        with:
+          message: |-
+            Censys Censeye job submit returned no job_id (type='{{ variables.target_type }}'). Common causes: missing Threat Hunting entitlement on the organization, invalid credentials, 4xx, or network error. Skipping poll, fetch, write-back, and note steps.
+
+  # Wait for the job to finish. The loop checks the job status, then
+  # waits 10s and checks again, stopping as soon as the job is "completed" or
+  # "failed". It gives up after 60 checks (about 10 minutes) as a safety cap.
+  #
+  # If you change the timeout, edit both `max-iterations` (number of checks)
+  # and the wait `duration` below - both must be plain literal values, they
+  # cannot reference variables.
+  - name: poll_status_gate
+    type: if
+    condition: "${{ variables.job_id != blank }}"
+    steps:
+      - name: poll_status
+        type: while
+        condition: "${{ variables.job_state != 'completed' and variables.job_state != 'failed' }}"
+        max-iterations: 60
+        steps:
+
+          - name: get_job_status
+            type: censys.censEyeJobStatus
+            connector-id: <connector-id>
+            with:
+              jobId: "{{ variables.job_id }}"
+            on-failure:
+              continue: true
+
+          - name: stash_state
+            type: data.set
+            with:
+              job_state: "{{ steps.get_job_status.output.result.state }}"
+              job_result_count: "{{ steps.get_job_status.output.result.result_count }}"
+
+          # Only wait while the job is still running, so the iteration that
+          # observes a terminal state doesn't tack on a trailing wait before
+          # the loop exits.
+          - name: wait_if_not_done
+            type: if
+            condition: "${{ steps.get_job_status.output.result.state != 'completed' and steps.get_job_status.output.result.state != 'failed' }}"
+            steps:
+              - name: wait_between_polls
+                type: wait
+                with:
+                  duration: 10s
+
+  # Once the job has completed, fetch the related-infrastructure
+  # pivots, keep the fields we display (each pivot's count and its
+  # field/value pairs), and assemble the censys.related_infrastructure payload.
+  - name: fetch_results_gate
+    type: if
+    condition: "${{ variables.job_id != blank and variables.job_state == 'completed' }}"
+    steps:
+      - name: fetch_results
+        type: censys.censEyeJobResult
+        connector-id: <connector-id>
+        with:
+          jobId: "{{ variables.job_id }}"
+        on-failure:
+          continue: true
+
+      - name: normalize_results
+        type: data.map
+        items: "${{ steps.fetch_results.output.result.results | default: consts.empty_arr }}"
+        with:
+          fields:
+            count: "${{ item.count }}"
+            field_value_pairs: "${{ item.field_value_pairs | default: consts.empty_arr }}"
+        on-failure:
+          continue: true
+
+      - name: build_subobj
+        type: data.set
+        with:
+          censys_subobj:
+            job_id: "${{ variables.job_id }}"
+            state: "${{ variables.job_state }}"
+            result_count: "${{ variables.job_result_count }}"
+            target_type: "${{ variables.target_type }}"
+            results: "${{ steps.normalize_results.output }}"
+
+  # Write the pivots onto the alert under censys.related_infrastructure.
+  # Runs only when the job completed and a target document exists. This
+  # namespace is separate from the enrichment and rescan workflows, so their
+  # results never overwrite each other.
+  - name: dispatch_writes
+    type: if
+    condition: "${{ variables.job_id != blank and variables.job_state == 'completed' and variables.target_index != blank and variables.target_id != blank }}"
+    steps:
+      - name: do_write_related_infra
+        type: elasticsearch.update
+        with:
+          index: "{{ variables.target_index }}"
+          id: "{{ variables.target_id }}"
+          doc:
+            censys:
+              related_infrastructure: "${{ variables.censys_subobj }}"
+        on-failure:
+          continue: true
+
+  # Add a readable note to the alert summarizing the Censeye pivots,
+  # sorted by count, each with a link to the matching Censys search. Skipped
+  # unless the job completed and a target document exists.
+  - name: add_note_branch
+    type: if
+    condition: "${{ variables.job_id != blank and variables.job_state == 'completed' and variables.target_index != blank and variables.target_id != blank }}"
+    steps:
+      - name: add_alert_note
+        type: kibana.request
+        with:
+          method: PATCH
+          path: /api/note
+          body:
+            note:
+              timelineId: ""
+              eventId: "{{ variables.target_id }}"
+              note: |-
+                ## Censys Related Infrastructure - `censys.related_infrastructure`
+
+                {% if variables.target_type == 'host' -%}
+                **Target:** `{{ variables.target_host }}` (host) - [View on Censys](https://platform.censys.io/hosts/{{ variables.target_host | url_encode }})
+                {%- elsif variables.target_type == 'certificate' -%}
+                **Target:** `{{ variables.target_certificate }}` (certificate) - [View on Censys](https://platform.censys.io/certificates/{{ variables.target_certificate }})
+                {%- elsif variables.target_type == 'webproperty' -%}
+                **Target:** `{{ variables.target_hostname }}:{{ variables.target_port }}` (web property) - [View on Censys](https://platform.censys.io/web/{{ variables.target_hostname | url_encode }}:{{ variables.target_port }})
+                {%- endif %}
+
+                **Job ID:** `{{ variables.job_id }}`
+                **State:** {{ variables.job_state }}
+                **Result Count:** {{ variables.job_result_count }}
+
+                {%- assign results_count = steps.normalize_results.output | default: consts.empty_arr | size -%}
+                {%- if results_count > 0 %}
+
+                ### Related Infrastructure Pivots ({{ results_count }})
+
+                | Count | Fields | Values | See Results in Censys |
+                | :--- | :--- | :--- | :--- |
+                {%- assign sorted = steps.normalize_results.output | sort: 'count' -%}
+                {%- for r in sorted -%}
+                {%- comment -%}
+                  A pivot carries either one or two field/value pairs (never more).
+                  Build a Censys search query `q` matching the Platform web UI syntax:
+                    • 1 pair:  field = "value"  (spaces around =)
+                    • 2 pairs where one field ends in .key and the other in .value
+                      on the same parent path (e.g.
+                      host.services.endpoints.http.headers.key + .value, in either
+                      order): collapse to parent: (key = "..." and value = "..."),
+                      where parent is the shared path with the .key suffix removed.
+                    • 2 pairs otherwise: field1 = "v1" and field2 = "v2"
+                  `q` is URL-encoded into the View on Censys link.
+                {%- endcomment -%}
+                {%- assign pair_count = r.field_value_pairs | size -%}
+                {%- assign q = '' -%}
+                {%- if pair_count == 1 -%}
+                {%- assign p = r.field_value_pairs[0] -%}
+                {%- assign q = p.field | append: ' = "' | append: p.value | append: '"' -%}
+                {%- else -%}
+                {%- assign f0 = r.field_value_pairs[0].field -%}
+                {%- assign f1 = r.field_value_pairs[1].field -%}
+                {%- assign f0_suffix = f0 | split: '.' | last -%}
+                {%- assign f1_suffix = f1 | split: '.' | last -%}
+                {%- if f0_suffix == 'key' and f1_suffix == 'value' -%}
+                {%- assign parent_len = f0.size | minus: 4 -%}
+                {%- assign parent = f0 | slice: 0, parent_len -%}
+                {%- assign q = parent | append: ': (key = "' | append: r.field_value_pairs[0].value | append: '" and value = "' | append: r.field_value_pairs[1].value | append: '")' -%}
+                {%- elsif f0_suffix == 'value' and f1_suffix == 'key' -%}
+                {%- assign parent_len = f1.size | minus: 4 -%}
+                {%- assign parent = f1 | slice: 0, parent_len -%}
+                {%- assign q = parent | append: ': (key = "' | append: r.field_value_pairs[1].value | append: '" and value = "' | append: r.field_value_pairs[0].value | append: '")' -%}
+                {%- else -%}
+                {%- assign psep = '' -%}
+                {%- for p in r.field_value_pairs -%}{%- assign q = q | append: psep | append: p.field | append: ' = "' | append: p.value | append: '"' -%}{%- assign psep = ' and ' -%}{%- endfor -%}
+                {%- endif -%}
+                {%- endif -%}
+                {%- comment -%}
+                  Cell values can contain control characters (e.g. an HTML title
+                  returned as "\r\n\tPage not found\r\n"). Collapse CR/LF/TAB to
+                  spaces and strip the ends so a stray leading tab/newline can't turn
+                  the cell into an indented code block or split the table row; escape
+                  any literal | so it doesn't add phantom columns.
+                {%- endcomment -%}
+                {%- assign fields_disp = r.field_value_pairs | map: 'field' | join: ', ' | replace: '\r', ' ' | replace: '\n', ' ' | replace: '\t', ' ' | strip | truncate: 40 | replace: '|', '\\|' -%}
+                {%- assign values_disp = r.field_value_pairs | map: 'value' | join: ', ' | replace: '\r', ' ' | replace: '\n', ' ' | replace: '\t', ' ' | strip | truncate: 40 | replace: '|', '\\|' %}
+                | {{ r.count }} | {{ fields_disp }} | {{ values_disp }} | [View on Censys](<https://platform.censys.io/search?q={{ q | url_encode }}>) |
+                {%- endfor %}
+                {%- else %}
+
+                _No related-infrastructure pivots were returned for this target._
+                {%- endif %}
+        on-failure:
+          continue: true
+
+  # Fallbacks so a run always surfaces a result.
+  # When the job completed but there is no alert document to update (manual run
+  # without alert_index/alert_id), print the pivots to the console.
+  - name: log_when_no_target_doc
+    type: if
+    condition: "${{ variables.job_id != blank and variables.job_state == 'completed' and variables.target_index == blank or variables.job_id != blank and variables.job_state == 'completed' and variables.target_id == blank }}"
+    steps:
+      - name: console_log_pivots
+        type: console
+        with:
+          message: |-
+            Censys Related Infrastructure (job_id={{ variables.job_id }}, target_type={{ variables.target_type }}, state={{ variables.job_state }}):
+            {%- if variables.target_type == 'host' %}
+            View on Censys: https://platform.censys.io/hosts/{{ variables.target_host | url_encode }}
+            {%- elsif variables.target_type == 'certificate' %}
+            View on Censys: https://platform.censys.io/certificates/{{ variables.target_certificate }}
+            {%- elsif variables.target_type == 'webproperty' %}
+            View on Censys: https://platform.censys.io/web/{{ variables.target_hostname | url_encode }}:{{ variables.target_port }}
+            {%- endif %}
+            {{ variables.censys_subobj | json }}
+
+  # When the job never completed (failed, unknown, or the poll cap was hit),
+  # log the last state so the run doesn't end silently.
+  - name: log_when_not_completed
+    type: if
+    condition: "${{ variables.job_id != blank and variables.job_state != 'completed' }}"
+    steps:
+      - name: console_log_incomplete
+        type: console
+        with:
+          message: |-
+            Censys Censeye job {{ variables.job_id }} (target_type={{ variables.target_type }}) did not complete - last observed state: '{{ variables.job_state | default: 'unknown' }}'. No pivots were written. If state stayed 'failed', the organization may lack Threat Hunting access.

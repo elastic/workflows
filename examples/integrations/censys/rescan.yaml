@@ -1,0 +1,513 @@
+version: '1'
+name: Censys Rescan
+description: >-
+  Submit an asset to the Censys Platform for a fresh scan, poll until the
+  scan completes, then refetch the asset to get the updated record. Manual
+  trigger only - the operator picks the rescan shape via inputs.type:
+  "service" rescans a host service (ip+port+protocol+transport_protocol) and
+  refetches via getHost; "webproperty" rescans a web property
+  (hostname-or-IP + port) and refetches via getWebProperty. The refreshed
+  record is written back under the matching enrichment namespace -
+  censys.rescanned_host.* for service rescans and
+  censys.rescanned_webproperty.* for web property rescans - the dedicated
+  rescanned_* namespaces keep this workflow's output separate from the
+  Host / Web Property Enrichment workflows so the refreshed record never
+  overwrites a prior enrichment in place.
+  Requires both inputs.alert_index and inputs.alert_id for the write-back;
+  otherwise the refreshed record is logged to the workflow console.
+tags:
+  - censys
+  - rescan
+  - security
+  - threat-intel
+enabled: true
+
+# Empty list used as a safe fallback (`| default: consts.empty_arr`) whenever a
+# Censys response leaves out an optional array such as services, endpoints,
+# software, or labels. Keeps later steps from failing on missing data.
+consts:
+  empty_arr: []
+
+triggers:
+  - type: manual
+    inputs:
+      - name: type
+        type: string
+        required: true
+        description: >-
+          Rescan asset shape - "service" for a host service
+          (ip+port+protocol+transport_protocol) or "webproperty" for a web
+          property (hostname-or-IP + port).
+      - name: ip
+        type: string
+        required: false
+        description: >-
+          Service rescan only. IPv4 or IPv6 address of the host to rescan.
+      - name: protocol
+        type: string
+        required: false
+        description: >-
+          Service rescan only. Application-layer protocol on the service
+          (e.g. "HTTP", "SSH", "TLS", "SNMP").
+      - name: transport_protocol
+        type: string
+        required: false
+        description: >-
+          Service rescan only. Transport protocol - "tcp", "udp", "icmp",
+          "quic", or "unknown".
+      - name: hostname
+        type: string
+        required: false
+        description: >-
+          Web property rescan only. Hostname, domain, or IPv4/IPv6 address.
+      - name: port
+        type: number
+        required: false
+        description: >-
+          Port number (1-65535). Required for both rescan shapes.
+      - name: alert_index
+        type: string
+        required: false
+        description: >-
+          Optional Elasticsearch index. When provided together with
+          alert_id, the refreshed record is written back to that document
+          under the matching enrichment slot.
+      - name: alert_id
+        type: string
+        required: false
+        description: >-
+          Optional Elasticsearch document ID. When provided together with
+          alert_index, the refreshed record is written back to that
+          document under the matching enrichment slot.
+
+steps:
+
+  # Work out which alert document to write the refreshed record back
+  # to, from the optional alert_index/alert_id inputs. Both are needed; if
+  # either is missing, the result is logged to the console instead.
+  - name: resolve_target_doc
+    type: data.set
+    with:
+      target_index: "{{ inputs.alert_index }}"
+      target_id: "{{ inputs.alert_id }}"
+
+  # Submit the rescan to Censys. The `switch` on inputs.type sends the
+  # right fields for the chosen shape: "service" rescans a host service
+  # (ip + port + protocol + transport_protocol); "webproperty" rescans a web
+  # property (hostname + port). The response returns a tracked_scan_id used to
+  # poll for completion below.
+  - name: submit_rescan
+    type: switch
+    expression: "{{ inputs.type }}"
+    cases:
+      - match: "service"
+        steps:
+          - name: submit_rescan_service
+            type: censys.rescan
+            connector-id: <connector-id>
+            with:
+              type: "service"
+              ip: "{{ inputs.ip }}"
+              port: "${{ inputs.port }}"
+              protocol: "{{ inputs.protocol }}"
+              transportProtocol: "{{ inputs.transport_protocol }}"
+      - match: "webproperty"
+        steps:
+          - name: submit_rescan_webproperty
+            type: censys.rescan
+            connector-id: <connector-id>
+            with:
+              type: "webproperty"
+              hostname: "{{ inputs.hostname }}"
+              port: "${{ inputs.port }}"
+    default:
+      - name: log_unknown_rescan_type
+        type: console
+        with:
+          message: "Censys rescan: unexpected inputs.type '{{ inputs.type }}', no rescan submitted."
+
+  # Save the tracked_scan_id from whichever submit branch ran, so the
+  # poll loop below has a stable reference to it.
+  - name: stash_scan_id
+    type: data.set
+    with:
+      tracked_scan_id: "{{ steps.submit_rescan_service.output.result.tracked_scan_id | default: steps.submit_rescan_webproperty.output.result.tracked_scan_id }}"
+
+  # If no scan ID came back (submit failed), log it and skip the poll, refetch,
+  # write-back, and note steps below.
+  - name: abort_if_no_scan_id
+    type: if
+    condition: "${{ variables.tracked_scan_id == blank }}"
+    steps:
+      - name: console_log_rescan_failure
+        type: console
+        with:
+          message: |-
+            Censys rescan ({{ inputs.type }}) failed to obtain a tracked_scan_id - the rescan submission did not return one. Common causes: 404 (resource not found), invalid credentials, or network error. Skipping polling, refetch, and alert-note steps.
+
+  # Wait for the rescan to finish. The loop checks the scan status,
+  # then waits 10s and checks again, stopping as soon as the scan reports
+  # completed. It gives up after 60 checks (about 10 minutes) as a safety cap.
+  #
+  # If you change the timeout, edit both `max-iterations` (number of checks)
+  # and the wait `duration` below - both must be plain literal values, they
+  # cannot reference variables.
+  - name: poll_scan_status_gate
+    type: if
+    condition: "${{ variables.tracked_scan_id != blank }}"
+    steps:
+      - name: poll_scan_status
+        type: while
+        condition: "${{ variables.scan_completed != 'true' }}"
+        max-iterations: 60
+        steps:
+
+          - name: get_scan_status
+            type: censys.scanStatus
+            connector-id: <connector-id>
+            with:
+              scanId: "{{ variables.tracked_scan_id }}"
+            on-failure:
+              continue: true
+
+          - name: stash_completed
+            type: data.set
+            with:
+              scan_completed: "{{ steps.get_scan_status.output.result.completed }}"
+              scan_created_at: "{{ steps.get_scan_status.output.result.create_time }}"
+
+          # Only wait when the scan is still running, so the final check that
+          # sees completion doesn't add an extra 10s wait before the loop exits.
+          - name: wait_if_not_done
+            type: if
+            condition: "${{ steps.get_scan_status.output.result.completed != true }}"
+            steps:
+              - name: wait_between_polls
+                type: wait
+                with:
+                  duration: 10s
+
+  # Once polling finishes, fetch the refreshed record. The `switch` on
+  # inputs.type picks the right Censys lookup (getHost for "service",
+  # getWebProperty for "webproperty"), tidies the lists we display, and
+  # assembles the record for the write/note steps below.
+  - name: refetch_record_gate
+    type: if
+    condition: "${{ variables.tracked_scan_id != blank }}"
+    steps:
+      - name: refetch_record
+        type: switch
+        expression: "{{ inputs.type }}"
+        cases:
+          - match: "service"
+            steps:
+              - name: get_host
+                type: censys.getHost
+                connector-id: <connector-id>
+                with:
+                  host: "{{ inputs.ip }}"
+
+              - name: stash_host
+                type: data.set
+                with:
+                  host: "${{ steps.get_host.output.result.resource }}"
+                  field_name: "host"
+
+              - name: normalize_host_services
+                type: data.map
+                items: "${{ variables.host.services | default: consts.empty_arr }}"
+                with:
+                  fields:
+                    port: "${{ item.port }}"
+                    protocol: "${{ item.protocol }}"
+                    transport_protocol: "${{ item.transport_protocol }}"
+                    scan_time: "${{ item.scan_time }}"
+                    vulns: "${{ item.vulns }}"
+                    labels:
+                      $map: { items: "${{ item.labels | default: consts.empty_arr }}", item: "label" }
+                      value: "${{ label.value }}"
+                    threats:
+                      $map: { items: "${{ item.threats | default: consts.empty_arr }}", item: "threat" }
+                      name: "${{ threat.name }}"
+                on-failure:
+                  continue: true
+
+              - name: normalize_host_labels
+                type: data.map
+                items: "${{ variables.host.labels | default: consts.empty_arr }}"
+                with:
+                  fields:
+                    value: "${{ item.value }}"
+                on-failure:
+                  continue: true
+
+              - name: build_host_subobj
+                type: data.set
+                with:
+                  censys_subobj:
+                    ip: "${{ variables.host.ip }}"
+                    service_count: "${{ variables.host.service_count }}"
+                    services: "${{ steps.normalize_host_services.output }}"
+                    labels: "${{ steps.normalize_host_labels.output }}"
+                    dns:
+                      names: "${{ variables.host.dns.names }}"
+                      forward_dns:
+                        names: "${{ variables.host.dns.forward_dns.names }}"
+                      reverse_dns:
+                        names: "${{ variables.host.dns.reverse_dns.names }}"
+                    whois:
+                      network:
+                        name: "${{ variables.host.whois.network.name }}"
+                        cidrs: "${{ variables.host.whois.network.cidrs }}"
+                    autonomous_system:
+                      name: "${{ variables.host.autonomous_system.name }}"
+                      asn: "${{ variables.host.autonomous_system.asn }}"
+                    location:
+                      city: "${{ variables.host.location.city }}"
+                      province: "${{ variables.host.location.province }}"
+                      postal_code: "${{ variables.host.location.postal_code }}"
+                      country: "${{ variables.host.location.country }}"
+                      country_code: "${{ variables.host.location.country_code }}"
+                      continent: "${{ variables.host.location.continent }}"
+                      coordinates:
+                        latitude: "${{ variables.host.location.coordinates.latitude }}"
+                        longitude: "${{ variables.host.location.coordinates.longitude }}"
+
+          - match: "webproperty"
+            steps:
+              - name: get_web_property
+                type: censys.getWebProperty
+                connector-id: <connector-id>
+                with:
+                  hostname: "{{ inputs.hostname }}"
+                  port: "${{ inputs.port }}"
+
+              - name: stash_web
+                type: data.set
+                with:
+                  web: "${{ steps.get_web_property.output.result.resource }}"
+                  field_name: "url"
+
+              - name: normalize_web_endpoints
+                type: data.map
+                items: "${{ variables.web.endpoints | default: consts.empty_arr }}"
+                with:
+                  fields:
+                    endpoint_type: "${{ item.endpoint_type }}"
+                    path: "${{ item.path }}"
+                on-failure:
+                  continue: true
+
+              - name: normalize_web_software
+                type: data.map
+                items: "${{ variables.web.software | default: consts.empty_arr }}"
+                with:
+                  fields:
+                    vendor: "${{ item.vendor }}"
+                    product: "${{ item.product }}"
+                    version: "${{ item.version }}"
+                on-failure:
+                  continue: true
+
+              - name: normalize_web_labels
+                type: data.map
+                items: "${{ variables.web.labels | default: consts.empty_arr }}"
+                with:
+                  fields:
+                    value: "${{ item.value }}"
+                on-failure:
+                  continue: true
+
+              - name: build_web_subobj
+                type: data.set
+                with:
+                  censys_subobj:
+                    hostname: "${{ variables.web.hostname }}"
+                    port: "${{ variables.web.port }}"
+                    scan_time: "${{ variables.web.scan_time }}"
+                    endpoints: "${{ steps.normalize_web_endpoints.output }}"
+                    software: "${{ steps.normalize_web_software.output }}"
+                    labels: "${{ steps.normalize_web_labels.output }}"
+                    threats: "${{ variables.web.threats }}"
+                    vulns: "${{ variables.web.vulns }}"
+                    cert:
+                      fingerprint_sha256: "${{ variables.web.cert.fingerprint_sha256 }}"
+                      parsed:
+                        subject_dn: "${{ variables.web.cert.parsed.subject_dn }}"
+                        issuer_dn: "${{ variables.web.cert.parsed.issuer_dn }}"
+                        subject:
+                          common_name: "${{ variables.web.cert.parsed.subject.common_name }}"
+                        validity_period:
+                          not_before: "${{ variables.web.cert.parsed.validity_period.not_before }}"
+                          not_after: "${{ variables.web.cert.parsed.validity_period.not_after }}"
+                        signature:
+                          self_signed: "${{ variables.web.cert.parsed.signature.self_signed }}"
+
+  # Write the refreshed record onto the alert. The outer `if` only
+  # runs when a target document exists; the `switch` on inputs.type picks the
+  # slot - service rescans go to censys.rescanned_host, web property rescans go
+  # to censys.rescanned_webproperty. These rescanned_* slots are separate from
+  # the enrichment workflows' slots, so a rescan never overwrites an enrichment.
+  - name: dispatch_writes
+    type: if
+    condition: "${{ variables.tracked_scan_id != blank and variables.target_index != blank and variables.target_id != blank }}"
+    steps:
+      - name: route_by_type
+        type: switch
+        expression: "{{ inputs.type }}"
+        cases:
+          - match: "service"
+            steps:
+              - name: do_write_rescanned_host
+                type: elasticsearch.update
+                with:
+                  index: "{{ variables.target_index }}"
+                  id: "{{ variables.target_id }}"
+                  doc:
+                    censys:
+                      rescanned_host: "${{ variables.censys_subobj }}"
+                on-failure:
+                  continue: true
+          - match: "webproperty"
+            steps:
+              - name: do_write_rescanned_webproperty
+                type: elasticsearch.update
+                with:
+                  index: "{{ variables.target_index }}"
+                  id: "{{ variables.target_id }}"
+                  doc:
+                    censys:
+                      rescanned_webproperty: "${{ variables.censys_subobj }}"
+                on-failure:
+                  continue: true
+        default:
+          - name: log_unknown_type
+            type: console
+            with:
+              message: "Censys rescan: unexpected inputs.type '{{ inputs.type }}', no write performed."
+
+  # Add a readable note to the alert summarizing the rescan and the
+  # refreshed record. Skipped when there is no target document. The layout
+  # depends on the rescan type:
+  #   • service     - host Summary table + Services table
+  #   • webproperty - web Summary + Endpoints + Software tables
+  # Both lead with the scan ID and completion status.
+  - name: add_note_branch
+    type: if
+    condition: "${{ variables.tracked_scan_id != blank and variables.target_index != blank and variables.target_id != blank }}"
+    steps:
+      - name: add_alert_note
+        type: kibana.request
+        with:
+          method: PATCH
+          path: /api/note
+          body:
+            note:
+              timelineId: ""
+              eventId: "{{ variables.target_id }}"
+              note: |-
+                ## Censys Rescan - `{{ inputs.type }}`
+
+                **Tracked Scan ID:** `{{ variables.tracked_scan_id }}`
+                **Completed:** {{ variables.scan_completed | default: false }} (created at {{ variables.scan_created_at }})
+
+                {%- if inputs.type == 'service' %}
+
+                **Refreshed slot:** `censys.rescanned_host` - [View on Censys](https://platform.censys.io/hosts/{{ variables.host.ip | url_encode }})
+
+                ### Summary
+
+                | Field | Value |
+                | :--- | :--- |
+                | IP | `{{ variables.host.ip }}` |
+                | Service Count | {{ variables.host.service_count }} |
+                | AS Name | {{ variables.host.autonomous_system.name }} |
+                | AS Number | {{ variables.host.autonomous_system.asn }} |
+                | WHOIS Network | {{ variables.host.whois.network.name }} |
+                | City | {{ variables.host.location.city }} |
+                | Country | {{ variables.host.location.country }} ({{ variables.host.location.country_code }}) |
+                | Coordinates | {{ variables.host.location.coordinates.latitude }}, {{ variables.host.location.coordinates.longitude }} |
+                | Host Labels | {{ steps.normalize_host_labels.output | default: consts.empty_arr | map: 'value' | join: ', ' }} |
+                | DNS Names | {{ variables.host.dns.names | default: consts.empty_arr | join: ', ' }} |
+                | Network CIDRs | {{ variables.host.whois.network.cidrs | default: consts.empty_arr | join: ', ' }} |
+
+                {%- assign services_count = steps.normalize_host_services.output | default: consts.empty_arr | size -%}
+                {%- if services_count > 0 %}
+
+                ### Services ({{ services_count }})
+
+                | Port | Protocol | Transport | Labels | Threats | Vulnerabilities | Scan Time |
+                | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+                {%- for s in steps.normalize_host_services.output %}
+                | {{ s.port }} | {{ s.protocol }} | {{ s.transport_protocol }} | {{ s.labels | map: 'value' | join: ', ' }} | {{ s.threats | map: 'name' | join: ', ' }} | {{ s.vulns | default: consts.empty_arr | map: 'id' | join: ', ' }} | {{ s.scan_time }} |
+                {%- endfor %}
+                {%- endif %}
+                {%- endif %}
+
+                {%- if inputs.type == 'webproperty' %}
+
+                **Refreshed slot:** `censys.rescanned_webproperty` - [View on Censys](https://platform.censys.io/web/{{ variables.web.hostname | url_encode }}:{{ variables.web.port }})
+
+                ### Summary
+
+                | Field | Value |
+                | :--- | :--- |
+                | Hostname | `{{ variables.web.hostname }}` |
+                | Port | {{ variables.web.port }} |
+                | Scan Time | {{ variables.web.scan_time }} |
+                | Labels | {{ steps.normalize_web_labels.output | default: consts.empty_arr | map: 'value' | join: ', ' }} |
+                | Threats | {{ variables.web.threats | default: consts.empty_arr | map: 'name' | join: ', ' }} |
+                | Vulnerabilities | {{ variables.web.vulns | default: consts.empty_arr | map: 'id' | join: ', ' }} |
+                | Cert SHA-256 | `{{ variables.web.cert.fingerprint_sha256 }}` |
+                | Cert Subject DN | {{ variables.web.cert.parsed.subject_dn }} |
+                | Cert Issuer DN | {{ variables.web.cert.parsed.issuer_dn }} |
+                | Cert Common Name | {{ variables.web.cert.parsed.subject.common_name }} |
+                | Cert Not Before | {{ variables.web.cert.parsed.validity_period.not_before }} |
+                | Cert Not After | {{ variables.web.cert.parsed.validity_period.not_after }} |
+                | Cert Self-Signed | {{ variables.web.cert.parsed.signature.self_signed }} |
+
+                {%- assign endpoints_count = steps.normalize_web_endpoints.output | default: consts.empty_arr | size -%}
+                {%- if endpoints_count > 0 %}
+
+                ### Endpoints ({{ endpoints_count }})
+
+                | Type | Path |
+                | :--- | :--- |
+                {%- for e in steps.normalize_web_endpoints.output %}
+                | {{ e.endpoint_type }} | `{{ e.path }}` |
+                {%- endfor %}
+                {%- endif %}
+
+                {%- assign software_count = steps.normalize_web_software.output | default: consts.empty_arr | size -%}
+                {%- if software_count > 0 %}
+
+                ### Software ({{ software_count }})
+
+                | Vendor | Product | Version |
+                | :--- | :--- | :--- |
+                {%- for s in steps.normalize_web_software.output %}
+                | {{ s.vendor }} | {{ s.product }} | {{ s.version }} |
+                {%- endfor %}
+                {%- endif %}
+                {%- endif %}
+        on-failure:
+          continue: true
+
+  # Fallback when alert_index/alert_id were not provided: print the
+  # refreshed record to the console so the run still surfaces a result.
+  - name: log_when_no_target_doc
+    type: if
+    condition: "${{ variables.tracked_scan_id != blank and variables.target_index == blank or variables.tracked_scan_id != blank and variables.target_id == blank }}"
+    steps:
+      - name: console_log_rescan
+        type: console
+        with:
+          message: |-
+            Censys rescan ({{ inputs.type }}) tracked_scan_id={{ variables.tracked_scan_id }} completed={{ variables.scan_completed | default: false }}
+            {%- if inputs.type == 'service' %}
+            View on Censys: https://platform.censys.io/hosts/{{ variables.host.ip | url_encode }}
+            {%- elsif inputs.type == 'webproperty' %}
+            View on Censys: https://platform.censys.io/web/{{ variables.web.hostname | url_encode }}:{{ variables.web.port }}
+            {%- endif %}
+            Refreshed record:
+            {{ variables.censys_subobj | json }}

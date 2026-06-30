@@ -1,0 +1,387 @@
+version: '1'
+name: Censys Host History
+description: >-
+  Retrieve the Censys Platform scan timeline for a host over a time window
+  and attach the timeline as a Kibana alert note. On alert triggers the
+  workflow pauses at a human-in-the-loop review step so the analyst can
+  confirm or adjust the host IP and the start/end window before the
+  Censys call is made; on manual runs it skips the pause and uses the
+  supplied inputs directly. The connector swaps start/end internally
+  (Censys timeline expects start_time to be the most recent timestamp),
+  so the workflow always passes the window in normal chronological order
+  (start_time <= end_time). The timeline endpoint returns a single page
+  (100 records) per call, so the workflow pages backwards using result.scanned_to as
+  the next endTime until the window is fully covered or the 10-page /
+  1000-record display ceiling is reached. The timeline note is attached to the
+  alert document when inputs.alert_index/alert_id (or the alert's own _index/_id)
+  are present; otherwise the timeline is logged to the workflow console.
+tags:
+  - censys
+  - host-history
+  - security
+  - hitl
+enabled: true
+
+consts:
+  empty_arr: []
+
+triggers:
+  - type: manual
+    inputs:
+      - name: host
+        type: string
+        required: false
+        description: >-
+          IPv4 or IPv6 address. Manual-run only; on alert triggers the
+          host IP is resolved from event.alerts[0] (host.ip then
+          source.ip then destination.ip, first non-blank wins).
+      - name: start_time
+        type: string
+        required: false
+        description: >-
+          Start of the history window, RFC3339 (e.g.
+          "2026-05-01T00:00:00Z"). Manual-run only.
+      - name: end_time
+        type: string
+        required: false
+        description: >-
+          End of the history window, RFC3339 (e.g.
+          "2026-05-08T00:00:00Z"). Manual-run only. Must be >=
+          start_time; the connector swaps them before calling Censys.
+      - name: alert_index
+        type: string
+        required: false
+        description: >-
+          Optional Elasticsearch alert index. When provided with
+          alert_id, the timeline note is attached to that document.
+          Ignored on alert triggers.
+      - name: alert_id
+        type: string
+        required: false
+        description: >-
+          Optional Elasticsearch alert document ID. When provided with
+          alert_index, the timeline note is attached to that document.
+          Ignored on alert triggers.
+  # NOTE: On alert triggers this workflow reads event.alerts[0], i.e. only the
+  # FIRST alert in the batch. When adding this workflow as a rule action, enable
+  # the "Run per alert" toggle so the rule invokes the workflow once per alert
+  # and every alert's data is processed (otherwise only the first is enriched).
+  - type: alert
+
+steps:
+
+  # Pick the host IP to use on alert runs: host.ip, then source.ip, then
+  # destination.ip (first non-blank wins). Manual runs use inputs.host instead.
+  - name: pick_alert_host
+    type: data.set
+    with:
+      alert_host_ip: >-
+        {{ event.alerts[0].host.ip
+           | default: event.alerts[0].source.ip
+           | default: event.alerts[0].destination.ip }}
+
+  # Default time window shown in the review form: end = now, start = 7 days
+  # ago, both in RFC3339 UTC (604800 = 7 days in seconds).
+  - name: compute_default_window
+    type: data.set
+    with:
+      default_end_time: "{{ 'now' | date: '%Y-%m-%dT%H:%M:%SZ' }}"
+      default_start_time: "{{ 'now' | date: '%s' | minus: 604800 | date: '%Y-%m-%dT%H:%M:%SZ' }}"
+
+  # Human-in-the-loop pause - alert runs only. The analyst reviews the
+  # auto-picked host IP and the default 7-day window (both shown in the message
+  # text) and can confirm by submitting the form blank, or override any field.
+  # Blank fields fall back to the auto-picked values in resolve_request below.
+  # Note: the values can only be shown in the message text, not as form-field
+  # defaults, so the form starts empty.
+  - name: gate_hitl
+    type: if
+    condition: "${{ event.alerts[0] != blank }}"
+    steps:
+      - name: review
+        type: waitForInput
+        with:
+          message: |-
+            Censys Host History review
+
+            Alert Index: {{ event.alerts[0]._index }}
+            Alert ID: {{ event.alerts[0]._id }}
+
+            ----------
+            Auto-picked values (leave the form fields blank to use them)
+            ----------
+            host       : {{ variables.alert_host_ip }}
+                       (first non-blank of host.ip, source.ip, destination.ip)
+            start_time : {{ variables.default_start_time }}
+                       (now - 7 days, UTC)
+            end_time   : {{ variables.default_end_time }}
+                       (now, UTC)
+            ----------
+
+            Confirm by submitting an empty form, or override any field
+            below. The connector swaps start/end internally - submit
+            the window in normal chronological order
+            (start_time <= end_time).
+          schema:
+            type: object
+            properties:
+              host:
+                type: string
+                title: "Host IP (IPv4 or IPv6) - leave blank to use the auto-picked value above"
+              start_time:
+                type: string
+                title: "Start time (RFC3339) - leave blank to use now - 7 days (UTC)"
+              end_time:
+                type: string
+                title: "End time (RFC3339) - leave blank to use now (UTC)"
+
+  # Settle the final host IP and time window used by the rest of the workflow,
+  # along with the alert document to attach the note to.
+  #   • Alert runs - use the analyst's form values, falling back to the
+  #     auto-picked host and default window for any field left blank.
+  #   • Manual runs - the review step never ran, so the values come from
+  #     inputs.host / inputs.start_time / inputs.end_time.
+  - name: resolve_request
+    type: data.set
+    with:
+      request_host: "{{ steps.review.output.host | default: inputs.host | default: variables.alert_host_ip }}"
+      request_start: "{{ steps.review.output.start_time | default: inputs.start_time | default: variables.default_start_time }}"
+      request_end: "{{ steps.review.output.end_time | default: inputs.end_time | default: variables.default_end_time }}"
+      target_index: "{{ event.alerts[0]._index | default: inputs.alert_index }}"
+      target_id: "{{ event.alerts[0]._id | default: inputs.alert_id }}"
+
+  # Only continue if we have a host IP and both ends of the window. Otherwise
+  # (e.g. a manual run with missing inputs, or an alert with no usable IP) the
+  # workflow stops here. Everything below runs under this guard.
+  - name: run_history
+    type: if
+    condition: "${{ variables.request_host != blank and variables.request_start != blank and variables.request_end != blank }}"
+    steps:
+
+      # Set up paging. Censys returns up to ~100 events per call plus
+      # `scanned_to` - the oldest time that call reached. The loop below walks
+      # backwards (each page asks for events older than the previous page's
+      # `scanned_to`) until the whole window is covered, a page fails, or we
+      # hit the display ceiling of 10 pages / 1000 records.
+      # `start_epoch` is the window start as a number, so the loop can compare
+      # timestamps reliably regardless of their format.
+      - name: init_pagination
+        type: data.set
+        with:
+          all_events: "${{ consts.empty_arr }}"
+          page_end: "{{ variables.request_end }}"
+          has_more: true
+          collected: 0
+          any_success: false
+          fetch_incomplete: false
+          start_epoch: "${{ variables.request_start | date: '%s' | plus: 0 }}"
+
+      # Page loop. Fetches page 1, then keeps fetching older pages until:
+      #   • the window is fully covered or a page fails (has_more = false),
+      #   • 1000 records are collected (display ceiling), or
+      #   • 10 pages have been fetched (hard cap, set in max-iterations).
+      # Each page reuses the same start time and moves the end time back to the
+      # previous page's `scanned_to`.
+      - name: paginate
+        type: while
+        condition: "${{ variables.has_more == true and variables.collected < 1000 }}"
+        max-iterations: 10
+        steps:
+
+          - name: get_host_history
+            type: censys.getHostHistory
+            connector-id: <connector-id>
+            with:
+              host: "{{ variables.request_host }}"
+              startTime: "{{ variables.request_start }}"
+              endTime: "{{ variables.page_end }}"
+
+          # On a successful page: add its events and move to the next page.
+          - name: collect_page
+            type: if
+            condition: "${{ steps.get_host_history.error == blank }}"
+            steps:
+
+              # Save this page's events (defaulting to an empty list when the
+              # page has none) and its `scanned_to` cursor.
+              - name: stash_page
+                type: data.set
+                with:
+                  page_events: "${{ steps.get_host_history.output.result.events | default: consts.empty_arr }}"
+                  page_scanned_to: "{{ steps.get_host_history.output.result.scanned_to }}"
+
+              # Add this page's events to the running total kept across pages.
+              - name: accumulate_events
+                type: data.set
+                with:
+                  all_events: "${{ variables.all_events | concat: variables.page_events }}"
+
+              # Move the cursor back for the next page and refresh the counters.
+              - name: advance_cursor
+                type: data.set
+                with:
+                  any_success: true
+                  page_end: "{{ variables.page_scanned_to }}"
+                  collected: "${{ variables.all_events | size }}"
+                  scanned_epoch: "${{ variables.page_scanned_to | date: '%s' | plus: 0 }}"
+
+              # Keep paging only while there are still older events to fetch
+              # (the cursor is still newer than the window start).
+              - name: eval_has_more
+                type: data.set
+                with:
+                  has_more: "${{ variables.scanned_epoch > variables.start_epoch }}"
+
+          # On a failed page: stop paging and remember the error. If earlier
+          # pages succeeded, the note is still written from what we have and
+          # flagged incomplete; if no page succeeded, log_fetch_failure logs it.
+          - name: handle_page_error
+            type: if
+            condition: "${{ steps.get_host_history.error != blank }}"
+            steps:
+              - name: stop_on_error
+                type: data.set
+                with:
+                  has_more: false
+                  fetch_incomplete: true
+                  fetch_error: "${{ steps.get_host_history.error }}"
+
+      # Build the note/console output only when at least one page succeeded.
+      - name: process_history
+        type: if
+        condition: "${{ variables.any_success == true }}"
+        steps:
+
+          # Trim the collected events to the 1000-record display ceiling and
+          # work out the counts shown in the note/console.
+          - name: stash_events
+            type: data.set
+            with:
+              events_displayed: "${{ variables.all_events | slice: 0, 1000 }}"
+              total_count: "${{ variables.all_events | size }}"
+              displayed_count: "${{ variables.all_events | size | at_most: 1000 }}"
+
+          # `truncated` = more records exist than are shown - either we passed
+          # the 1000-record ceiling, or more pages were available when the
+          # 10-page cap was hit. Used to show a "results limited" note.
+          - name: compute_truncated
+            type: data.set
+            with:
+              truncated: "${{ variables.total_count > variables.displayed_count or variables.has_more == true }}"
+
+          # Add the timeline as a readable note on the alert, one row per scan
+          # event with a link to view that point in time on Censys. Only fires
+          # when a target alert document exists; manual runs fall through to the
+          # console fallback below. The if/elsif ladder below sets the "Scan
+          # Type" label and "Scan Info" detail for each kind of event (service,
+          # endpoint, JARM, DNS, WHOIS, route, location).
+          - name: add_note_branch
+            type: if
+            condition: "${{ variables.target_index != blank and variables.target_id != blank }}"
+            steps:
+              - name: add_alert_note
+                type: kibana.request
+                with:
+                  method: PATCH
+                  path: /api/note
+                  body:
+                    note:
+                      timelineId: ""
+                      eventId: "{{ variables.target_id }}"
+                      note: |-
+                        ## Censys Host History - `{{ variables.request_host }}`
+
+                        {{ variables.displayed_count }} events were returned. To see the full event history navigate to the [Censys Platform](https://platform.censys.io/hosts/{{ variables.request_host | url_encode }}/events).
+                        
+                        **Window:** `{{ variables.request_start }}` to `{{ variables.request_end }}`
+
+                        {%- if variables.fetch_incomplete %}
+
+                        > **Incomplete:** history retrieval stopped early because a Censys API request failed; the results below may be missing older events.
+                        {%- endif %}
+                        {%- if variables.truncated and variables.displayed_count > 0 %}
+
+                        > There are more than {{ variables.displayed_count }} host history records available for this host in the displayed time range. Only the latest {{ variables.displayed_count }} records are displayed.
+                        {%- endif %}
+
+                        {%- if variables.displayed_count > 0 %}
+
+                        | Event Time | Scan Type | Scan Info | View Host History on Censys platform |
+                        | :--- | :--- | :--- | :--- |
+                        {%- for e in variables.events_displayed %}
+                        {%- if e.resource.service_scanned != blank -%}
+                          {%- assign scan_type = 'Service Scanned' -%}
+                          {%- assign scan_info = e.resource.service_scanned.scan.port | append: '/' | append: e.resource.service_scanned.scan.transport_protocol | append: '/' | append: e.resource.service_scanned.scan.protocol -%}
+                        {%- elsif e.resource.endpoint_scanned != blank -%}
+                          {%- assign scan_type = 'Endpoint Scanned' -%}
+                          {%- assign scan_info = e.resource.endpoint_scanned.scan.port | append: '/' | append: e.resource.endpoint_scanned.scan.endpoint_type | append: '/' | append: e.resource.endpoint_scanned.scan.path -%}
+                        {%- elsif e.resource.jarm_scanned != blank -%}
+                          {%- assign scan_type = 'JARM Scanned' -%}
+                          {%- assign scan_info = e.resource.jarm_scanned.scan.fingerprint -%}
+                        {%- elsif e.resource.forward_dns_resolved != blank -%}
+                          {%- assign scan_type = 'Forward DNS Resolved' -%}
+                          {%- assign scan_info = e.resource.forward_dns_resolved.name -%}
+                        {%- elsif e.resource.reverse_dns_resolved != blank -%}
+                          {%- assign scan_type = 'Reverse DNS Resolved' -%}
+                          {%- assign scan_info = e.resource.reverse_dns_resolved.names | default: consts.empty_arr | join: ', ' -%}
+                        {%- elsif e.resource.route_updated != blank -%}
+                          {%- assign scan_type = 'Route Updated' -%}
+                          {%- assign scan_info = '' -%}
+                        {%- elsif e.resource.location_updated != blank -%}
+                          {%- assign scan_type = 'Location Updated' -%}
+                          {%- assign scan_info = '' -%}
+                        {%- elsif e.resource.whois_updated != blank -%}
+                          {%- assign scan_type = 'WHOIS Updated' -%}
+                          {%- assign scan_info = e.resource.whois_updated.whois.network.name -%}
+                        {%- else -%}
+                          {%- assign scan_type = 'Unknown' -%}
+                          {%- assign scan_info = '' -%}
+                        {%- endif %}
+                        | {{ e.resource.event_time }} | {{ scan_type }} | {{ scan_info }} | [View historical host on Censys](https://platform.censys.io/hosts/{{ variables.request_host | url_encode }}?at_time={{ e.resource.event_time | url_encode }}) |
+                        {%- endfor %}
+                        {%- elsif variables.has_more %}
+
+                        _No scan events found in the time range that was scanned. The 10-page fetch limit was reached before the full window was covered, so older events outside the scanned range (if any) are not shown._
+                        {%- else %}
+
+                        _No scan events found in this window._
+                        {%- endif %}
+                on-failure:
+                  continue: true
+
+          # Fallback when there is no alert document to attach the note to
+          # (e.g. a manual run without alert_index/alert_id): print the events
+          # to the console so the run still surfaces a result.
+          - name: log_when_no_target_doc
+            type: if
+            condition: "${{ variables.target_index == blank or variables.target_id == blank }}"
+            steps:
+              - name: console_log_history
+                type: console
+                with:
+                  message: |-
+                    Censys host history for {{ variables.request_host }} ({{ variables.request_start }} to {{ variables.request_end }}):
+                    {{ variables.displayed_count }} events were returned. To see the full event history navigate to the Censys Platform: https://platform.censys.io/hosts/{{ variables.request_host | url_encode }}/events
+                    {%- if variables.fetch_incomplete %}
+                    (retrieval stopped early due to a Censys API error; results may be incomplete)
+                    {%- endif %}
+                    {%- if variables.truncated and variables.displayed_count > 0 %}
+                    (results limited; more than {{ variables.displayed_count }} records available, only the latest {{ variables.displayed_count }} shown)
+                    {%- elsif variables.displayed_count == 0 and variables.has_more %}
+                    (no events found in the scanned range; the 10-page fetch limit was reached before the full window was covered)
+                    {%- endif %}
+                    {{ variables.events_displayed | json }}
+
+      # When no page succeeded at all, log the last error and skip the note.
+      - name: log_fetch_failure
+        type: if
+        condition: "${{ variables.any_success != true }}"
+        steps:
+          - name: console_log_error
+            type: console
+            with:
+              message: |-
+                Censys getHostHistory failed for {{ variables.request_host }} ({{ variables.request_start }} to {{ variables.request_end }}):
+                {{ variables.fetch_error | json }}
+            on-failure:
+              continue: true

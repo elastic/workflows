@@ -1,0 +1,252 @@
+version: '1'
+name: Censys Certificate Enrichment
+description: >-
+  Enrich an alert with Censys Platform getCertificate data for every available
+  TLS certificate fingerprint on the alert (tls.server.hash.sha256,
+  tls.client.hash.sha256). Each fingerprint is enriched independently and
+  written back under censys.certificate_enrichment.<field>.* on the alert
+  document (censys.certificate_enrichment.tls.server.*,
+  censys.certificate_enrichment.tls.client.*). Manual runs use
+  inputs.certificate_hash; when alert_index and alert_id are also provided
+  the enrichment is written back under censys.certificate_enrichment.*,
+  otherwise the enriched object is logged to the workflow console.
+tags:
+  - censys
+  - enrichment
+  - security
+  - threat-intel
+enabled: true
+
+triggers:
+  - type: manual
+    inputs:
+      - name: certificate_hash
+        type: string
+        required: false
+        description: >-
+          SHA-256 certificate fingerprint as a 64-character hex string.
+          Used only on manual runs.
+      - name: alert_index
+        type: string
+        required: false
+        description: >-
+          Optional Elasticsearch index. When provided together with alert_id
+          on a manual run, the enrichment is written back to that document
+          under censys.certificate_enrichment.*. Ignored on alert triggers.
+      - name: alert_id
+        type: string
+        required: false
+        description: >-
+          Optional Elasticsearch document ID. When provided together with
+          alert_index on a manual run, the enrichment is written back to
+          that document under censys.certificate_enrichment.*. Ignored on
+          alert triggers.
+  # NOTE: On alert triggers this workflow reads event.alerts[0], i.e. only the
+  # FIRST alert in the batch. When adding this workflow as a rule action, enable
+  # the "Run per alert" toggle so the rule invokes the workflow once per alert
+  # and every alert's data is processed (otherwise only the first is enriched).
+  - type: alert
+
+
+steps:
+  # Decide which certificate fingerprints to look up, as a list of
+  # {field, sha256} pairs.
+  #   • Alert run  - one entry per non-blank fingerprint on the alert
+  #     (tls.server.hash.sha256, tls.client.hash.sha256), enriched separately.
+  #   • Manual run - a single entry for the fingerprint typed into
+  #     certificate_hash.
+  # The `field` value decides where the result is written later, under
+  # censys.certificate_enrichment.
+  - name: build_targets
+    type: data.parseJson
+    source: |-
+      [
+      {%- if event.alerts[0] != blank -%}
+        {%- assign sep = '' -%}
+        {%- if event.alerts[0].tls.server.hash.sha256 != blank -%}{{ sep }}{"field":"tls_server","sha256":"{{ event.alerts[0].tls.server.hash.sha256 }}"}{%- assign sep = ',' -%}{%- endif -%}
+        {%- if event.alerts[0].tls.client.hash.sha256 != blank -%}{{ sep }}{"field":"tls_client","sha256":"{{ event.alerts[0].tls.client.hash.sha256 }}"}{%- endif -%}
+      {%- elsif inputs.certificate_hash != blank -%}
+        {"field":"manual","sha256":"{{ inputs.certificate_hash }}"}
+      {%- endif -%}
+      ]
+    with: {}
+
+  # Work out which alert document to write results back to: the alert's own
+  # index/id on alert runs, or the optional alert_index/alert_id inputs on
+  # manual runs. If either is missing, results are logged to the console
+  # instead (see log_when_no_target_doc).
+  - name: resolve_target_doc
+    type: data.set
+    with:
+      target_index: "{{ event.alerts[0]._index | default: inputs.alert_index }}"
+      target_id: "{{ event.alerts[0]._id | default: inputs.alert_id }}"
+
+  # Run the enrichment below once per fingerprint. `foreach.item` holds the
+  # current {field, sha256} pair.
+  - name: enrich_each_field
+    type: foreach
+    foreach: "${{ steps.build_targets.output }}"
+    steps:
+
+      # Look up this certificate fingerprint in Censys.
+      - name: get_certificate
+        type: censys.getCertificate
+        connector-id: <connector-id>
+        with:
+          certificate: "{{ foreach.item.sha256 }}"
+        on-failure:
+          continue: true
+
+      # If the Censys lookup failed, log the error and move on to the next
+      # fingerprint. This prevents writing an empty enrichment and an empty
+      # note to the alert.
+      - name: skip_on_fetch_error
+        type: if
+        condition: "${{ steps.get_certificate.error != blank }}"
+        steps:
+          - name: log_fetch_error
+            type: console
+            with:
+              message: |-
+                Censys getCertificate failed for {{ foreach.item.field }} ({{ foreach.item.sha256 }}); skipping enrichment.
+                {{ steps.get_certificate.error | json }}
+          - name: skip_iteration
+            type: loop.continue
+
+      # Save this iteration's certificate data and field name for the steps below.
+      - name: stash_iter
+        type: data.set
+        with:
+          cert: "${{ steps.get_certificate.output.result.resource }}"
+          field_name: "{{ foreach.item.field }}"
+
+      # Assemble the certificate details to store/show for this fingerprint.
+      - name: build_subobj
+        type: data.set
+        with:
+          censys_subobj:
+            fingerprint_sha256: "${{ variables.cert.fingerprint_sha256 }}"
+            valid_to: "${{ variables.cert.valid_to }}"
+            self_signed: "${{ variables.cert.self_signed }}"
+            parsed:
+              subject_dn: "${{ variables.cert.parsed.subject_dn }}"
+              issuer_dn: "${{ variables.cert.parsed.issuer_dn }}"
+              subject:
+                common_name: "${{ variables.cert.parsed.subject.common_name }}"
+              validity_period:
+                not_before: "${{ variables.cert.parsed.validity_period.not_before }}"
+                not_after: "${{ variables.cert.parsed.validity_period.not_after }}"
+              signature:
+                self_signed: "${{ variables.cert.parsed.signature.self_signed }}"
+
+      # Write the certificate data onto the alert under the field it came from:
+      # censys.certificate_enrichment.tls.server / .tls.client (or directly
+      # under censys.certificate_enrichment for a manual run). The outer `if`
+      # only runs when a target document exists; the `switch` picks the slot by
+      # field name. To enrich an extra field, add a matching case below.
+      # Manual runs with no alert document skip this and log to the console.
+      - name: dispatch_writes
+        type: if
+        condition: "${{ variables.target_index != blank and variables.target_id != blank }}"
+        steps:
+          - name: route_by_field
+            type: switch
+            expression: "{{ variables.field_name }}"
+            cases:
+              - match: "tls_server"
+                steps:
+                  - name: do_write_tls_server
+                    type: elasticsearch.update
+                    with:
+                      index: "{{ variables.target_index }}"
+                      id: "{{ variables.target_id }}"
+                      doc:
+                        censys:
+                          certificate_enrichment:
+                            tls:
+                              server: "${{ variables.censys_subobj }}"
+                    on-failure:
+                      continue: true
+              - match: "tls_client"
+                steps:
+                  - name: do_write_tls_client
+                    type: elasticsearch.update
+                    with:
+                      index: "{{ variables.target_index }}"
+                      id: "{{ variables.target_id }}"
+                      doc:
+                        censys:
+                          certificate_enrichment:
+                            tls:
+                              client: "${{ variables.censys_subobj }}"
+                    on-failure:
+                      continue: true
+              - match: "manual"
+                steps:
+                  - name: do_write_manual
+                    type: elasticsearch.update
+                    with:
+                      index: "{{ variables.target_index }}"
+                      id: "{{ variables.target_id }}"
+                      doc:
+                        censys:
+                          certificate_enrichment: "${{ variables.censys_subobj }}"
+                    on-failure:
+                      continue: true
+            default:
+              - name: log_unknown_field
+                type: console
+                with:
+                  message: "Certificate enrichment: unexpected field_name '{{ variables.field_name }}', no write performed."
+
+      # Add a readable note to the alert summarizing the certificate (subject,
+      # issuer, validity, self-signed) with a link to view it on Censys. One
+      # note per fingerprint. Skipped on manual runs with no alert document.
+      - name: add_note_branch
+        type: if
+        condition: "${{ variables.target_index != blank and variables.target_id != blank }}"
+        steps:
+          - name: add_alert_note
+            type: kibana.request
+            with:
+              method: PATCH
+              path: /api/note
+              body:
+                note:
+                  timelineId: ""
+                  eventId: "{{ variables.target_id }}"
+                  note: |-
+                    ## Certificate Enrichment - `censys.certificate_enrichment{% if variables.field_name == 'tls_server' %}.tls.server{% elsif variables.field_name == 'tls_client' %}.tls.client{% endif %}`
+
+                    **Fingerprint:** `{{ variables.cert.fingerprint_sha256 }}` - [View on Censys](https://platform.censys.io/certificates/{{ variables.cert.fingerprint_sha256 }})
+
+                    ### Summary
+
+                    | Field | Value |
+                    | :--- | :--- |
+                    | SHA-256 | `{{ variables.cert.fingerprint_sha256 }}` |
+                    | Subject DN | {{ variables.cert.parsed.subject_dn }} |
+                    | Issuer DN | {{ variables.cert.parsed.issuer_dn }} |
+                    | Subject Common Name | {{ variables.cert.parsed.subject.common_name }} |
+                    | Valid From | {{ variables.cert.parsed.validity_period.not_before }} |
+                    | Valid To (parsed) | {{ variables.cert.parsed.validity_period.not_after }} |
+                    | Valid To (top-level) | {{ variables.cert.valid_to }} |
+                    | Self-Signed (parsed) | {{ variables.cert.parsed.signature.self_signed }} |
+                    | Self-Signed (top-level) | {{ variables.cert.self_signed }} |
+            on-failure:
+              continue: true
+
+      # Fallback when there is no alert document to update (e.g. a manual run
+      # without alert_index/alert_id): print the enrichment to the console so
+      # the result is still visible.
+      - name: log_when_no_target_doc
+        type: if
+        condition: "${{ variables.target_index == blank or variables.target_id == blank }}"
+        steps:
+          - name: console_log_enrichment
+            type: console
+            with:
+              message: |-
+                Censys certificate enrichment for {{ variables.field_name }} ({{ variables.cert.fingerprint_sha256 }}):
+                View on Censys: https://platform.censys.io/certificates/{{ variables.cert.fingerprint_sha256 }}
+                {{ variables.censys_subobj | json }}
