@@ -10,7 +10,6 @@ template-metadata:
     origin, ISP, and a low / medium / high risk classification.
   solutions: [security]
   categories: [enrichment, threat-intel]
-  icon: abuseipdb
   install:
     form:
       - name: abuseipdb-connector

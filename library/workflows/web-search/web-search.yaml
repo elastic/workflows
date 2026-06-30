@@ -9,7 +9,6 @@ template-metadata:
     LLM-grounding workflows.
   solutions: []
   categories: [search]
-  icon: brave
   install:
     form:
       - name: brave-search-connector

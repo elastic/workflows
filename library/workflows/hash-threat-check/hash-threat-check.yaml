@@ -10,7 +10,6 @@ template-metadata:
     threat verdict.
   solutions: [security]
   categories: [detection, enrichment, threat-intel]
-  icon: virustotal
   install:
     form:
       - name: virustotal-connector
