@@ -1,0 +1,63 @@
+# yaml-language-server: $schema=https://json.schemastore.org/catalog-info.json
+#
+# Backstage catalog definition for elastic/workflows.
+#
+# This declares the repo as a Backstage Component and defines the Buildkite
+# pipeline that publishes the Workflow Template Library catalog to the CDN.
+#
+# NOTE: the repo must also be *enrolled* into Backstage via a Location entity in
+# the elastic/catalog-info repo (open it with Backstage → Create → "Register in
+# catalog"). Until that PR is merged and Terrazzo runs, this file has no effect.
+# See tracking issue elastic/security-team#18016.
+---
+apiVersion: backstage.io/v1alpha1
+kind: Component
+metadata:
+  name: workflows-library
+  description: >-
+    Source repo for the Kibana Workflow Template Library: curated workflow
+    templates and the catalog publisher that ships them to the CDN.
+  links:
+    - title: Workflow Template Library epic
+      url: https://github.com/elastic/security-team/issues/15748
+spec:
+  type: tool
+  # TODO(eng-prod): confirm the correct Backstage group slug for our team.
+  owner: group:workflows-eng
+  lifecycle: experimental
+---
+# yaml-language-server: $schema=https://gist.githubusercontent.com/elasticmachine/988b80dae436cafea07d9a4a460a011d/raw/rre.schema.json
+apiVersion: backstage.io/v1alpha1
+kind: Resource
+metadata:
+  name: bk-workflows-publish-catalog
+  description: Publishes the Workflow Template Library catalog to the CDN on merge to main
+spec:
+  type: buildkite-pipeline
+  # TODO(eng-prod): confirm the correct Backstage group slug for our team.
+  owner: group:workflows-eng
+  system: buildkite
+  implementation:
+    apiVersion: buildkite.elastic.dev/v1
+    kind: Pipeline
+    metadata:
+      name: workflows / publish-catalog
+      description: Publishes the Workflow Template Library catalog to the CDN on merge to main
+    spec:
+      repository: elastic/workflows
+      pipeline_file: .buildkite/pipelines/publish_catalog.yml
+      default_branch: main
+      # Only build the main branch for the credentialed publish. Fork PRs are
+      # not built on public repos (platform constraint); PR validation is a
+      # separate, secret-free GitHub Actions workflow.
+      branch_configuration: main
+      provider_settings:
+        build_branches: true
+        build_pull_requests: false
+        trigger_mode: code
+      teams:
+        everyone:
+          access_level: BUILD_AND_READ
+        # TODO(eng-prod): confirm the Buildkite team slug for our team.
+        workflows-eng:
+          access_level: MANAGE_BUILD_AND_READ

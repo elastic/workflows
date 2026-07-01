@@ -1,0 +1,14 @@
+# Buildkite steps for the Workflow Template Library catalog publisher.
+#
+# Registered via catalog-info.yaml (Backstage). Runs on merge to `main` and
+# publishes the generated catalog to the production CDN bucket.
+steps:
+  - label: ":cloud: Publish catalog → workflows.elastic.co"
+    command: .buildkite/scripts/publish_catalog.sh prod
+    timeout_in_minutes: 20
+    agents:
+      # TODO(eng-prod): confirm a core image/family that provides
+      # node 20 + gcloud/gsutil + vault out of the box (the script installs
+      # node as a fallback if the image doesn't ship it).
+      provider: gcp
+      image: family/core-ubuntu-2204
