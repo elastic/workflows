@@ -117,11 +117,11 @@ See [CONTRIBUTING.md](./CONTRIBUTING.md) for the full authoring guide — requir
 
 In Kibana 9.5+ (Tech Preview), the Workflows app reads the published catalogue from the CDN and renders a browser of installable templates. Installing a template prompts the operator for the values declared in `install.form`, substitutes them for the `__install__.<name>` placeholders in the body, and persists the resulting workflow as a saved object — at which point it runs like any other workflow.
 
-Consumers see:
+Consumers see (all served under a `/library/` path prefix, leaving room for other content on the same host):
 
-- `/v1/kibana-versions.json` — the resolved list of available catalogues.
-- `/v1/<version>/catalogs/templates.json` — the catalogue rows for a given Kibana version.
-- `/v1/templates/<slug>/<version>.yaml` — immutable, version-keyed template bodies.
+- `/library/v1/kibana-versions.json` — the resolved list of available catalogues.
+- `/library/v1/<version>/catalogs/templates.json` — the catalogue rows for a given Kibana version.
+- `/library/v1/templates/<slug>/<version>.yaml` — immutable, version-keyed template bodies.
 
 The catalogue is republished on every merge to `main`.
 

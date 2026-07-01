@@ -15,17 +15,21 @@ set -euo pipefail
 
 TARGET="${1:-prod}"
 
+# The catalog is served under a `/library/` path prefix (e.g.
+# https://workflows.elastic.co/library/v1/...) so the same host/bucket can host
+# other content (public schemas, managed workflows, ...) under sibling prefixes.
+# `library/v1` is a real object-key prefix in the bucket, not a CDN rewrite.
 case "$TARGET" in
   prod)
     BUCKET="elastic-workflows-library-prod"
-    DEST="v1"
+    DEST="library/v1"
     ;;
   staging)
     # Staging is for maintainer-pushed branches only (fork PRs are not built on
     # public repos). Published at the same path; a maintainer branch overwrites
     # the previous staging preview.
     BUCKET="elastic-workflows-library-staging"
-    DEST="v1"
+    DEST="library/v1"
     ;;
   *)
     echo "Unknown target '${TARGET}' (expected 'prod' or 'staging')" >&2
