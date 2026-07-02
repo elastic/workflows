@@ -16,8 +16,9 @@
  * Resolves the list of Kibana versions to catalogue dynamically:
  *   - `main`'s semver is fetched from elastic/kibana@main's package.json
  *     (overridable via KIBANA_MAIN_VERSION env var for local dev / recovery).
- *   - Named minors are discovered from elastic/kibana's branch list via the
- *     GitHub API, filtered by `oldest` (semver floor) and `cataloguePer`.
+ *   - Named minors are discovered from elastic/kibana's branch list via
+ *     `git ls-remote` (unauthenticated, not rate-limited — no GitHub token
+ *     needed), filtered by `oldest` (semver floor) and `cataloguePer`.
  *
  * This generator does not enforce authoring invariants (slug parity, semver
  * ranges, categories-vocab membership, install-form references); those are
@@ -29,9 +30,13 @@
 import { readFile, writeFile, mkdir, readdir, rm } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { createHash } from 'node:crypto';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 import path from 'node:path';
 import yaml from 'js-yaml';
 import semver from 'semver';
+
+const execFileAsync = promisify(execFile);
 
 // --- Paths ---------------------------------------------------------------
 
@@ -111,89 +116,8 @@ async function resolveMainKibanaSemver() {
 
 // --- Discover supported named minors from Kibana branches --------
 
-/**
- * Builds a multi-line, actionable error message for a non-2xx response from
- * the GitHub API. Distinguishes rate-limit 403s from auth 401/403s and points
- * the operator at the two escape hatches (GITHUB_TOKEN, KIBANA_NAMED_MINORS).
- */
-function formatGitHubApiError(res, url, hasToken) {
-  const remaining = res.headers.get('x-ratelimit-remaining');
-  const reset = res.headers.get('x-ratelimit-reset');
-  const limit = res.headers.get('x-ratelimit-limit');
-
-  const lines = [`Failed to list elastic/kibana branches: HTTP ${res.status} from ${url}`];
-
-  const isRateLimit = (res.status === 403 || res.status === 429) && remaining === '0';
-
-  if (isRateLimit) {
-    const resetAt = reset ? new Date(Number(reset) * 1000).toISOString() : 'unknown';
-    lines.push('');
-    lines.push(
-      `Cause: GitHub API rate limit exhausted (used ${limit}/${limit}, resets at ${resetAt}).`
-    );
-    if (!hasToken) {
-      lines.push('');
-      lines.push(
-        'You are calling the GitHub API unauthenticated, which is rate-limited to 60 requests/hour per IP.'
-      );
-      lines.push('');
-      lines.push('Fixes (pick one):');
-      lines.push('  1. Authenticate the call (raises the limit to 5,000/hour):');
-      lines.push('       export GITHUB_TOKEN=$(gh auth token)   # if you use the gh CLI');
-      lines.push('       # or any classic/fine-grained PAT — no scopes needed for public repos');
-      lines.push('       npm run build:catalog');
-      lines.push('  2. Skip the branch fetch entirely (for quick local iteration):');
-      lines.push(
-        '       KIBANA_NAMED_MINORS="" npm run build:catalog                # zero named minors'
-      );
-      lines.push(
-        '       KIBANA_NAMED_MINORS="9.5,9.6" npm run build:catalog         # specific minors'
-      );
-      lines.push('  3. Wait until the rate limit window resets and retry.');
-    } else {
-      lines.push('');
-      lines.push(
-        'Your GITHUB_TOKEN is set but the authenticated rate limit (5,000/hour) is also exhausted.'
-      );
-      lines.push(
-        'Wait until the reset time above, or use KIBANA_NAMED_MINORS to skip the API entirely.'
-      );
-    }
-  } else if (res.status === 401 || res.status === 403) {
-    lines.push('');
-    if (hasToken) {
-      lines.push(
-        'Cause: GITHUB_TOKEN is set but was rejected by GitHub (expired, revoked, or invalid).'
-      );
-      lines.push('');
-      lines.push('Fixes:');
-      lines.push('  1. Refresh your token:');
-      lines.push('       export GITHUB_TOKEN=$(gh auth token)');
-      lines.push(
-        '  2. Or unset it to fall back to unauthenticated access (60 req/h is plenty for one run):'
-      );
-      lines.push('       unset GITHUB_TOKEN && npm run build:catalog');
-      lines.push('  3. Or skip the branch fetch entirely:');
-      lines.push('       KIBANA_NAMED_MINORS="" npm run build:catalog');
-    } else {
-      lines.push(
-        'Cause: GitHub returned 403 without a rate-limit signature. Possibly an IP-level block or a transient issue.'
-      );
-      lines.push('');
-      lines.push('Try again, or skip the API:');
-      lines.push('  KIBANA_NAMED_MINORS="" npm run build:catalog');
-    }
-  } else {
-    lines.push('');
-    lines.push('Unexpected HTTP status from the GitHub API. Re-run; if it persists, skip the API:');
-    lines.push('  KIBANA_NAMED_MINORS="" npm run build:catalog');
-  }
-
-  return lines.join('\n');
-}
-
 async function discoverNamedMinors(oldest) {
-  // Local-dev / recovery escape hatch: skip the GitHub API entirely.
+  // Local-dev / recovery escape hatch: skip the git lookup entirely.
   //   KIBANA_NAMED_MINORS=""           → treat as zero named minors
   //   KIBANA_NAMED_MINORS="9.5,9.6"    → use those exact minors
   const override = process.env.KIBANA_NAMED_MINORS;
@@ -214,39 +138,39 @@ async function discoverNamedMinors(oldest) {
     return items;
   }
 
-  const url = 'https://api.github.com/repos/elastic/kibana/branches?per_page=100';
-  const hasToken = Boolean(process.env.GITHUB_TOKEN);
-  log(`Discovering named minors from ${url} (${hasToken ? 'authenticated' : 'unauthenticated'})`);
+  // Discover release branches over the git protocol. Unlike the GitHub REST
+  // API, `git ls-remote` is unauthenticated and not rate-limited, so CI needs
+  // no GITHUB_TOKEN and there is nothing to rotate.
+  const repo = 'https://github.com/elastic/kibana';
+  log(`Discovering named minors from ${repo} via git ls-remote`);
 
-  // GitHub branches API paginates. Walk pages until empty.
-  let page = 1;
-  const branchNames = [];
-  while (true) {
-    const headers = { Accept: 'application/vnd.github+json' };
-    if (hasToken) {
-      headers.Authorization = `Bearer ${process.env.GITHUB_TOKEN}`;
-    }
-    const res = await fetch(`${url}&page=${page}`, { headers });
-    if (!res.ok) {
-      throw new Error(formatGitHubApiError(res, url, hasToken));
-    }
-    const batch = await res.json();
-    if (!batch.length) break;
-    branchNames.push(...batch.map((b) => b.name));
-    if (batch.length < 100) break;
-    page++;
+  let stdout;
+  try {
+    ({ stdout } = await execFileAsync('git', ['ls-remote', '--heads', repo], {
+      maxBuffer: 16 * 1024 * 1024,
+    }));
+  } catch (err) {
+    throw new Error(
+      `Failed to list elastic/kibana branches via 'git ls-remote ${repo}': ${err.message}\n` +
+        `For local iteration you can skip the lookup with KIBANA_NAMED_MINORS ` +
+        `(e.g. KIBANA_NAMED_MINORS="9.5,9.6" or KIBANA_NAMED_MINORS="").`
+    );
   }
 
-  // Keep only branches that match `^<major>.<minor>$`. Filter by `oldest`.
+  // Each line is "<sha>\trefs/heads/<branch>". Keep only branches whose name is
+  // exactly `<major>.<minor>`, then filter by `oldest`.
   const oldestParsed = semver.parse(oldest);
-  const minors = branchNames
+  const minors = stdout
+    .split('\n')
+    .map((line) => line.split('\t')[1])
+    .filter(Boolean)
+    .map((ref) => ref.replace(/^refs\/heads\//, ''))
     .map((name) => {
       const m = /^(\d+)\.(\d+)$/.exec(name);
       if (!m) return null;
       const major = Number(m[1]);
       const minor = Number(m[2]);
-      const repSemver = `${major}.${minor}.0`;
-      return { id: name, kibana: repSemver, major, minor };
+      return { id: name, kibana: `${major}.${minor}.0` };
     })
     .filter(Boolean)
     .filter((b) => semver.gte(b.kibana, `${oldestParsed.major}.${oldestParsed.minor}.0`))
