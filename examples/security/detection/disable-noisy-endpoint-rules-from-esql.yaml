@@ -40,25 +40,21 @@ tags:
   - detection
 
 # -----------------------------------------------------------------------------
-# INPUTS
-# -----------------------------------------------------------------------------
-inputs:
-  - name: esql_query
-    type: string
-    description: ES|QL query. Columns [0] rule.name, [1] Endpoint.policy.applied.artifacts.global.version, [2] data_stream.namespace, [3] host.os.type.
-    required: true
-    default: |
-      FROM logs-endpoint.alerts*
-      | WHERE @timestamp > NOW() - 30 minute and rule.name is not null and event.code == "behavior" and process.code_signature.trusted == true and process.parent.code_signature.trusted == true
-      | STATS alerts_count = COUNT(*), host_count = COUNT_DISTINCT(host.id), proc_count = COUNT_DISTINCT(process.name), parent_count = COUNT_DISTINCT(process.parent.name) BY rule.name, Endpoint.policy.applied.artifacts.global.version, data_stream.namespace, host.os.type
-      | WHERE (host_count >= 5 and proc_count >= 3) or host_count >= 20
-      | STATS BY rule.name, Endpoint.policy.applied.artifacts.global.version, data_stream.namespace, host.os.type
-
-# -----------------------------------------------------------------------------
 # TRIGGERS — manual + every 31 minutes
 # -----------------------------------------------------------------------------
 triggers:
   - type: manual
+    inputs:
+      - name: esql_query
+        type: string
+        description: ES|QL query. Columns [0] rule.name, [1] Endpoint.policy.applied.artifacts.global.version, [2] data_stream.namespace, [3] host.os.type.
+        required: true
+        default: |
+          FROM logs-endpoint.alerts*
+          | WHERE @timestamp > NOW() - 30 minute and rule.name is not null and event.code == "behavior" and process.code_signature.trusted == true and process.parent.code_signature.trusted == true
+          | STATS alerts_count = COUNT(*), host_count = COUNT_DISTINCT(host.id), proc_count = COUNT_DISTINCT(process.name), parent_count = COUNT_DISTINCT(process.parent.name) BY rule.name, Endpoint.policy.applied.artifacts.global.version, data_stream.namespace, host.os.type
+          | WHERE (host_count >= 5 and proc_count >= 3) or host_count >= 20
+          | STATS BY rule.name, Endpoint.policy.applied.artifacts.global.version, data_stream.namespace, host.os.type
   - type: scheduled
     with:
       every: 31m
