@@ -2,10 +2,11 @@
 
 Threat detection, alerting, and rule management workflows
 
-## Workflows (8)
+## Workflows (9)
 
 | Workflow | Description |
 |----------|-------------|
+| [Disable Noisy Elastic Defend Behavior Rules](./disable-noisy-endpoint-rules-from-esql.yaml) | Detects noisy Elastic Defend behavior rules via ES\|QL (FP bursts) and auto-creates scoped Endpoint Security exceptions by rule version; new artifact versions are unaffected |
 | [␆ Mark Alert as Acknowledged](./mark-alert-as-acknowledged.yaml) | This workflow YAML defines a manual trigger for acknowledging security alerts |
 | [🏷️ Add Alert Tag - FP](./add-alert-tag-fp.yaml) | This workflow YAML defines a manual trigger for adding a tag to a security alert |
 | [🏷️ Add Alert Tag - TP](./add-alert-tag-tp.yaml) | This workflow YAML defines a manual trigger for adding tags to an alert in a sec |
