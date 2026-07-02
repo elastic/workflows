@@ -1,16 +1,16 @@
 # =============================================================================
-# Workflow: Disable Faulty Endpoint Rules from ES|QL
+# Workflow: Disable Noisy Elastic Defend Behavior Rules from ES|QL
 # Category: security/detection
 #
 # Detects noisy Elastic Defend behavior rules (FP bursts across many hosts and
 # processes) via ES|QL and auto-creates scoped Endpoint Security
 # exceptions per rule name, policy artifact version, data_stream.namespace,
-# and host.os.type. Remediates the faulty rule version without blocking
+# and host.os.type. Remediates the noisy rule version without blocking
 # future artifact updates — a new policy version runs normally and is not
 # covered by existing exceptions.
 #
 # 1. Runs an ES|QL query that finds rules firing on many hosts and many
-#    distinct processes (likely faulty / noisy rules). Query returns at least:
+#    distinct processes (likely noisy rules). Query returns at least:
 #    [0] rule.name, [1] Endpoint.policy.applied.artifacts.global.version,
 #    [2] data_stream.namespace, [3] host.os.type
 # 2. For each row, creates one Endpoint Security Exception (if not already
@@ -20,16 +20,18 @@
 # Schedule: every 31 minutes (manual trigger also available).
 #
 # References:
+# - Elastic Defend behavior rules (protections artifacts):
+#   https://github.com/elastic/protections-artifacts/tree/main/behavior
 # - Endpoint Security Exception List: Security -> Rules -> Shared exception
 #   lists -> Endpoint Security Exception List
 # - https://www.elastic.co/docs/solutions/security/detect-and-alert/add-manage-exceptions
 # =============================================================================
 version: "1"
-name: Disable Faulty Endpoint Behavior Rules
+name: Disable Noisy Elastic Defend Behavior Rules
 description: |
-  Detect noisy Defend rules via ES|QL and create scoped Endpoint exceptions
-  (rule.name + policy version + namespace + OS). Skips if already present.
-  Remediates FP bursts by rule version; new artifact versions are unaffected.
+  Detect noisy Elastic Defend behavior rules via ES|QL and create scoped Endpoint
+  exceptions (rule.name + policy version + namespace + OS). Skips if already
+  present. Remediates FP bursts by rule version; new artifact versions are unaffected.
 enabled: true
 tags:
   - security
@@ -107,7 +109,7 @@ steps:
               body:
                 name: "Tune: {{ foreach.item[0] }} | {{ foreach.item[1] }} | {{ foreach.item[2] }} | {{ foreach.item[3] }}"
                 item_id: "tune-{{ foreach.item[0] | replace: ' ', '-' }}-{{ foreach.item[1] | replace: ' ', '-' }}-{{ foreach.item[2] | replace: ' ', '-' }}-{{ foreach.item[3] | replace: ' ', '-' }}"
-                description: "Added by workflow Disable Faulty Endpoint Rules from ES|QL. rule.name + policy version + data_stream.namespace + host.os.type (noisy-alert query)."
+                description: "Added by workflow Disable Noisy Elastic Defend Behavior Rules from ES|QL. rule.name + policy version + data_stream.namespace + host.os.type (noisy-alert query)."
                 type: "simple"
                 namespace_type: "agnostic"
                 list_id: "endpoint_list"
