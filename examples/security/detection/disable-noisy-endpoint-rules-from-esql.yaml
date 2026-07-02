@@ -15,7 +15,8 @@
 #    [2] data_stream.namespace, [3] host.os.type
 # 2. For each row, creates one Endpoint Security Exception (if not already
 #    present): rule.name + policy version + namespace + os_types from
-#    host.os.type. Deterministic item_id (409 = skip).
+#    host.os.type. Deterministic item_id (+ sanitized to -); lookup by item_id,
+#    create skips on 409 if already exists.
 #
 # Schedule: every 31 minutes (manual trigger also available).
 #
@@ -24,6 +25,8 @@
 #   https://github.com/elastic/protections-artifacts/tree/main/behavior
 # - Endpoint Security Exception List: Security -> Rules -> Shared exception
 #   lists -> Endpoint Security Exception List
+# - Exception list item lookup (by sanitized item_id; + in version → -):
+#   GET /api/exception_lists/items?item_id=tune-...&list_id=endpoint_list&namespace_type=agnostic
 # - https://www.elastic.co/docs/solutions/security/detect-and-alert/add-manage-exceptions
 # =============================================================================
 version: "1"
@@ -76,19 +79,21 @@ steps:
         type: kibana.request
         with:
           method: GET
-          path: "/api/endpoint_list/items/_find"
+          # Lookup by item_id (must match create: spaces and + → -). _find filters are brittle.
+          path: "/api/exception_lists/items"
           query:
-            filter: "item_id:tune-{{ foreach.item[0] | replace: ' ', '-' }}-{{ foreach.item[1] | replace: ' ', '-' }}-{{ foreach.item[2] | replace: ' ', '-' }}-{{ foreach.item[3] | replace: ' ', '-' }}"
-            per_page: 1
+            item_id: "tune-{{ foreach.item[0] | replace: ' ', '-' | replace: '+', '-' }}-{{ foreach.item[1] | replace: ' ', '-' | replace: '+', '-' }}-{{ foreach.item[2] | replace: ' ', '-' | replace: '+', '-' }}-{{ foreach.item[3] | replace: ' ', '-' | replace: '+', '-' }}"
+            list_id: "endpoint_list"
+            namespace_type: "agnostic"
           headers:
             kbn-xsrf: "true"
         on-failure:
           continue: true
 
-      # _find returns { total, data }; skip create when GET succeeded and total >= 1 (item already exists).
+      # 200 = item exists (skip). 404 = not found (create). POST 409 also treated as skip.
       - name: create_only_if_missing
         type: if
-        condition: "not steps.get_exception.error: * and steps.get_exception.output.total >= 1"
+        condition: "not steps.get_exception.error: *"
         steps:
           - name: log_already_exists
             type: console
@@ -104,7 +109,7 @@ steps:
                 kbn-xsrf: "true"
               body:
                 name: "Tune: {{ foreach.item[0] }} | {{ foreach.item[1] }} | {{ foreach.item[2] }} | {{ foreach.item[3] }}"
-                item_id: "tune-{{ foreach.item[0] | replace: ' ', '-' }}-{{ foreach.item[1] | replace: ' ', '-' }}-{{ foreach.item[2] | replace: ' ', '-' }}-{{ foreach.item[3] | replace: ' ', '-' }}"
+                item_id: "tune-{{ foreach.item[0] | replace: ' ', '-' | replace: '+', '-' }}-{{ foreach.item[1] | replace: ' ', '-' | replace: '+', '-' }}-{{ foreach.item[2] | replace: ' ', '-' | replace: '+', '-' }}-{{ foreach.item[3] | replace: ' ', '-' | replace: '+', '-' }}"
                 description: "Added by workflow Disable Noisy Elastic Defend Behavior Rules from ES|QL. rule.name + policy version + data_stream.namespace + host.os.type (noisy-alert query)."
                 type: "simple"
                 namespace_type: "agnostic"
@@ -124,11 +129,13 @@ steps:
                     type: "match"
                     operator: "included"
                     value: "{{ foreach.item[2] }}"
+            on-failure:
+              continue: true
 
           - name: log_created
             type: console
             with:
-              message: "Exception created for rule {{ foreach.item[0] }}, version {{ foreach.item[1] }}, namespace {{ foreach.item[2] }}, os {{ foreach.item[3] }} (row {{ foreach.index }})."
+              message: "{% if steps.create_endpoint_exception.error %}{% if steps.create_endpoint_exception.error.message contains '409' or steps.create_endpoint_exception.error.message contains 'already exists' %}Exception already exists for rule {{ foreach.item[0] }}, version {{ foreach.item[1] }}, namespace {{ foreach.item[2] }}, os {{ foreach.item[3] }} (row {{ foreach.index }}), skipping.{% else %}Failed to create exception for rule {{ foreach.item[0] }}, version {{ foreach.item[1] }}, namespace {{ foreach.item[2] }}, os {{ foreach.item[3] }} (row {{ foreach.index }}): {{ steps.create_endpoint_exception.error }}{% endif %}{% else %}Exception created for rule {{ foreach.item[0] }}, version {{ foreach.item[1] }}, namespace {{ foreach.item[2] }}, os {{ foreach.item[3] }} (row {{ foreach.index }}).{% endif %}"
 
   - name: log_summary
     type: console
