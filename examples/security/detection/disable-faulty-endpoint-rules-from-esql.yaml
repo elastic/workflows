@@ -1,0 +1,139 @@
+# =============================================================================
+# Workflow: Disable Faulty Endpoint Rules from ES|QL
+# Category: security/detection
+#
+# Detects noisy Elastic Defend behavior rules (FP bursts across many hosts and
+# processes) via ES|QL and auto-creates scoped Endpoint Security
+# exceptions per rule name, policy artifact version, data_stream.namespace,
+# and host.os.type. Remediates the faulty rule version without blocking
+# future artifact updates — a new policy version runs normally and is not
+# covered by existing exceptions.
+#
+# 1. Runs an ES|QL query that finds rules firing on many hosts and many
+#    distinct processes (likely faulty / noisy rules). Query returns at least:
+#    [0] rule.name, [1] Endpoint.policy.applied.artifacts.global.version,
+#    [2] data_stream.namespace, [3] host.os.type
+# 2. For each row, creates one Endpoint Security Exception (if not already
+#    present): rule.name + policy version + namespace + os_types from
+#    host.os.type. Deterministic item_id (409 = skip).
+#
+# Schedule: every 31 minutes (manual trigger also available).
+#
+# References:
+# - Endpoint Security Exception List: Security -> Rules -> Shared exception
+#   lists -> Endpoint Security Exception List
+# - https://www.elastic.co/docs/solutions/security/detect-and-alert/add-manage-exceptions
+# =============================================================================
+version: "1"
+name: Disable Faulty Endpoint Behavior Rules
+description: |
+  Detect noisy Defend rules via ES|QL and create scoped Endpoint exceptions
+  (rule.name + policy version + namespace + OS). Skips if already present.
+  Remediates FP bursts by rule version; new artifact versions are unaffected.
+enabled: true
+tags:
+  - security
+  - endpoint
+  - exceptions
+  - detection
+
+# -----------------------------------------------------------------------------
+# INPUTS
+# -----------------------------------------------------------------------------
+inputs:
+  - name: esql_query
+    type: string
+    description: ES|QL query. Columns [0] rule.name, [1] Endpoint.policy.applied.artifacts.global.version, [2] data_stream.namespace, [3] host.os.type.
+    required: true
+    default: |
+      FROM logs-endpoint.alerts*
+      | WHERE @timestamp > NOW() - 30 minute and rule.name is not null and event.code == "behavior" and process.code_signature.trusted == true and process.parent.code_signature.trusted == true
+      | STATS alerts_count = COUNT(*), host_count = COUNT_DISTINCT(host.id), proc_count = COUNT_DISTINCT(process.name), parent_count = COUNT_DISTINCT(process.parent.name) BY rule.name, Endpoint.policy.applied.artifacts.global.version, data_stream.namespace, host.os.type
+      | WHERE (host_count >= 5 and proc_count >= 3) or host_count >= 20
+      | STATS BY rule.name, Endpoint.policy.applied.artifacts.global.version, data_stream.namespace, host.os.type
+
+# -----------------------------------------------------------------------------
+# TRIGGERS — manual + every 31 minutes
+# -----------------------------------------------------------------------------
+triggers:
+  - type: manual
+  - type: scheduled
+    with:
+      every: 31m
+
+# -----------------------------------------------------------------------------
+# STEPS
+# -----------------------------------------------------------------------------
+steps:
+  - name: run_esql
+    type: elasticsearch.esql.query
+    with:
+      query: "{{ inputs.esql_query }}"
+
+  - name: per_row_create_exception
+    type: foreach
+    foreach: "{{ steps.run_esql.output.values }}"
+    steps:
+      - name: get_exception
+        type: kibana.request
+        with:
+          method: GET
+          path: "/api/endpoint_list/items/_find"
+          query:
+            filter: "item_id:tune-{{ foreach.item[0] | replace: ' ', '-' }}-{{ foreach.item[1] | replace: ' ', '-' }}-{{ foreach.item[2] | replace: ' ', '-' }}-{{ foreach.item[3] | replace: ' ', '-' }}"
+            per_page: 1
+          headers:
+            kbn-xsrf: "true"
+        on-failure:
+          continue: true
+
+      # _find returns { total, data }; skip create when GET succeeded and total >= 1 (item already exists).
+      - name: create_only_if_missing
+        type: if
+        condition: "not steps.get_exception.error: * and steps.get_exception.output.total >= 1"
+        steps:
+          - name: log_already_exists
+            type: console
+            with:
+              message: "Exception already exists for rule {{ foreach.item[0] }}, version {{ foreach.item[1] }}, namespace {{ foreach.item[2] }}, os {{ foreach.item[3] }} (row {{ foreach.index }}), skipping."
+        else:
+          - name: create_endpoint_exception
+            type: kibana.request
+            with:
+              method: POST
+              path: "/api/endpoint_list/items"
+              headers:
+                kbn-xsrf: "true"
+              body:
+                name: "Tune: {{ foreach.item[0] }} | {{ foreach.item[1] }} | {{ foreach.item[2] }} | {{ foreach.item[3] }}"
+                item_id: "tune-{{ foreach.item[0] | replace: ' ', '-' }}-{{ foreach.item[1] | replace: ' ', '-' }}-{{ foreach.item[2] | replace: ' ', '-' }}-{{ foreach.item[3] | replace: ' ', '-' }}"
+                description: "Added by workflow Disable Faulty Endpoint Rules from ES|QL. rule.name + policy version + data_stream.namespace + host.os.type (noisy-alert query)."
+                type: "simple"
+                namespace_type: "agnostic"
+                list_id: "endpoint_list"
+                os_types:
+                  - "{{ foreach.item[3] | downcase }}"
+                entries:
+                  - field: "rule.name"
+                    type: "match"
+                    operator: "included"
+                    value: "{{ foreach.item[0] }}"
+                  - field: "Endpoint.policy.applied.artifacts.global.version"
+                    type: "match"
+                    operator: "included"
+                    value: "{{ foreach.item[1] }}"
+                  - field: "data_stream.namespace"
+                    type: "match"
+                    operator: "included"
+                    value: "{{ foreach.item[2] }}"
+
+          - name: log_created
+            type: console
+            with:
+              message: "Exception created for rule {{ foreach.item[0] }}, version {{ foreach.item[1] }}, namespace {{ foreach.item[2] }}, os {{ foreach.item[3] }} (row {{ foreach.index }})."
+
+  - name: log_summary
+    type: console
+    with:
+      message: |
+        Processed {{ steps.run_esql.output.values | size }} row(s). Exceptions created or skipped (409 = already exists). Check Security → Exceptions → Endpoint Security Exception List.
