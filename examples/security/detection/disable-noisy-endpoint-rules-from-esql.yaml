@@ -60,7 +60,7 @@ triggers:
           | STATS BY rule.name, Endpoint.policy.applied.artifacts.global.version, data_stream.namespace, host.os.type
   - type: scheduled
     with:
-      every: 31m
+      every: 15m
 
 # -----------------------------------------------------------------------------
 # STEPS
