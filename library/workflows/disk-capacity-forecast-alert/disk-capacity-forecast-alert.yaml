@@ -113,9 +113,6 @@ steps:
 
   - name: search_breaches
     type: elasticsearch.request
-    # NOTE: use elasticsearch.request (raw _search), NOT elasticsearch.search:
-    # the elasticsearch.search step output omits `aggregations`, so the
-    # per-host/mount breakdown below would render empty. Verified on 9.4.2.
     with:
       method: POST
       path: "/{{ __install__.results-index }}/_search"
