@@ -40,7 +40,7 @@ triggers:
         required: true
         default: |
           FROM logs-endpoint.*
-          | WHERE @timestamp > NOW() - 1 hour and
+          | WHERE @timestamp > NOW() - 15 minutes and
           (message like "Malicious Behavior Prevention Alert*" OR (event.category == "registry" and (registry.path like """*\\Windows\\CurrentVersion\\Run\\*""" or registry.path like """*CurrentVersion\\Policies\\Explorer\\Run\\*""") and registry.data.strings IS NOT NULL))
           | EVAL is_endpoint_alert = CASE(message like "Malicious Behavior Prevention Alert*", agent.id, NULL), is_run_persistence = CASE(event.category == "registry" and (registry.path like """*\\Windows\\CurrentVersion\\Run\\*""" or registry.path like """*CurrentVersion\\Policies\\Explorer\\Run\\*""") and registry.data.strings IS NOT NULL, agent.id, NULL)
           | STATS endpoint_alerts_count = COUNT_DISTINCT(is_endpoint_alert), persistence_count = COUNT_DISTINCT(is_run_persistence), rules = VALUES(message), registry.hive = VALUES(registry.hive), registry.key = VALUES(registry.key), registry.value = VALUES(registry.value), registry.path = VALUES(registry.path), registry.data.strings = VALUES(registry.data.strings) by agent.id, host.id, DATE_TRUNC(5 minutes, @timestamp)
