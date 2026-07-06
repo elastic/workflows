@@ -1,0 +1,147 @@
+# =============================================================================
+# Workflow: Remediate Run Key Persistence
+# Category: security/response
+#
+# Finds Run-key and Policies\Explorer\Run registry persistence via ES|QL on
+# logs-endpoint.*, correlating with Malicious Behavior Prevention alerts within
+# 5-minute windows on the same agent/host, then for each hit:
+#   0. Checks newest execute in response history (pageSize 1) for same path.
+#   1. execute — PowerShell Remove-ItemProperty on registry.hive\registry.key.
+#
+# ES|QL columns: [0] agent.id, [1] host.id, [2] registry.hive, [3] registry.key,
+#                [4] registry.value, [5] registry.path, [6] registry.data.strings
+#
+# registry.path ends with the value name; remediation uses registry.hive + key + value.
+#
+# The workflow is set to run every 15m; you can also attach it as a custom
+# workflow action to the "Endpoint Security (Elastic Defend)" SIEM rule.
+# =============================================================================
+version: "1"
+name: Remediate Run Key Persistence
+description: |
+  Query logs-endpoint.* for Run-key registry persistence correlated with endpoint
+  alerts within 5-minute windows, skip values already removed per response actions
+  history, then delete the Run value via PowerShell Remove-ItemProperty.
+enabled: false
+tags:
+  - security
+  - endpoint
+  - response
+  - remediation
+  - persistence
+  - registry
+
+triggers:
+  - type: manual
+    inputs:
+      - name: esql_query
+        type: string
+        description: ES|QL returning agent.id, host.id, registry.hive, registry.key, registry.value, registry.path, registry.data.strings per row.
+        required: true
+        default: |
+          FROM logs-endpoint.*
+          | WHERE @timestamp > NOW() - 1 hour and
+          (message like "Malicious Behavior Prevention Alert*" OR (event.category == "registry" and (registry.path like """*\\Windows\\CurrentVersion\\Run\\*""" or registry.path like """*CurrentVersion\\Policies\\Explorer\\Run\\*""") and registry.data.strings IS NOT NULL))
+          | EVAL is_endpoint_alert = CASE(message like "Malicious Behavior Prevention Alert*", agent.id, NULL), is_run_persistence = CASE(event.category == "registry" and (registry.path like """*\\Windows\\CurrentVersion\\Run\\*""" or registry.path like """*CurrentVersion\\Policies\\Explorer\\Run\\*""") and registry.data.strings IS NOT NULL, agent.id, NULL)
+          | STATS endpoint_alerts_count = COUNT_DISTINCT(is_endpoint_alert), persistence_count = COUNT_DISTINCT(is_run_persistence), rules = VALUES(message), registry.hive = VALUES(registry.hive), registry.key = VALUES(registry.key), registry.value = VALUES(registry.value), registry.path = VALUES(registry.path), registry.data.strings = VALUES(registry.data.strings) by agent.id, host.id, DATE_TRUNC(5 minutes, @timestamp)
+          | WHERE endpoint_alerts_count >= 1 and persistence_count >= 1
+          | STATS BY agent.id, host.id, registry.hive, registry.key, registry.value, registry.path, registry.data.strings
+      - name: history_lookback
+        type: string
+        description: How far back to search response actions history (Date Math, e.g. now-1d).
+        default: now-1d
+  - type: scheduled
+    with:
+      every: 15m
+
+steps:
+  - name: run_esql
+    type: elasticsearch.esql.query
+    with:
+      query: "{{ inputs.esql_query }}"
+
+  - name: process_hits
+    type: if
+    condition: steps.run_esql.output.values.length > 0
+    steps:
+      - name: per_persistence_hit
+        type: foreach
+        foreach: "{{ steps.run_esql.output.values }}"
+        steps:
+          - name: set_hit_context
+            type: data.set
+            with:
+              registry_path: "{{ foreach.item[5] | downcase }}"
+              reg_key: >-
+                {% if foreach.item[2] != '' and foreach.item[2] != null and foreach.item[3] != '' and foreach.item[3] != null %}{{ foreach.item[2] }}\{{ foreach.item[3] }}{% else %}{% assign rp = foreach.item[5] %}{% assign parts = rp | split: '\' %}{% assign key_path = '' %}{% for part in parts %}{% unless forloop.last %}{% if key_path != '' %}{% assign key_path = key_path | append: '\' %}{% endif %}{% assign key_path = key_path | append: part %}{% endunless %}{% endfor %}{{ key_path }}{% endif %}
+              reg_value: >-
+                {% if foreach.item[4] != '' and foreach.item[4] != null %}{{ foreach.item[4] }}{% else %}{% assign rp = foreach.item[5] %}{% assign parts = rp | split: '\' %}{{ parts | last }}{% endif %}
+
+          - name: log_hit
+            type: console
+            with:
+              message: "Checking Run-key persistence — agent {% if foreach.item[0] != '' and foreach.item[0] != null %}{{ foreach.item[0] }}{% else %}{{ foreach.item[1] }}{% endif %}, key {{ steps.set_hit_context.output.reg_key }}, value {{ steps.set_hit_context.output.reg_value }} = {{ foreach.item[6] }} (row {{ foreach.index }})."
+
+          - name: check_execute_history
+            type: kibana.request
+            with:
+              method: GET
+              path: "/api/endpoint/action"
+              query:
+                agentIds: "{% if foreach.item[0] != '' and foreach.item[0] != null %}{{ foreach.item[0] }}{% else %}{{ foreach.item[1] }}{% endif %}"
+                commands: execute
+                startDate: "{{ inputs.history_lookback }}"
+                endDate: now
+                pageSize: 1
+              headers:
+                kbn-xsrf: "true"
+            on-failure:
+              continue: true
+
+          - name: capture_history
+            type: data.set
+            with:
+              should_skip: "{% if steps.check_execute_history.output.total == 0 %}false{% else %}{% for action in steps.check_execute_history.output.data limit:1 %}{% assign rp = steps.set_hit_context.output.registry_path %}{% assign rk = steps.set_hit_context.output.reg_key | downcase %}{% assign rv = steps.set_hit_context.output.reg_value | downcase %}{% assign hc = action.parameters.command | downcase %}{% assign cm = action.comment | downcase %}{% if hc contains rp %}true{% elsif hc contains rk and hc contains rv %}true{% elsif cm contains rp %}true{% elsif cm contains rv and cm contains 'remediate run key' %}true{% else %}false{% endif %}{% endfor %}{% endif %}"
+
+          - name: already_remediated
+            type: if
+            condition: 'steps.capture_history.output.should_skip: "true"'
+            steps:
+              - name: log_already_in_history
+                type: console
+                with:
+                  message: "Skipping {{ foreach.item[5] }} on agent {% if foreach.item[0] != '' and foreach.item[0] != null %}{{ foreach.item[0] }}{% else %}{{ foreach.item[1] }}{% endif %} — delete already in response actions history ({{ inputs.history_lookback }})."
+            else:
+              - name: delete_registry_value
+                type: kibana.request
+                with:
+                  method: POST
+                  path: "/api/endpoint/action/execute"
+                  headers:
+                    kbn-xsrf: "true"
+                  body:
+                    endpoint_ids:
+                      - "{% if foreach.item[0] != '' and foreach.item[0] != null %}{{ foreach.item[0] }}{% else %}{{ foreach.item[1] }}{% endif %}"
+                    comment: "Workflow Remediate Run Key Persistence — delete {{ steps.set_hit_context.output.reg_key }} value {{ steps.set_hit_context.output.reg_value }} ({{ foreach.item[6] }})."
+                    parameters:
+                      command: 'powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "Remove-ItemProperty -LiteralPath ''Registry::{{ steps.set_hit_context.output.reg_key }}'' -Name ''{{ steps.set_hit_context.output.reg_value }}'' -Force -ErrorAction Stop"'
+                      timeout: 120
+                on-failure:
+                  continue: true
+
+              - name: log_remediation_result
+                type: console
+                with:
+                  message: "{% if steps.delete_registry_value.error %}Delete warning for {{ steps.set_hit_context.output.reg_key }}\\{{ steps.set_hit_context.output.reg_value }}: {{ steps.delete_registry_value.error }}{% else %}Remove-ItemProperty submitted for {{ steps.set_hit_context.output.reg_key }} value {{ steps.set_hit_context.output.reg_value }} (data: {{ foreach.item[6] }}).{% endif %}"
+
+    else:
+      - name: log_no_hits
+        type: console
+        with:
+          message: "No Run-key persistence correlated with endpoint alerts in the configured ES|QL window."
+
+  - name: log_summary
+    type: console
+    with:
+      message: |
+        Processed {{ steps.run_esql.output.values | size }} unique Run-key persistence target(s). Check Security → Endpoints → Response actions history.
