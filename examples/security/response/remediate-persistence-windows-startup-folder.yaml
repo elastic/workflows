@@ -11,7 +11,7 @@
 #
 # ES|QL columns: [0] agent.id, [1] host.id, [2] file.path
 #
-# The workflow is set to run every 15m, you can also attach it as a custom workflow action to the "Endpoint Security (Elastic Defend)" SIEM rule so it triggers everytime a behavior alert is generated.
+# The workflow is set to run every 15m, you can also attach it as a custom workflow action to the "Endpoint Security (Elastic Defend)" https://www.elastic.co/guide/en/security/8.19/endpoint-security-elastic-defend.html SIEM rule so it triggers everytime a behavior alert is generated.
 #
 # =============================================================================
 version: "1"
