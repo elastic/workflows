@@ -13,8 +13,7 @@
 #
 # registry.path ends with the value name; remediation uses registry.hive + key + value.
 #
-# The workflow is set to run every 15m; you can also attach it as a custom
-# workflow action to the "Endpoint Security (Elastic Defend)" SIEM rule.
+## The workflow is set to run every 15m, you can also attach it as a custom workflow action to the "Endpoint Security (Elastic Defend)" https://www.elastic.co/guide/en/security/8.19/endpoint-security-elastic-defend.html SIEM rule so it triggers everytime a behavior alert is generated.
 # =============================================================================
 version: "1"
 name: Remediate Run Key Persistence
