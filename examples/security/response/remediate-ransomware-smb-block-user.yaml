@@ -1,0 +1,224 @@
+# =============================================================================
+# Workflow: Block User Credentials — Ransomware over SMB
+# Category: security/response
+#
+# Alert-triggered response for SMB ransomware note-file alerts. Extracts
+# user.id (SID) from the triggering alert and denies network logon for that
+# principal on the victim host (SeDenyNetworkLogonRight via secedit). Works
+# for domain and local accounts. Also closes existing SMB sessions and open
+# Also closes existing SMB sessions via net session before applying the deny.
+#
+# Designed for SMB ransomware rules such as "Potential Ransomware Note File Dropped via SMB" and Suspicious File Renamed via SMB.
+#
+# https://www.elastic.co/guide/en/security/8.19/potential-ransomware-note-file-dropped-via-smb.html
+# https://www.elastic.co/guide/en/security/8.19/suspicious-file-renamed-via-smb.html
+#
+# Alert fields used: user.id, user.name, user.domain, source.ip, host.id, host.name, agent.id,
+#                    kibana.alert.uuid
+# =============================================================================
+version: "1"
+name: Block User Credentials - Ransomware over SMB
+description: |
+  On alert, read user.id (SID) and agent.id from the alert document (ES|QL
+  fallback on host.id when agent.id is absent), skip if already blocked per
+  then deny network logon for that SID on the host (domain or local account),
+  closing any active SMB sessions first.
+enabled: false
+tags:
+  - security
+  - endpoint
+  - response
+  - ransomware
+  - smb
+  - credentials
+
+triggers:
+  - type: alert
+  - type: manual
+    inputs:
+      - name: user_id
+        type: string
+        description: Windows SID (e.g. S-1-5-21-...-500). Used when testing without an alert trigger.
+        required: true
+        default: ""
+      - name: user_name
+        type: string
+        description: Optional user.name from the alert (e.g. Administrator).
+        default: ""
+      - name: user_domain
+        type: string
+        description: Optional user.domain from the alert (e.g. win11-lab or SAMIR-ELASTIC).
+        default: ""
+      - name: source_ip
+        type: string
+        description: Optional source.ip of the SMB client from the alert (closes sessions by client IP when user matching fails).
+        default: ""
+      - name: host_id
+        type: string
+        description: host.id from the alert. Used to resolve agent.id when not on the alert.
+        required: true
+        default: ""
+      - name: agent_id
+        type: string
+        description: agent.id from the alert. Optional when host_id is provided for ES|QL lookup.
+        default: ""
+      - name: host_name
+        type: string
+        description: Optional host.name for logging.
+        default: ""
+      - name: history_lookback
+        type: string
+        description: How far back to search response actions history (Date Math, e.g. now-1d).
+        default: now-1d
+
+consts:
+  history_lookback: now-1d
+
+steps:
+  - name: set_alert_context
+    type: data.set
+    with:
+      user_id: "{% if event.alerts[0].user.id != '' and event.alerts[0].user.id != null %}{{ event.alerts[0].user.id }}{% else %}{{ inputs.user_id }}{% endif %}"
+      user_name: "{% if event.alerts[0].user.name != '' and event.alerts[0].user.name != null %}{{ event.alerts[0].user.name }}{% else %}{{ inputs.user_name }}{% endif %}"
+      user_domain: "{% if event.alerts[0].user.domain != '' and event.alerts[0].user.domain != null %}{{ event.alerts[0].user.domain }}{% else %}{{ inputs.user_domain }}{% endif %}"
+      source_ip: "{% if event.alerts[0].source.ip != '' and event.alerts[0].source.ip != null %}{{ event.alerts[0].source.ip }}{% else %}{{ inputs.source_ip }}{% endif %}"
+      host_id: "{% if event.alerts[0].host.id != '' and event.alerts[0].host.id != null %}{{ event.alerts[0].host.id }}{% else %}{{ inputs.host_id }}{% endif %}"
+      host_name: "{% if event.alerts[0].host.name != '' and event.alerts[0].host.name != null %}{{ event.alerts[0].host.name }}{% else %}{{ inputs.host_name }}{% endif %}"
+      agent_id: "{% if event.alerts[0].agent.id != '' and event.alerts[0].agent.id != null %}{{ event.alerts[0].agent.id }}{% elsif event.alerts[0].elastic.agent.id != '' and event.alerts[0].elastic.agent.id != null %}{{ event.alerts[0].elastic.agent.id }}{% else %}{{ inputs.agent_id }}{% endif %}"
+      alert_id: "{% if event.alerts[0]._id != '' and event.alerts[0]._id != null %}{{ event.alerts[0]._id }}{% else %}manual{% endif %}"
+      rule_name: "{% if event.alerts[0].kibana.alert.rule.name != '' and event.alerts[0].kibana.alert.rule.name != null %}{{ event.alerts[0].kibana.alert.rule.name }}{% elsif event.alerts[0].signal.rule.name != '' and event.alerts[0].signal.rule.name != null %}{{ event.alerts[0].signal.rule.name }}{% else %}manual{% endif %}"
+
+  - name: log_alert_context
+    type: console
+    with:
+      message: "Ransomware SMB credential block — rule {{ steps.set_alert_context.output.rule_name }}, user {{ steps.set_alert_context.output.user_name }} ({{ steps.set_alert_context.output.user_id }}) on host {{ steps.set_alert_context.output.host_name }} ({{ steps.set_alert_context.output.host_id }}){% if steps.set_alert_context.output.agent_id != '' and steps.set_alert_context.output.agent_id != null %}, agent {{ steps.set_alert_context.output.agent_id }}{% endif %}, alert {{ steps.set_alert_context.output.alert_id }}."
+
+  - name: validate_user_sid
+    type: if
+    condition: 'not steps.set_alert_context.output.user_id: *'
+    steps:
+      - name: log_skip_empty_sid
+        type: console
+        with:
+          message: "Skipping credential block — user.id is missing from the alert."
+    else:
+      - name: skip_system_account
+        type: if
+        condition: 'steps.set_alert_context.output.user_id: "S-1-5-18"'
+        steps:
+          - name: log_skip_system
+            type: console
+            with:
+              message: "Skipping credential block — user.id is SYSTEM (S-1-5-18)."
+        else:
+          - name: resolve_agent_id
+            type: elasticsearch.esql.query
+            with:
+              query: |
+                FROM logs-endpoint.events.*
+                | WHERE @timestamp > NOW() - 24 hours
+                  AND (
+                    host.id == "{{ steps.set_alert_context.output.host_id }}"
+                    {% if steps.set_alert_context.output.host_name != '' and steps.set_alert_context.output.host_name != null %}
+                    OR host.name == "{{ steps.set_alert_context.output.host_name }}"
+                    {% endif %}
+                  )
+                | STATS BY agent.id
+                | LIMIT 1
+            on-failure:
+              continue: true
+
+          - name: complete_agent_context
+            type: data.set
+            with:
+              agent_id: "{% if steps.set_alert_context.output.agent_id != '' and steps.set_alert_context.output.agent_id != null %}{{ steps.set_alert_context.output.agent_id }}{% elsif steps.resolve_agent_id.output.values.length > 0 %}{{ steps.resolve_agent_id.output.values[0][0] }}{% endif %}"
+              agent_ready: "{% if steps.set_alert_context.output.agent_id != '' and steps.set_alert_context.output.agent_id != null %}true{% elsif steps.resolve_agent_id.output.values.length > 0 %}true{% else %}false{% endif %}"
+
+          - name: when_agent_found
+            type: if
+            condition: 'steps.complete_agent_context.output.agent_ready: "true"'
+            steps:
+              - name: check_execute_history
+                type: kibana.request
+                with:
+                  method: GET
+                  path: "/api/endpoint/action"
+                  query:
+                    agentIds: "{{ steps.complete_agent_context.output.agent_id }}"
+                    commands: execute
+                    startDate: "{% if inputs.history_lookback != '' and inputs.history_lookback != null %}{{ inputs.history_lookback }}{% else %}{{ consts.history_lookback }}{% endif %}"
+                    endDate: now
+                    pageSize: 1
+                  headers:
+                    kbn-xsrf: "true"
+                on-failure:
+                  continue: true
+
+              - name: capture_history
+                type: data.set
+                with:
+                  should_skip: "{% if steps.check_execute_history.output.total == 0 %}false{% else %}{% for action in steps.check_execute_history.output.data limit:1 %}{% assign sid = steps.set_alert_context.output.user_id | downcase %}{% assign hc = action.parameters.command | downcase %}{% assign cm = action.comment | downcase %}{% if hc contains sid and hc contains 'sedenynetworklogonright' %}true{% elsif hc contains sid and hc contains 'closesmbsession' %}true{% elsif cm contains sid and cm contains 'ransomware smb' %}true{% else %}false{% endif %}{% endfor %}{% endif %}"
+
+              - name: already_blocked
+                type: if
+                condition: 'steps.capture_history.output.should_skip: "true"'
+                steps:
+                  - name: log_already_blocked
+                    type: console
+                    with:
+                      message: "Skipping {{ steps.set_alert_context.output.user_id }} on agent {{ steps.complete_agent_context.output.agent_id }} — SMB block already in response actions history."
+                else:
+                  - name: kill_smb_sessions_for_sid
+                    type: kibana.request
+                    with:
+                      method: POST
+                      path: "/api/endpoint/action/execute"
+                      headers:
+                        kbn-xsrf: "true"
+                      body:
+                        endpoint_ids:
+                          - "{{ steps.complete_agent_context.output.agent_id }}"
+                        comment: "Workflow Block User Credentials — Ransomware SMB — close SMB sessions for {{ steps.set_alert_context.output.user_name }} ({{ steps.set_alert_context.output.user_id }}) on {{ steps.set_alert_context.output.host_name }}."
+                        parameters:
+                          command: 'powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "$u=''{{ steps.set_alert_context.output.user_name }}'';$i=''{{ steps.set_alert_context.output.source_ip }}'';$b=[char]92;$s=0;if($i){''Y''|net session ($b+$b+$i) /delete|Out-Null;$s=1};foreach($l in (net session)){if($l.Length -lt 3){continue};$t=$l.Trim();if($t[0] -ne $b){continue};if($t[1] -ne $b){continue};if($u -and $t -notlike (''*''+$u+''*'')){continue};$p=$t.IndexOf(''  '');if($p -lt 1){continue};''Y''|net session ($t.Substring(0,$p).Trim()) /delete|Out-Null;$s++};Write-Output (''Closed ''+$s+'' SMB session(s) for ''+$u)"'
+                          timeout: 60
+                    on-failure:
+                      continue: true
+
+                  - name: log_kill_smb_result
+                    type: console
+                    with:
+                      message: "{% if steps.kill_smb_sessions_for_sid.error %}SMB session close warning for {{ steps.set_alert_context.output.user_id }}: {{ steps.kill_smb_sessions_for_sid.error }}{% else %}SMB session close submitted for {{ steps.set_alert_context.output.user_name }} ({{ steps.set_alert_context.output.user_id }}) on agent {{ steps.complete_agent_context.output.agent_id }}.{% endif %}"
+
+                  - name: deny_network_logon_for_sid
+                    type: kibana.request
+                    with:
+                      method: POST
+                      path: "/api/endpoint/action/execute"
+                      headers:
+                        kbn-xsrf: "true"
+                      body:
+                        endpoint_ids:
+                          - "{{ steps.complete_agent_context.output.agent_id }}"
+                        comment: "Workflow Block User Credentials — Ransomware SMB — deny network logon for {{ steps.set_alert_context.output.user_name }} ({{ steps.set_alert_context.output.user_id }}) on {{ steps.set_alert_context.output.host_name }}."
+                        parameters:
+                          command: 'powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "$sid=''{{ steps.set_alert_context.output.user_id }}''; $star=''*''+$sid; $p=Join-Path $env:TEMP (''secpol-''+[guid]::NewGuid().ToString()+''.inf''); $d=Join-Path $env:TEMP (''secdb-''+[guid]::NewGuid().ToString()+''.sdb''); secedit /export /cfg $p /quiet; if(-not (Test-Path $p)){throw ''secedit export failed''}; $out=@(); $hit=$false; foreach($line in Get-Content $p){if($line -match ''^\s*SeDenyNetworkLogonRight\s*=\s*(.*)$''){$hit=$true; $v=$Matches[1].Trim(); if($v -match [regex]::Escape($star) -or $v -match [regex]::Escape($sid)){$out+=$line}elseif($v){$out+=''SeDenyNetworkLogonRight = ''+$v+'',''+$star}else{$out+=''SeDenyNetworkLogonRight = ''+$star}}else{$out+=$line}}; if(-not $hit){throw ''SeDenyNetworkLogonRight not found in exported policy''}; Set-Content -Path $p -Value $out -Encoding Unicode; secedit /configure /db $d /cfg $p /areas USER_RIGHTS /quiet; Remove-Item $p,$d -Force -ErrorAction SilentlyContinue; Write-Output (''Denied network logon (SeDenyNetworkLogonRight) for ''+$sid)"'
+                          timeout: 180
+                    on-failure:
+                      continue: true
+
+                  - name: log_deny_result
+                    type: console
+                    with:
+                      message: "{% if steps.deny_network_logon_for_sid.error %}Network logon deny warning for {{ steps.set_alert_context.output.user_id }}: {{ steps.deny_network_logon_for_sid.error }}{% else %}SeDenyNetworkLogonRight submitted for {{ steps.set_alert_context.output.user_name }} ({{ steps.set_alert_context.output.user_id }}) on agent {{ steps.complete_agent_context.output.agent_id }} (after SMB session close).{% endif %}"
+            else:
+              - name: log_no_agent
+                type: console
+                with:
+                  message: "No agent.id on alert and none found for host.id {{ steps.set_alert_context.output.host_id }}{% if steps.set_alert_context.output.host_name != '' and steps.set_alert_context.output.host_name != null %} / host.name {{ steps.set_alert_context.output.host_name }}{% endif %} in the last 24 hours — cannot block {{ steps.set_alert_context.output.user_id }}. Provide agent_id when running manually."
+
+  - name: log_summary
+    type: console
+    with:
+      message: |
+        Credential block workflow finished for user {{ steps.set_alert_context.output.user_id }} on {{ steps.set_alert_context.output.host_name }}. Check Security → Endpoints → Response actions history.
