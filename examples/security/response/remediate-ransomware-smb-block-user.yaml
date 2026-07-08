@@ -8,7 +8,7 @@
 # for domain and local accounts. Also closes existing SMB sessions and open
 # Also closes existing SMB sessions via net session before applying the deny.
 #
-# Designed for SMB ransomware rules such as "Potential Ransomware Note File Dropped via SMB" and Suspicious File Renamed via SMB.
+# Designed for SMB ransomware rules such as "Potential Ransomware Note File Dropped via SMB" and "Suspicious File Renamed via SMB".
 #
 # https://www.elastic.co/guide/en/security/8.19/potential-ransomware-note-file-dropped-via-smb.html
 # https://www.elastic.co/guide/en/security/8.19/suspicious-file-renamed-via-smb.html
