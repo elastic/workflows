@@ -6,6 +6,7 @@ Threat detection, alerting, and rule management workflows
 
 | Workflow | Description |
 |----------|-------------|
+| [Browser Extension Daily Reputation Check](./browser-extension-daily-reputation.yaml) | Daily ES\|QL hunt for singleton .crx extensions; Chrome search-by-ID + Edge fallback; rule-based reputation (no AI) |
 | [Disable Noisy Elastic Defend Behavior Rules](./disable-noisy-endpoint-rules-from-esql.yaml) | Detects noisy Elastic Defend behavior rules via ES\|QL (FP bursts) and auto-creates scoped Endpoint Security exceptions by rule version; new artifact versions are unaffected |
 | [␆ Mark Alert as Acknowledged](./mark-alert-as-acknowledged.yaml) | This workflow YAML defines a manual trigger for acknowledging security alerts |
 | [🏷️ Add Alert Tag - FP](./add-alert-tag-fp.yaml) | This workflow YAML defines a manual trigger for adding a tag to a security alert |

@@ -1,0 +1,536 @@
+# =============================================================================
+# Workflow: Browser Extension Singleton Reputation Check
+# Category: security/detection
+#
+# Daily ES|QL hunt for rarely-seen browser extensions (.crx) using Elastic Defend file events. 
+# Normalizes file.name to extension_id (strips _build.crx),
+# keeps extensions installed on a single host only, then fetches the browser
+# store listing and applies deterministic reputation rules (ratings, publish
+# age, developer email, RDAP domain age). When suspicious_count >= 1, creates a
+# daily Kibana case with hit details and triggers Defend zip/get-file/delete.
+# Store HTML parsing: Edge uses meta itemprop tags; Chrome search pages use the
+# rating, user counts, and publish epoch from embedded JSON (Average rating,
+# X out of 5). Publish date is first-listing epoch in search JSON, not
+# detail-page last-updated. Chrome search with HTTP 200 but no result card is
+# treated as not found (SUSPICIOUS). Flags young listings with abnormally high
+# user and rating counts (malvertising-inflated popularity, e.g. NexShield).
+# For chrome.exe we fetch search-by-ID (schema-safe, no maxRedirects). Edge
+# Add-ons remains fallback for cross-listed extensions.
+#
+# ES|QL columns (after KEEP): [0] extension_id, [1] process.name, [2] hosts,
+# [3] sample_file, [4] agent_id, [5] file_path, [6] host_id
+#
+# Author: Elastic
+# =============================================================================
+version: "1"
+name: Browser Extension Daily Reputation Check
+description: |
+  Runs daily ES|QL against browser extension telemetry alerts, isolates
+  extensions seen on only one host, fetches the store listing for the
+  installing browser (Chrome Web Store search-by-ID for chrome.exe, Edge Add-ons
+  for msedge.exe), applies rule-based reputation checks (ratings, publish age,
+  developer email provider, developer domain RDAP age), and logs verdicts. When
+  at least one extension is SUSPICIOUS, opens a daily case and optionally zips,
+  get-files, and removes extension folders via Defend response actions.
+enabled: false
+tags:
+  - security
+  - detection
+  - browser
+  - extension
+  - reputation
+  - scheduled
+
+consts:
+  rule_id: f97504ac-1053-498f-aeaa-c6d01e76b379
+  index_pattern: "detections_alert_telemetry_elastic*"
+  chrome_store_base_url: https://chromewebstore.google.com/detail
+  chrome_store_search_url: https://chromewebstore.google.com/search
+  edge_addons_base_url: https://microsoftedge.microsoft.com/addons/detail
+  lookback_hours: 24
+  max_extensions_per_run: 25
+  min_rating: 3.5
+  min_rating_count: 10
+  min_user_count: 1000
+  suspicious_user_count: 100
+  fresh_publish_days: 45
+  publish_popularity_anomaly_days: 45
+  anomaly_min_user_count: 10000
+  anomaly_min_rating_count: 20
+  suspicious_domain_max_age_days: 90
+  rdap_base_url: https://rdap.org/domain
+  free_email_domains: "gmail.com,googlemail.com,outlook.com,hotmail.com,live.com,msn.com,yahoo.com,yahoo.co.uk,yahoo.fr,gmx.com,gmx.net,gmx.de,gmx.at,protonmail.com,proton.me,icloud.com,me.com,mac.com,aol.com,mail.com,yandex.ru,yandex.com,zoho.com,qq.com,163.com,126.com,outlook.fr,outlook.de,outlook.es,outlook.it,web.de,t-online.de,fastmail.com,tutanota.com,hey.com,pm.me"
+  scheduled_esql_query: |
+    FROM logs-endpoint.events.file-*
+    | WHERE @timestamp > NOW() - 24 hours
+      AND event.action == "creation" 
+      AND process.name IN ("chrome.exe", "msedge.exe")
+      AND file.name LIKE "*_*.crx"
+    | GROK TO_LOWER(file.name) "%{DATA:extension_id}_%{INT:crx_build}.crx"
+    | WHERE extension_id IS NOT NULL
+    | eval extension_id = to_lower(extension_id)
+    | STATS hosts = COUNT_DISTINCT(agent.id), sample_file = MAX(file.name), agent_id = MAX(agent.id), file_path = MAX(file.path), host_id = MAX(host.id) BY extension_id, process.name
+    | WHERE hosts == 1
+    | KEEP extension_id, process.name, hosts, sample_file, agent_id, file_path, host_id
+    | SORT sample_file ASC
+    | LIMIT 25
+
+triggers:
+  - type: scheduled
+    with:
+      every: 24h
+  - type: manual
+
+steps:
+  - name: run_esql
+    type: elasticsearch.esql.query
+    with:
+      query: "{{ consts.scheduled_esql_query }}"
+
+  - name: init_extension_results
+    type: data.set
+    with:
+      extension_results: []
+      extension_summary_lines: []
+      suspicious_extensions: []
+      suspicious_detail_lines: []
+      remediation_notes: []
+      suspicious_count: 0
+      benign_count: 0
+      inconclusive_count: 0
+
+  - name: process_singleton_extensions
+    type: if
+    condition: 'steps.run_esql.output.values.length > 0'
+    steps:
+      - name: log_hit_count
+        type: console
+        with:
+          message: "Browser extension singleton hunt — {{ steps.run_esql.output.values | size }} extension(s) on exactly one host (rule {{ consts.rule_id }})."
+
+      - name: per_extension
+        type: foreach
+        foreach: "{{ steps.run_esql.output.values }}"
+        steps:
+          - name: set_extension_context
+            type: data.set
+            with:
+              sample_file: "{{ foreach.item[3] }}"
+              extension_id: "{% assign sample = foreach.item[3] %}{% assign ext_id = foreach.item[0] %}{% if sample contains '.crx' %}{% assign ext_id = sample | replace: '.crx', '' | split: '_' | first | strip %}{% endif %}{{ ext_id }}"
+              process_name: "{{ foreach.item[1] }}"
+              host_count: "{{ foreach.item[2] }}"
+              agent_id: "{{ foreach.item[4] }}"
+              file_path: "{{ foreach.item[5] }}"
+              host_id: "{{ foreach.item[6] }}"
+              edge_store_url: "{% assign sample = foreach.item[3] %}{% assign ext_id = foreach.item[0] %}{% if sample contains '.crx' %}{% assign ext_id = sample | replace: '.crx', '' | split: '_' | first | strip %}{% endif %}{{ consts.edge_addons_base_url }}/{{ ext_id }}"
+              chrome_store_url: "{% assign sample = foreach.item[3] %}{% assign ext_id = foreach.item[0] %}{% if sample contains '.crx' %}{% assign ext_id = sample | replace: '.crx', '' | split: '_' | first | strip %}{% endif %}{{ consts.chrome_store_base_url }}/{{ ext_id }}?ucbcb=1"
+              chrome_search_url: "{% assign sample = foreach.item[3] %}{% assign ext_id = foreach.item[0] %}{% if sample contains '.crx' %}{% assign ext_id = sample | replace: '.crx', '' | split: '_' | first | strip %}{% endif %}{{ consts.chrome_store_search_url }}/{{ ext_id }}"
+              store_url: "{% assign sample = foreach.item[3] %}{% assign ext_id = foreach.item[0] %}{% if sample contains '.crx' %}{% assign ext_id = sample | replace: '.crx', '' | split: '_' | first | strip %}{% endif %}{% if foreach.item[1] == 'msedge.exe' %}{{ consts.edge_addons_base_url }}/{{ ext_id }}{% else %}{{ consts.chrome_store_search_url }}/{{ ext_id }}{% endif %}"
+
+          - name: log_checking
+            type: console
+            with:
+              message: "Checking extension {{ steps.set_extension_context.output.extension_id }} ({{ steps.set_extension_context.output.process_name }}, file {{ steps.set_extension_context.output.sample_file }}, {{ steps.set_extension_context.output.host_count }} host) — {{ steps.set_extension_context.output.store_url }}"
+
+          - name: fetch_store_listing
+            type: http
+            with:
+              url: "{{ steps.set_extension_context.output.store_url }}"
+              method: GET
+              headers:
+                Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+                Accept-Language: "en-US,en;q=0.9"
+                User-Agent: "{% if steps.set_extension_context.output.process_name == 'msedge.exe' %}Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36 Edg/120.0.0.0{% else %}Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36{% endif %}"
+                Cookie: "{% if steps.set_extension_context.output.process_name == 'chrome.exe' %}CONSENT=YES+cb.20210328-17-p0.en+FX+667{% endif %}"
+            on-failure:
+              continue: true
+
+          - name: do_fetch_edge_fallback
+            type: http
+            if: "${{ steps.set_extension_context.output.process_name == 'chrome.exe' }}"
+            with:
+              url: "{{ steps.set_extension_context.output.edge_store_url }}"
+              method: GET
+              headers:
+                Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+                Accept-Language: "en-US,en;q=0.9"
+                User-Agent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36 Edg/120.0.0.0"
+            on-failure:
+              continue: true
+
+          - name: resolve_listing_response
+            type: data.set
+            with:
+              fetch_failed: "{% assign failed = 'true' %}{% assign primary_body = '' %}{% if steps.fetch_store_listing.output.data %}{% assign primary_body = steps.fetch_store_listing.output.data %}{% endif %}{% assign edge_body = '' %}{% if steps.set_extension_context.output.process_name == 'chrome.exe' and steps.do_fetch_edge_fallback.output.data %}{% assign edge_body = steps.do_fetch_edge_fallback.output.data %}{% elsif steps.set_extension_context.output.process_name == 'msedge.exe' %}{% assign edge_body = primary_body %}{% endif %}{% assign chrome_ok = 'false' %}{% if steps.set_extension_context.output.process_name == 'chrome.exe' and primary_body != '' %}{% if primary_body contains steps.set_extension_context.output.extension_id or primary_body contains 'ratingValue' or primary_body contains 'Average rating ' or primary_body contains ' out of 5' or primary_body contains ' ratings</' or primary_body contains ' users</' or primary_body contains 'class=\"CiI2if\">' or primary_body contains 'data-item-id=\"' %}{% assign chrome_ok = 'true' %}{% else %}{% assign chrome_title = '' %}{% if primary_body contains '<title>' %}{% assign chrome_title_parts = primary_body | split: '<title>' %}{% if chrome_title_parts.size > 1 %}{% assign chrome_title = chrome_title_parts[1] | split: '</title>' | first | replace: ' - Microsoft Edge Add-ons', '' | replace: ' - Chrome Web Store', '' | strip %}{% endif %}{% endif %}{% if chrome_title != '' and chrome_title != 'Microsoft Edge Add-ons' and chrome_title != 'Chrome Web Store' %}{% unless chrome_title contains 'Search Results' %}{% assign chrome_ok = 'true' %}{% endunless %}{% endif %}{% endif %}{% endif %}{% assign edge_ok = 'false' %}{% if edge_body != '' %}{% if edge_body contains 'ratingValue' or edge_body contains 'Average rating ' or edge_body contains ' out of 5' or edge_body contains ' ratings</' or edge_body contains ' users</' %}{% assign edge_ok = 'true' %}{% else %}{% assign edge_title = '' %}{% if edge_body contains '<title>' %}{% assign edge_title_parts = edge_body | split: '<title>' %}{% if edge_title_parts.size > 1 %}{% assign edge_title = edge_title_parts[1] | split: '</title>' | first | replace: ' - Microsoft Edge Add-ons', '' | replace: ' - Chrome Web Store', '' | strip %}{% endif %}{% endif %}{% if edge_title != '' and edge_title != 'Microsoft Edge Add-ons' and edge_title != 'Chrome Web Store' %}{% unless edge_title contains 'Search Results' %}{% assign edge_ok = 'true' %}{% endunless %}{% endif %}{% endif %}{% endif %}{% if steps.fetch_store_listing.error == nil and steps.fetch_store_listing.output.status == 200 and primary_body != '' %}{% assign failed = 'false' %}{% elsif steps.set_extension_context.output.process_name == 'msedge.exe' and edge_ok == 'true' %}{% assign failed = 'false' %}{% elsif steps.set_extension_context.output.process_name == 'chrome.exe' and chrome_ok == 'true' %}{% assign failed = 'false' %}{% elsif steps.set_extension_context.output.process_name == 'chrome.exe' and edge_ok == 'true' %}{% assign failed = 'false' %}{% elsif steps.set_extension_context.output.process_name == 'chrome.exe' and primary_body != '' %}{% assign failed = 'false' %}{% endif %}{{ failed }}"
+              fetch_source: "{% assign source = 'none' %}{% assign primary_body = '' %}{% if steps.fetch_store_listing.output.data %}{% assign primary_body = steps.fetch_store_listing.output.data %}{% endif %}{% assign edge_body = '' %}{% if steps.set_extension_context.output.process_name == 'chrome.exe' and steps.do_fetch_edge_fallback.output.data %}{% assign edge_body = steps.do_fetch_edge_fallback.output.data %}{% elsif steps.set_extension_context.output.process_name == 'msedge.exe' %}{% assign edge_body = primary_body %}{% endif %}{% assign chrome_ok = 'false' %}{% if steps.set_extension_context.output.process_name == 'chrome.exe' and primary_body != '' %}{% if primary_body contains steps.set_extension_context.output.extension_id or primary_body contains 'ratingValue' or primary_body contains 'Average rating ' or primary_body contains ' out of 5' or primary_body contains ' ratings</' or primary_body contains ' users</' or primary_body contains 'class=\"CiI2if\">' or primary_body contains 'data-item-id=\"' %}{% assign chrome_ok = 'true' %}{% else %}{% assign chrome_title = '' %}{% if primary_body contains '<title>' %}{% assign chrome_title_parts = primary_body | split: '<title>' %}{% if chrome_title_parts.size > 1 %}{% assign chrome_title = chrome_title_parts[1] | split: '</title>' | first | replace: ' - Microsoft Edge Add-ons', '' | replace: ' - Chrome Web Store', '' | strip %}{% endif %}{% endif %}{% if chrome_title != '' and chrome_title != 'Microsoft Edge Add-ons' and chrome_title != 'Chrome Web Store' %}{% unless chrome_title contains 'Search Results' %}{% assign chrome_ok = 'true' %}{% endunless %}{% endif %}{% endif %}{% endif %}{% assign edge_ok = 'false' %}{% if edge_body != '' %}{% if edge_body contains 'ratingValue' or edge_body contains 'Average rating ' or edge_body contains ' out of 5' or edge_body contains ' ratings</' or edge_body contains ' users</' %}{% assign edge_ok = 'true' %}{% else %}{% assign edge_title = '' %}{% if edge_body contains '<title>' %}{% assign edge_title_parts = edge_body | split: '<title>' %}{% if edge_title_parts.size > 1 %}{% assign edge_title = edge_title_parts[1] | split: '</title>' | first | replace: ' - Microsoft Edge Add-ons', '' | replace: ' - Chrome Web Store', '' | strip %}{% endif %}{% endif %}{% if edge_title != '' and edge_title != 'Microsoft Edge Add-ons' and edge_title != 'Chrome Web Store' %}{% unless edge_title contains 'Search Results' %}{% assign edge_ok = 'true' %}{% endunless %}{% endif %}{% endif %}{% endif %}{% if steps.set_extension_context.output.process_name == 'msedge.exe' and edge_ok == 'true' %}{% assign source = 'edge' %}{% elsif steps.set_extension_context.output.process_name == 'chrome.exe' and chrome_ok == 'true' %}{% assign source = 'chrome' %}{% elsif steps.set_extension_context.output.process_name == 'chrome.exe' and edge_ok == 'true' %}{% assign source = 'edge' %}{% elsif steps.fetch_store_listing.error == nil and steps.fetch_store_listing.output.status == 200 and primary_body != '' %}{% assign source = 'chrome' %}{% elsif steps.set_extension_context.output.process_name == 'chrome.exe' and primary_body != '' %}{% assign source = 'chrome' %}{% endif %}{{ source }}"
+
+          - name: resolve_http_status
+            type: data.set
+            with:
+              http_status: "{% if steps.resolve_listing_response.output.fetch_source == 'chrome' %}{% if steps.fetch_store_listing.error %}0{% else %}{{ steps.fetch_store_listing.output.status }}{% endif %}{% elsif steps.resolve_listing_response.output.fetch_source == 'edge' and steps.set_extension_context.output.process_name == 'chrome.exe' %}{% if steps.do_fetch_edge_fallback.error %}0{% else %}{{ steps.do_fetch_edge_fallback.output.status }}{% endif %}{% elsif steps.resolve_listing_response.output.fetch_source == 'edge' %}{% if steps.fetch_store_listing.error %}0{% else %}{{ steps.fetch_store_listing.output.status }}{% endif %}{% else %}0{% endif %}"
+
+          - name: parse_store_listing
+            type: data.set
+            with:
+              http_status: "{{ steps.resolve_http_status.output.http_status }}"
+              listing_found: "{% assign found = 'false' %}{% assign body = '' %}{% if steps.resolve_listing_response.output.fetch_failed != 'true' %}{% if steps.resolve_listing_response.output.fetch_source == 'chrome' and steps.fetch_store_listing.output.data %}{% assign body = steps.fetch_store_listing.output.data %}{% elsif steps.resolve_listing_response.output.fetch_source == 'edge' and steps.set_extension_context.output.process_name == 'chrome.exe' and steps.do_fetch_edge_fallback.output.data %}{% assign body = steps.do_fetch_edge_fallback.output.data %}{% elsif steps.resolve_listing_response.output.fetch_source == 'edge' and steps.fetch_store_listing.output.data %}{% assign body = steps.fetch_store_listing.output.data %}{% endif %}{% if body contains 'WebApplication' or body contains 'SoftwareApplication' or body contains 'ratingValue' or body contains 'aggregateRating' or body contains 'AggregateRating' or body contains 'Average rating ' or body contains ' out of 5' or body contains ' ratings</' or body contains ' users</' or body contains 'class=\"CiI2if\">' or body contains 'data-item-id=\"' or body contains steps.set_extension_context.output.extension_id %}{% assign found = 'true' %}{% elsif body contains '<title>' %}{% assign title_parts = body | split: '<title>' %}{% if title_parts.size > 1 %}{% assign page_title = title_parts[1] | split: '</title>' | first | strip %}{% unless page_title contains 'Search Results' or page_title == 'Chrome Web Store' or page_title == 'Microsoft Edge Add-ons' %}{% assign found = 'true' %}{% endunless %}{% endif %}{% endif %}{% endif %}{{ found }}"
+              extension_name: "{% assign ext_name = '' %}{% assign body = '' %}{% if steps.resolve_listing_response.output.fetch_failed != 'true' %}{% if steps.resolve_listing_response.output.fetch_source == 'chrome' and steps.fetch_store_listing.output.data %}{% assign body = steps.fetch_store_listing.output.data %}{% elsif steps.resolve_listing_response.output.fetch_source == 'edge' and steps.set_extension_context.output.process_name == 'chrome.exe' and steps.do_fetch_edge_fallback.output.data %}{% assign body = steps.do_fetch_edge_fallback.output.data %}{% elsif steps.resolve_listing_response.output.fetch_source == 'edge' and steps.fetch_store_listing.output.data %}{% assign body = steps.fetch_store_listing.output.data %}{% endif %}{% if body contains 'class=\"CiI2if\">' %}{% assign h2_parts = body | split: 'class=\"CiI2if\">' %}{% if h2_parts.size > 1 %}{% assign ext_name = h2_parts[1] | split: '</h2>' | first | strip %}{% endif %}{% endif %}{% if ext_name == '' and body contains '<title>' %}{% assign title_parts = body | split: '<title>' %}{% if title_parts.size > 1 %}{% assign ext_name = title_parts[1] | split: '</title>' | first | replace: ' - Microsoft Edge Add-ons', '' | replace: ' - Chrome Web Store', '' | strip %}{% endif %}{% endif %}{% if ext_name == '' and body contains '\"name\"' %}{% assign name_parts = body | split: '\"name\"' %}{% if name_parts.size > 1 %}{% assign ext_name = name_parts[1] | split: ',' | first | replace: ':', '' | replace: '\"', '' | strip %}{% endif %}{% endif %}{% if ext_name == 'Microsoft Edge Add-ons' or ext_name == 'Chrome Web Store' or ext_name == 'Search results' or ext_name contains 'Search Results' %}{% assign ext_name = '' %}{% endif %}{% endif %}{{ ext_name }}"
+              rating_value: "{% assign rating_value = '' %}{% assign body = '' %}{% if steps.resolve_listing_response.output.fetch_failed != 'true' %}{% if steps.resolve_listing_response.output.fetch_source == 'chrome' and steps.fetch_store_listing.output.data %}{% assign body = steps.fetch_store_listing.output.data %}{% elsif steps.resolve_listing_response.output.fetch_source == 'edge' and steps.set_extension_context.output.process_name == 'chrome.exe' and steps.do_fetch_edge_fallback.output.data %}{% assign body = steps.do_fetch_edge_fallback.output.data %}{% elsif steps.resolve_listing_response.output.fetch_source == 'edge' and steps.fetch_store_listing.output.data %}{% assign body = steps.fetch_store_listing.output.data %}{% endif %}{% if body contains 'ratingValue' %}{% assign rv_meta = body | split: 'ratingValue' %}{% if rv_meta.size > 1 %}{% assign cparts = rv_meta[1] | split: 'content=' %}{% if cparts.size > 1 %}{% assign qparts = cparts[1] | split: '\"' %}{% if qparts.size > 1 %}{% assign rating_value = qparts[1] | strip %}{% endif %}{% endif %}{% endif %}{% endif %}{% if rating_value == '' and body contains 'Average rating ' %}{% assign rv_parts = body | split: 'Average rating ' %}{% if rv_parts.size > 1 %}{% assign rating_value = rv_parts[1] | split: ' out of' | first | strip %}{% endif %}{% endif %}{% if rating_value == '' and body contains ' out of 5' %}{% assign rv_parts = body | split: ' out of 5' %}{% if rv_parts.size > 1 %}{% assign rating_value = rv_parts[0] | split: '>' | last | strip %}{% endif %}{% endif %}{% endif %}{{ rating_value }}"
+              rating_count: "{% assign rating_count = '' %}{% assign body = '' %}{% if steps.resolve_listing_response.output.fetch_failed != 'true' %}{% if steps.resolve_listing_response.output.fetch_source == 'chrome' and steps.fetch_store_listing.output.data %}{% assign body = steps.fetch_store_listing.output.data %}{% elsif steps.resolve_listing_response.output.fetch_source == 'edge' and steps.set_extension_context.output.process_name == 'chrome.exe' and steps.do_fetch_edge_fallback.output.data %}{% assign body = steps.do_fetch_edge_fallback.output.data %}{% elsif steps.resolve_listing_response.output.fetch_source == 'edge' and steps.fetch_store_listing.output.data %}{% assign body = steps.fetch_store_listing.output.data %}{% endif %}{% if body contains 'ratingCount' %}{% assign rc_meta = body | split: 'ratingCount' %}{% if rc_meta.size > 1 %}{% assign cparts = rc_meta[1] | split: 'content=' %}{% if cparts.size > 1 %}{% assign qparts = cparts[1] | split: '\"' %}{% if qparts.size > 1 %}{% assign rating_count = qparts[1] | strip %}{% endif %}{% endif %}{% endif %}{% endif %}{% if rating_count == '' and body contains ' ratings</' %}{% assign rc_raw = body | split: ' ratings</' | first | split: '>' | last | strip %}{% if rc_raw contains 'M' or rc_raw contains 'm' %}{% assign rc_base = rc_raw | replace: 'M', '' | replace: 'm', '' | strip %}{% assign rating_count = rc_base | times: 1000000 %}{% elsif rc_raw contains 'K' or rc_raw contains 'k' %}{% assign rc_base = rc_raw | replace: 'K', '' | replace: 'k', '' | strip %}{% assign rating_count = rc_base | times: 1000 %}{% else %}{% assign rating_count = rc_raw | replace: ',', '' | replace: '+', '' | strip %}{% endif %}{% endif %}{% if rating_count == '' and body contains 'class=\"CiI2if\">' %}{% assign ext_name_tmp = body | split: 'class=\"CiI2if\">' | last | split: '</h2>' | first | strip %}{% assign name_key = ext_name_tmp | append: '\"' | append: ',' %}{% if body contains name_key %}{% assign rc_parts = body | split: name_key %}{% if rc_parts.size > 1 %}{% assign rc_tail = rc_parts[1] | split: ',' %}{% if rc_tail.size > 1 %}{% assign rating_count = rc_tail[1] | split: '\"' | first | strip %}{% endif %}{% endif %}{% endif %}{% endif %}{% endif %}{{ rating_count }}"
+              user_count: "{% assign user_count = '' %}{% assign body = '' %}{% if steps.resolve_listing_response.output.fetch_failed != 'true' %}{% if steps.resolve_listing_response.output.fetch_source == 'chrome' and steps.fetch_store_listing.output.data %}{% assign body = steps.fetch_store_listing.output.data %}{% elsif steps.resolve_listing_response.output.fetch_source == 'edge' and steps.set_extension_context.output.process_name == 'chrome.exe' and steps.do_fetch_edge_fallback.output.data %}{% assign body = steps.do_fetch_edge_fallback.output.data %}{% elsif steps.resolve_listing_response.output.fetch_source == 'edge' and steps.fetch_store_listing.output.data %}{% assign body = steps.fetch_store_listing.output.data %}{% endif %}{% if body contains 'userInteractionCount' %}{% assign uc_meta = body | split: 'userInteractionCount' %}{% if uc_meta.size > 1 %}{% assign cparts = uc_meta[1] | split: 'content=' %}{% if cparts.size > 1 %}{% assign qparts = cparts[1] | split: '\"' %}{% if qparts.size > 1 %}{% assign user_count = qparts[1] | strip %}{% endif %}{% endif %}{% endif %}{% endif %}{% if user_count == '' and body contains ' users</' %}{% assign user_count = body | split: ' users</' | first | split: '>' | last | strip | replace: ',', '' | replace: '+', '' %}{% endif %}{% if user_count == '' and body contains ' weekly active users' %}{% assign user_count = body | split: ' weekly active users' | first | split: '>' | last | strip | replace: ',', '' | replace: '+', '' %}{% endif %}{% assign ext_key = steps.set_extension_context.output.extension_id | append: '\",' %}{% if user_count == '' and body contains ext_key %}{% assign af_tail = body | split: ext_key | last %}{% if af_tail contains ',1,1,' %}{% assign uc_parts = af_tail | split: ',1,1,' %}{% if uc_parts.size > 1 %}{% assign user_count = uc_parts[1] | split: ',' | first | strip | replace: '+', '' %}{% endif %}{% endif %}{% endif %}{% if user_count == '' and body contains '],1,null,' %}{% assign uc_parts = body | split: '],1,null,' %}{% if uc_parts.size > 1 %}{% assign user_count = uc_parts[1] | split: ',' | first | strip | replace: '+', '' %}{% endif %}{% endif %}{% endif %}{{ user_count }}"
+              published_epoch: "{% assign published_epoch = '' %}{% assign body = '' %}{% if steps.resolve_listing_response.output.fetch_failed != 'true' %}{% if steps.resolve_listing_response.output.fetch_source == 'chrome' and steps.fetch_store_listing.output.data %}{% assign body = steps.fetch_store_listing.output.data %}{% elsif steps.resolve_listing_response.output.fetch_source == 'edge' and steps.set_extension_context.output.process_name == 'chrome.exe' and steps.do_fetch_edge_fallback.output.data %}{% assign body = steps.do_fetch_edge_fallback.output.data %}{% elsif steps.resolve_listing_response.output.fetch_source == 'edge' and steps.fetch_store_listing.output.data %}{% assign body = steps.fetch_store_listing.output.data %}{% endif %}{% assign ext_key = steps.set_extension_context.output.extension_id | append: '\",' %}{% if body contains ext_key %}{% assign af_tail = body | split: ext_key | last %}{% assign pub_tail = '' %}{% if af_tail contains ',1,1,' %}{% assign pub_tail = af_tail | split: ',1,1,' | last %}{% elsif af_tail contains ',1,\"https' %}{% assign pub_tail = af_tail | split: ',1,\"https' | last %}{% endif %}{% if pub_tail != '' and pub_tail contains ',[' %}{% assign pub_parts = pub_tail | split: ',[' %}{% if pub_parts.size > 1 %}{% assign pub_candidate = pub_parts[1] | split: ']' | first | split: ',' | first | strip %}{% assign pub_num = pub_candidate | plus: 0 %}{% if pub_num > 1000000000 %}{% assign published_epoch = pub_candidate %}{% endif %}{% endif %}{% endif %}{% endif %}{% endif %}{{ published_epoch }}"
+              published_days: "{% assign published_days = '' %}{% assign body = '' %}{% if steps.resolve_listing_response.output.fetch_failed != 'true' %}{% if steps.resolve_listing_response.output.fetch_source == 'chrome' and steps.fetch_store_listing.output.data %}{% assign body = steps.fetch_store_listing.output.data %}{% elsif steps.resolve_listing_response.output.fetch_source == 'edge' and steps.set_extension_context.output.process_name == 'chrome.exe' and steps.do_fetch_edge_fallback.output.data %}{% assign body = steps.do_fetch_edge_fallback.output.data %}{% elsif steps.resolve_listing_response.output.fetch_source == 'edge' and steps.fetch_store_listing.output.data %}{% assign body = steps.fetch_store_listing.output.data %}{% endif %}{% assign published_epoch = '' %}{% assign ext_key = steps.set_extension_context.output.extension_id | append: '\",' %}{% if body contains ext_key %}{% assign af_tail = body | split: ext_key | last %}{% assign pub_tail = '' %}{% if af_tail contains ',1,1,' %}{% assign pub_tail = af_tail | split: ',1,1,' | last %}{% elsif af_tail contains ',1,\"https' %}{% assign pub_tail = af_tail | split: ',1,\"https' | last %}{% endif %}{% if pub_tail != '' and pub_tail contains ',[' %}{% assign pub_parts = pub_tail | split: ',[' %}{% if pub_parts.size > 1 %}{% assign pub_candidate = pub_parts[1] | split: ']' | first | split: ',' | first | strip %}{% assign pub_num = pub_candidate | plus: 0 %}{% if pub_num > 1000000000 %}{% assign published_epoch = pub_candidate %}{% endif %}{% endif %}{% endif %}{% endif %}{% if published_epoch != '' %}{% assign now_sec = 'now' | date: '%s' | plus: 0 %}{% assign published_sec = published_epoch | plus: 0 %}{% assign age_sec = now_sec | minus: published_sec %}{% if age_sec >= 0 %}{% assign published_days = age_sec | divided_by: 86400 %}{% endif %}{% endif %}{% endif %}{{ published_days }}"
+
+          - name: fetch_chrome_detail_for_email
+            type: if
+            condition: 'not steps.resolve_listing_response.output.fetch_failed: "true" and steps.parse_store_listing.output.listing_found: "true"'
+            steps:
+              - name: do_fetch_chrome_detail
+                type: http
+                with:
+                  url: "{{ steps.set_extension_context.output.chrome_store_url }}"
+                  method: GET
+                  headers:
+                    Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+                    Accept-Language: "en-US,en;q=0.9"
+                    User-Agent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+                    Cookie: "CONSENT=YES+cb.20210328-17-p0.en+FX+667"
+                on-failure:
+                  continue: true
+
+          - name: parse_developer_info
+            type: data.set
+            with:
+              developer_email: "{% assign developer_email = '' %}{% assign body = '' %}{% if steps.do_fetch_chrome_detail.output.data %}{% assign body = steps.do_fetch_chrome_detail.output.data %}{% endif %}{% if body contains 'class=\"NnJuub\">' %}{% assign developer_email = body | split: 'class=\"NnJuub\">' | last | split: '</div>' | first | strip %}{% endif %}{% unless developer_email contains '@' %}{% assign developer_email = '' %}{% endunless %}{{ developer_email }}"
+              developer_domain: "{% assign developer_domain = '' %}{% assign developer_email = '' %}{% assign body = '' %}{% if steps.do_fetch_chrome_detail.output.data %}{% assign body = steps.do_fetch_chrome_detail.output.data %}{% endif %}{% if body contains 'class=\"NnJuub\">' %}{% assign developer_email = body | split: 'class=\"NnJuub\">' | last | split: '</div>' | first | strip %}{% endif %}{% if developer_email contains '@' %}{% assign developer_domain = developer_email | split: '@' | last | downcase | strip %}{% endif %}{{ developer_domain }}"
+              free_email_provider: "{% assign free_email = 'false' %}{% assign developer_domain = '' %}{% assign developer_email = '' %}{% assign body = '' %}{% if steps.do_fetch_chrome_detail.output.data %}{% assign body = steps.do_fetch_chrome_detail.output.data %}{% endif %}{% if body contains 'class=\"NnJuub\">' %}{% assign developer_email = body | split: 'class=\"NnJuub\">' | last | split: '</div>' | first | strip %}{% endif %}{% if developer_email contains '@' %}{% assign developer_domain = developer_email | split: '@' | last | downcase | strip %}{% endif %}{% if developer_domain != '' %}{% assign free_blob = ',' | append: consts.free_email_domains | append: ',' %}{% assign free_check = ',' | append: developer_domain | append: ',' %}{% if free_blob contains free_check %}{% assign free_email = 'true' %}{% endif %}{% endif %}{{ free_email }}"
+
+          - name: when_custom_developer_domain
+            type: if
+            condition: 'steps.parse_developer_info.output.developer_domain: * and steps.parse_developer_info.output.free_email_provider: "false"'
+            steps:
+              - name: fetch_domain_rdap
+                type: http
+                with:
+                  url: "{{ consts.rdap_base_url }}/{{ steps.parse_developer_info.output.developer_domain }}"
+                  method: GET
+                  headers:
+                    Accept: "application/rdap+json, application/json"
+                on-failure:
+                  continue: true
+
+          - name: parse_domain_age
+            type: data.set
+            with:
+              domain_registration_date: "{% assign reg_date = '' %}{% if steps.parse_developer_info.output.free_email_provider == 'true' or steps.parse_developer_info.output.developer_domain == '' %}{% else %}{% assign rdap_raw = steps.fetch_domain_rdap.output.data | json %}{% if rdap_raw contains 'registration' and rdap_raw contains 'eventDate' %}{% assign reg_parts = rdap_raw | split: '\"eventAction\":\"registration\"' %}{% if reg_parts.size > 1 %}{% assign date_parts = reg_parts[1] | split: '\"eventDate\":\"' %}{% if date_parts.size > 1 %}{% assign reg_date = date_parts[1] | split: '\"' | first | strip %}{% endif %}{% endif %}{% endif %}{% endif %}{{ reg_date }}"
+              domain_age_days: "{% assign domain_age_days = '' %}{% assign reg_date = '' %}{% if steps.parse_developer_info.output.free_email_provider == 'true' or steps.parse_developer_info.output.developer_domain == '' %}{% else %}{% assign rdap_raw = steps.fetch_domain_rdap.output.data | json %}{% if rdap_raw contains 'registration' and rdap_raw contains 'eventDate' %}{% assign reg_parts = rdap_raw | split: '\"eventAction\":\"registration\"' %}{% if reg_parts.size > 1 %}{% assign date_parts = reg_parts[1] | split: '\"eventDate\":\"' %}{% if date_parts.size > 1 %}{% assign reg_date = date_parts[1] | split: '\"' | first | strip %}{% endif %}{% endif %}{% endif %}{% endif %}{% if reg_date != '' %}{% assign now_sec = 'now' | date: '%s' | plus: 0 %}{% assign reg_sec = reg_date | date: '%s' | plus: 0 %}{% assign age_sec = now_sec | minus: reg_sec %}{% if age_sec >= 0 %}{% assign domain_age_days = age_sec | divided_by: 86400 %}{% endif %}{% endif %}{{ domain_age_days }}"
+              rdap_lookup_status: "{% assign reg_date = '' %}{% if steps.parse_developer_info.output.developer_domain == '' %}skipped-no-domain{% elsif steps.parse_developer_info.output.free_email_provider == 'true' %}skipped-free-email{% elsif steps.fetch_domain_rdap.error %}failed{% else %}{% assign rdap_raw = steps.fetch_domain_rdap.output.data | json %}{% if rdap_raw contains 'registration' and rdap_raw contains 'eventDate' %}{% assign reg_parts = rdap_raw | split: '\"eventAction\":\"registration\"' %}{% if reg_parts.size > 1 %}{% assign date_parts = reg_parts[1] | split: '\"eventDate\":\"' %}{% if date_parts.size > 1 %}{% assign reg_date = date_parts[1] | split: '\"' | first | strip %}{% endif %}{% endif %}{% endif %}{% if reg_date != '' %}success{% else %}no-registration-date{% endif %}{% endif %}"
+
+          - name: assess_developer_reputation
+            type: data.set
+            with:
+              developer_suspicious: "{% assign developer_suspicious = 'false' %}{% if steps.parse_developer_info.output.free_email_provider == 'true' %}{% assign developer_suspicious = 'true' %}{% endif %}{% assign domain_age_days = steps.parse_domain_age.output.domain_age_days %}{% if domain_age_days != '' %}{% assign domain_age_num = domain_age_days | plus: 0 %}{% assign domain_max_age = consts.suspicious_domain_max_age_days | plus: 0 %}{% if domain_age_num <= domain_max_age %}{% assign developer_suspicious = 'true' %}{% endif %}{% endif %}{{ developer_suspicious }}"
+              developer_reasons: "{% assign developer_reasons = '' %}{% if steps.parse_developer_info.output.free_email_provider == 'true' %}{% assign developer_reasons = 'developer uses free email provider (' | append: steps.parse_developer_info.output.developer_email | append: ')' %}{% endif %}{% assign domain_age_days = steps.parse_domain_age.output.domain_age_days %}{% if domain_age_days != '' %}{% assign domain_age_num = domain_age_days | plus: 0 %}{% assign domain_max_age = consts.suspicious_domain_max_age_days | plus: 0 %}{% if domain_age_num <= domain_max_age %}{% if developer_reasons != '' %}{% assign developer_reasons = developer_reasons | append: '; ' %}{% endif %}{% assign developer_reasons = developer_reasons | append: 'developer domain ' | append: steps.parse_developer_info.output.developer_domain | append: ' registered ' | append: domain_age_days | append: ' days ago' %}{% endif %}{% endif %}{{ developer_reasons }}"
+
+          - name: assess_reputation
+            type: data.set
+            with:
+              verdict: "{% assign verdict = 'BENIGN' %}{% assign reasons = '' %}{% assign established = 'false' %}{% if steps.resolve_listing_response.output.fetch_failed == 'true' %}{% assign verdict = 'INCONCLUSIVE' %}{% if steps.set_extension_context.output.process_name == 'chrome.exe' %}{% assign reasons = 'Chrome Web Store fetch failed and extension not cross-listed on Edge Add-ons' %}{% else %}{% assign reasons = 'Edge Add-ons fetch failed or returned no listing' %}{% endif %}{% else %}{% assign body = '' %}{% if steps.resolve_listing_response.output.fetch_source == 'chrome' and steps.fetch_store_listing.output.data %}{% assign body = steps.fetch_store_listing.output.data %}{% elsif steps.resolve_listing_response.output.fetch_source == 'edge' and steps.set_extension_context.output.process_name == 'chrome.exe' and steps.do_fetch_edge_fallback.output.data %}{% assign body = steps.do_fetch_edge_fallback.output.data %}{% elsif steps.resolve_listing_response.output.fetch_source == 'edge' and steps.fetch_store_listing.output.data %}{% assign body = steps.fetch_store_listing.output.data %}{% endif %}{% if steps.resolve_http_status.output.http_status == 404 or body contains 'Item not found' or body contains 'item-not-found' or body contains 'was not found' or body contains 'cannot be found' %}{% assign verdict = 'SUSPICIOUS' %}{% assign reasons = 'not found in store' %}{% elsif steps.parse_store_listing.output.listing_found != 'true' %}{% assign verdict = 'SUSPICIOUS' %}{% if steps.set_extension_context.output.process_name == 'chrome.exe' and body contains 'Search Results' %}{% assign reasons = 'not found in store' %}{% else %}{% assign reasons = 'no store listing metadata' %}{% endif %}{% else %}{% assign rating_value = steps.parse_store_listing.output.rating_value %}{% assign rating_count = steps.parse_store_listing.output.rating_count %}{% assign user_count = steps.parse_store_listing.output.user_count %}{% assign min_rating = consts.min_rating | plus: 0 %}{% assign min_rating_count = consts.min_rating_count | plus: 0 %}{% assign min_user_count = consts.min_user_count | plus: 0 %}{% assign suspicious_user_count = consts.suspicious_user_count | plus: 0 %}{% assign user_count_num = 0 %}{% if user_count != '' %}{% assign user_count_num = user_count | plus: 0 %}{% endif %}{% if rating_count != '' %}{% assign rating_count_num = rating_count | plus: 0 %}{% if rating_count_num >= min_rating_count %}{% assign established = 'true' %}{% endif %}{% endif %}{% if user_count != '' %}{% if user_count_num >= min_user_count %}{% assign established = 'true' %}{% endif %}{% endif %}{% if user_count != '' and user_count_num <= suspicious_user_count %}{% assign verdict = 'SUSPICIOUS' %}{% assign reasons = 'few users (' | append: user_count | append: ')' %}{% endif %}{% if rating_value != '' %}{% assign rating_num = rating_value | plus: 0 %}{% if rating_num < min_rating %}{% if user_count != '' and user_count_num <= suspicious_user_count %}{% assign verdict = 'SUSPICIOUS' %}{% if reasons != '' %}{% assign reasons = reasons | append: '; ' %}{% endif %}{% assign reasons = reasons | append: 'low rating (' | append: rating_value | append: ')' %}{% endif %}{% endif %}{% endif %}{% if established != 'true' and user_count == '' and rating_count == '' %}{% assign verdict = 'SUSPICIOUS' %}{% if reasons != '' %}{% assign reasons = reasons | append: '; ' %}{% endif %}{% assign reasons = reasons | append: 'no rating or user metadata parsed' %}{% endif %}{% assign published_days = steps.parse_store_listing.output.published_days %}{% if published_days != '' %}{% assign fresh_threshold = consts.fresh_publish_days | plus: 0 %}{% assign published_days_num = published_days | plus: 0 %}{% if published_days_num <= fresh_threshold %}{% assign verdict = 'SUSPICIOUS' %}{% if reasons != '' %}{% assign reasons = reasons | append: '; ' %}{% endif %}{% assign reasons = reasons | append: 'recently published (' | append: published_days | append: ' days ago)' %}{% endif %}{% endif %}{% assign anomaly_age = consts.publish_popularity_anomaly_days | plus: 0 %}{% assign anomaly_users = consts.anomaly_min_user_count | plus: 0 %}{% assign anomaly_ratings = consts.anomaly_min_rating_count | plus: 0 %}{% if published_days != '' and user_count != '' and rating_count != '' %}{% assign published_days_num = published_days | plus: 0 %}{% assign user_count_num = user_count | plus: 0 %}{% assign rating_count_num = rating_count | plus: 0 %}{% if published_days_num <= anomaly_age and user_count_num >= anomaly_users and rating_count_num >= anomaly_ratings %}{% assign verdict = 'SUSPICIOUS' %}{% if reasons != '' %}{% assign reasons = reasons | append: '; ' %}{% endif %}{% assign reasons = reasons | append: 'abnormal popularity for listing age (' | append: user_count | append: ' users, ' | append: rating_count | append: ' ratings, published ' | append: published_days | append: ' days ago)' %}{% endif %}{% endif %}{% if steps.assess_developer_reputation.output.developer_suspicious == 'true' %}{% assign verdict = 'SUSPICIOUS' %}{% if reasons != '' %}{% assign reasons = reasons | append: '; ' %}{% endif %}{% assign reasons = reasons | append: steps.assess_developer_reputation.output.developer_reasons %}{% endif %}{% if verdict == 'BENIGN' and reasons == '' %}{% assign reasons = 'singleton host; established store listing' %}{% endif %}{% endif %}{% endif %}{{ verdict }}"
+              reasons: "{% assign reasons = '' %}{% assign established = 'false' %}{% if steps.resolve_listing_response.output.fetch_failed == 'true' %}{% if steps.set_extension_context.output.process_name == 'chrome.exe' %}{% assign reasons = 'Chrome Web Store fetch failed and extension not cross-listed on Edge Add-ons' %}{% else %}{% assign reasons = 'Edge Add-ons fetch failed or returned no listing' %}{% endif %}{% else %}{% assign body = '' %}{% if steps.resolve_listing_response.output.fetch_source == 'chrome' and steps.fetch_store_listing.output.data %}{% assign body = steps.fetch_store_listing.output.data %}{% elsif steps.resolve_listing_response.output.fetch_source == 'edge' and steps.set_extension_context.output.process_name == 'chrome.exe' and steps.do_fetch_edge_fallback.output.data %}{% assign body = steps.do_fetch_edge_fallback.output.data %}{% elsif steps.resolve_listing_response.output.fetch_source == 'edge' and steps.fetch_store_listing.output.data %}{% assign body = steps.fetch_store_listing.output.data %}{% endif %}{% if steps.resolve_http_status.output.http_status == 404 or body contains 'Item not found' or body contains 'item-not-found' or body contains 'was not found' or body contains 'cannot be found' %}{% assign reasons = 'not found in store' %}{% elsif steps.parse_store_listing.output.listing_found != 'true' %}{% if steps.set_extension_context.output.process_name == 'chrome.exe' and body contains 'Search Results' %}{% assign reasons = 'not found in store' %}{% else %}{% assign reasons = 'no store listing metadata' %}{% endif %}{% else %}{% assign rating_value = steps.parse_store_listing.output.rating_value %}{% assign rating_count = steps.parse_store_listing.output.rating_count %}{% assign user_count = steps.parse_store_listing.output.user_count %}{% assign min_rating = consts.min_rating | plus: 0 %}{% assign min_rating_count = consts.min_rating_count | plus: 0 %}{% assign min_user_count = consts.min_user_count | plus: 0 %}{% assign suspicious_user_count = consts.suspicious_user_count | plus: 0 %}{% assign user_count_num = 0 %}{% if user_count != '' %}{% assign user_count_num = user_count | plus: 0 %}{% endif %}{% if rating_count != '' %}{% assign rating_count_num = rating_count | plus: 0 %}{% if rating_count_num >= min_rating_count %}{% assign established = 'true' %}{% endif %}{% endif %}{% if user_count != '' %}{% if user_count_num >= min_user_count %}{% assign established = 'true' %}{% endif %}{% endif %}{% if user_count != '' and user_count_num <= suspicious_user_count %}{% assign reasons = 'few users (' | append: user_count | append: ')' %}{% endif %}{% if rating_value != '' %}{% assign rating_num = rating_value | plus: 0 %}{% if rating_num < min_rating %}{% if user_count != '' and user_count_num <= suspicious_user_count %}{% if reasons != '' %}{% assign reasons = reasons | append: '; ' %}{% endif %}{% assign reasons = reasons | append: 'low rating (' | append: rating_value | append: ')' %}{% endif %}{% endif %}{% endif %}{% if established != 'true' and user_count == '' and rating_count == '' %}{% if reasons != '' %}{% assign reasons = reasons | append: '; ' %}{% endif %}{% assign reasons = reasons | append: 'no rating or user metadata parsed' %}{% endif %}{% assign published_days = steps.parse_store_listing.output.published_days %}{% if published_days != '' %}{% assign fresh_threshold = consts.fresh_publish_days | plus: 0 %}{% assign published_days_num = published_days | plus: 0 %}{% if published_days_num <= fresh_threshold %}{% if reasons != '' %}{% assign reasons = reasons | append: '; ' %}{% endif %}{% assign reasons = reasons | append: 'recently published (' | append: published_days | append: ' days ago)' %}{% endif %}{% endif %}{% assign anomaly_age = consts.publish_popularity_anomaly_days | plus: 0 %}{% assign anomaly_users = consts.anomaly_min_user_count | plus: 0 %}{% assign anomaly_ratings = consts.anomaly_min_rating_count | plus: 0 %}{% if published_days != '' and user_count != '' and rating_count != '' %}{% assign published_days_num = published_days | plus: 0 %}{% assign user_count_num = user_count | plus: 0 %}{% assign rating_count_num = rating_count | plus: 0 %}{% if published_days_num <= anomaly_age and user_count_num >= anomaly_users and rating_count_num >= anomaly_ratings %}{% if reasons != '' %}{% assign reasons = reasons | append: '; ' %}{% endif %}{% assign reasons = reasons | append: 'abnormal popularity for listing age (' | append: user_count | append: ' users, ' | append: rating_count | append: ' ratings, published ' | append: published_days | append: ' days ago)' %}{% endif %}{% endif %}{% if steps.assess_developer_reputation.output.developer_suspicious == 'true' %}{% if reasons != '' %}{% assign reasons = reasons | append: '; ' %}{% endif %}{% assign reasons = reasons | append: steps.assess_developer_reputation.output.developer_reasons %}{% endif %}{% if reasons == '' %}{% assign reasons = 'singleton host; established store listing' %}{% else %}{% assign reasons = reasons | append: '; singleton host' %}{% endif %}{% endif %}{% endif %}{{ reasons }}"
+
+          - name: build_summary_line
+            type: data.set
+            with:
+              extension_summary_line: "- [{{ steps.assess_reputation.output.verdict }}] {% if steps.parse_store_listing.output.extension_name != '' %}{{ steps.parse_store_listing.output.extension_name }}{% else %}(unknown){% endif %} ({{ steps.set_extension_context.output.extension_id }}) | {{ steps.set_extension_context.output.process_name }} | rating {% if steps.parse_store_listing.output.rating_value != '' %}{{ steps.parse_store_listing.output.rating_value }}{% else %}n/a{% endif %} | {% if steps.parse_store_listing.output.rating_count != '' %}{{ steps.parse_store_listing.output.rating_count }}{% else %}n/a{% endif %} ratings | {% if steps.parse_store_listing.output.user_count != '' %}{{ steps.parse_store_listing.output.user_count }}{% else %}n/a{% endif %} users{% if steps.parse_store_listing.output.published_days != '' %} | published {{ steps.parse_store_listing.output.published_days }} days ago{% endif %}{% if steps.parse_developer_info.output.developer_email != '' %} | dev {{ steps.parse_developer_info.output.developer_email }}{% endif %}{% if steps.parse_domain_age.output.domain_age_days != '' %} | domain age {{ steps.parse_domain_age.output.domain_age_days }}d{% endif %} | source: {{ steps.resolve_listing_response.output.fetch_source }}"
+
+          - name: update_verdict_counts
+            type: data.set
+            with:
+              suspicious_count: "{% if steps.assess_reputation.output.verdict == 'SUSPICIOUS' %}{{ variables.suspicious_count | plus: 1 }}{% else %}{{ variables.suspicious_count }}{% endif %}"
+              benign_count: "{% if steps.assess_reputation.output.verdict == 'BENIGN' %}{{ variables.benign_count | plus: 1 }}{% else %}{{ variables.benign_count }}{% endif %}"
+              inconclusive_count: "{% if steps.assess_reputation.output.verdict == 'INCONCLUSIVE' %}{{ variables.inconclusive_count | plus: 1 }}{% else %}{{ variables.inconclusive_count }}{% endif %}"
+
+          - name: record_extension_entry
+            type: data.set
+            with:
+              extension_entry:
+                extension_id: "{{ steps.set_extension_context.output.extension_id }}"
+                extension_name: "{{ steps.parse_store_listing.output.extension_name }}"
+                process_name: "{{ steps.set_extension_context.output.process_name }}"
+                sample_file: "{{ steps.set_extension_context.output.sample_file }}"
+                agent_id: "{{ steps.set_extension_context.output.agent_id }}"
+                host_id: "{{ steps.set_extension_context.output.host_id }}"
+                file_path: "{{ steps.set_extension_context.output.file_path }}"
+                store_url: "{{ steps.set_extension_context.output.store_url }}"
+                verdict: "{{ steps.assess_reputation.output.verdict }}"
+                rating_value: "{{ steps.parse_store_listing.output.rating_value }}"
+                rating_count: "{{ steps.parse_store_listing.output.rating_count }}"
+                user_count: "{{ steps.parse_store_listing.output.user_count }}"
+                published_days: "{{ steps.parse_store_listing.output.published_days }}"
+                developer_email: "{{ steps.parse_developer_info.output.developer_email }}"
+                developer_domain: "{{ steps.parse_developer_info.output.developer_domain }}"
+                free_email_provider: "{{ steps.parse_developer_info.output.free_email_provider }}"
+                domain_age_days: "{{ steps.parse_domain_age.output.domain_age_days }}"
+                domain_registration_date: "{{ steps.parse_domain_age.output.domain_registration_date }}"
+                rdap_lookup_status: "{{ steps.parse_domain_age.output.rdap_lookup_status }}"
+                fetch_source: "{{ steps.resolve_listing_response.output.fetch_source }}"
+                reasons: "{{ steps.assess_reputation.output.reasons }}"
+
+          - name: accumulate_extension_result
+            type: data.set
+            with:
+              extension_results: '${{ variables.extension_results | push: variables.extension_entry }}'
+              extension_summary_lines: '${{ variables.extension_summary_lines | push: steps.build_summary_line.output.extension_summary_line }}'
+
+          - name: when_suspicious
+            type: if
+            condition: 'steps.assess_reputation.output.verdict: "SUSPICIOUS"'
+            steps:
+              - name: build_suspicious_log_line
+                type: data.set
+                with:
+                  log_message: |
+                    *** SUSPICIOUS EXTENSION ***
+                    ID: {{ steps.set_extension_context.output.extension_id }}
+                    Name: {% if steps.parse_store_listing.output.extension_name != '' %}{{ steps.parse_store_listing.output.extension_name }}{% else %}(unknown){% endif %}
+                    Process: {{ steps.set_extension_context.output.process_name }}
+                    File: {{ steps.set_extension_context.output.sample_file }}
+                    Hosts: {{ steps.set_extension_context.output.host_count }}
+                    Store: {{ steps.set_extension_context.output.store_url }} (source: {{ steps.resolve_listing_response.output.fetch_source }})
+                    HTTP status: {{ steps.parse_store_listing.output.http_status }}
+                    Rating: {% if steps.parse_store_listing.output.rating_value != '' %}{{ steps.parse_store_listing.output.rating_value }}{% else %}n/a{% endif %} ({{ steps.parse_store_listing.output.rating_count }} ratings, {{ steps.parse_store_listing.output.user_count }} users){% if steps.parse_store_listing.output.published_days != '' %}, published {{ steps.parse_store_listing.output.published_days }} days ago{% endif %}
+                    Developer: {% if steps.parse_developer_info.output.developer_email != '' %}{{ steps.parse_developer_info.output.developer_email }}{% else %}n/a{% endif %}{% if steps.parse_developer_info.output.free_email_provider == 'true' %} (free email){% endif %}{% if steps.parse_domain_age.output.domain_age_days != '' %}, domain {{ steps.parse_developer_info.output.developer_domain }} age {{ steps.parse_domain_age.output.domain_age_days }} days (RDAP: {{ steps.parse_domain_age.output.rdap_lookup_status }}){% endif %}
+                    Host ID: {{ steps.set_extension_context.output.host_id }}
+                    Agent: {{ steps.set_extension_context.output.agent_id }}
+                    Path: {{ steps.set_extension_context.output.file_path }}
+                    Reasons: {{ steps.assess_reputation.output.reasons }}
+
+              - name: log_suspicious
+                type: console
+                with:
+                  message: "{{ steps.build_suspicious_log_line.output.log_message }}"
+
+              - name: accumulate_suspicious_hit
+                type: data.set
+                with:
+                  suspicious_extensions: '${{ variables.suspicious_extensions | push: variables.extension_entry }}'
+                  suspicious_detail_lines: '${{ variables.suspicious_detail_lines | push: steps.build_suspicious_log_line.output.log_message }}'
+            else:
+              - name: when_inconclusive
+                type: if
+                condition: 'steps.assess_reputation.output.verdict: "INCONCLUSIVE"'
+                steps:
+                  - name: log_inconclusive
+                    type: console
+                    with:
+                      message: |
+                        ??? INCONCLUSIVE EXTENSION (manual review) ???
+                        ID: {{ steps.set_extension_context.output.extension_id }}
+                        Process: {{ steps.set_extension_context.output.process_name }}
+                        File: {{ steps.set_extension_context.output.sample_file }}
+                        Hosts: {{ steps.set_extension_context.output.host_count }}
+                        Edge URL: {{ steps.set_extension_context.output.edge_store_url }}
+                        Chrome URL: {{ steps.set_extension_context.output.chrome_store_url }}
+                        Chrome search URL: {{ steps.set_extension_context.output.chrome_search_url }}
+                        Reasons: {{ steps.assess_reputation.output.reasons }}
+                else:
+                  - name: log_benign
+                    type: console
+                    with:
+                      message: "Benign or established extension {{ steps.set_extension_context.output.extension_id }} ({{ steps.set_extension_context.output.process_name }}) — {% if steps.parse_store_listing.output.extension_name != '' %}{{ steps.parse_store_listing.output.extension_name }}, {% endif %}rating {{ steps.parse_store_listing.output.rating_value }}, {{ steps.parse_store_listing.output.rating_count }} ratings, {{ steps.parse_store_listing.output.user_count }} users{% if steps.parse_store_listing.output.published_days != '' %}, published {{ steps.parse_store_listing.output.published_days }} days ago{% endif %}{% if steps.parse_developer_info.output.developer_email != '' %}, dev {{ steps.parse_developer_info.output.developer_email }}{% endif %} (source: {{ steps.resolve_listing_response.output.fetch_source }}). {{ steps.assess_reputation.output.reasons }}"
+
+          - name: rate_limit_pause
+            type: wait
+            with:
+              duration: 2s
+    else:
+      - name: log_no_hits
+        type: console
+        with:
+          message: "No singleton browser extensions found for rule {{ consts.rule_id }} in the last {{ consts.lookback_hours }} hours."
+
+  - name: finalize_run_summary
+    type: data.set
+    with:
+      extension_summary_header: "Extension summary ({{ variables.extension_results | size }} checked): {{ variables.suspicious_count }} suspicious, {{ variables.inconclusive_count }} inconclusive, {{ variables.benign_count }} benign."
+      extension_summary_body: "{% assign line_count = variables.extension_summary_lines | size %}{% if line_count == 0 %}No extensions checked.{% else %}{{ variables.extension_summary_lines | join: '; ' }}{% endif %}"
+
+  - name: log_summary
+    type: console
+    with:
+      message: |
+        Browser extension singleton reputation check finished.
+        Rule: {{ consts.rule_id }} | Index: {{ consts.index_pattern }}
+
+        {{ steps.finalize_run_summary.output.extension_summary_header }}
+        {{ steps.finalize_run_summary.output.extension_summary_body }}
+
+        Review console output for lines starting with *** SUSPICIOUS EXTENSION *** or ??? INCONCLUSIVE EXTENSION ***.
+
+  - name: when_suspicious_case
+    type: if
+    condition: 'variables.suspicious_count > 0'
+    steps:
+      - name: build_suspicious_case_hits
+        type: data.set
+        with:
+          case_hits_body: "{% assign line_count = variables.suspicious_detail_lines | size %}{% if line_count == 0 %}No suspicious detail lines captured.{% else %}{{ variables.suspicious_detail_lines | join: '\n\n---\n\n' }}{% endif %}"
+
+      - name: create_suspicious_extensions_case
+        type: cases.createCase
+        with:
+          title: "Suspicious browser extensions — {{ execution.startedAt | date: '%Y-%m-%d' }}"
+          description: |
+            Automated daily case from Browser Extension Singleton Reputation Check.
+
+            **Run:** {{ execution.id }}
+            **Rule:** {{ consts.rule_id }}
+            **Summary:** {{ steps.finalize_run_summary.output.extension_summary_header }}
+
+            {{ steps.finalize_run_summary.output.extension_summary_body }}
+
+            Response actions (zip/get-file/delete) are triggered per suspicious extension when agent.id and install path are available.
+          owner: securitySolution
+          severity: high
+          tags:
+            - browser-extension
+            - singleton-reputation
+            - automated
+          settings:
+            syncAlerts: false
+
+      - name: add_case_suspicious_hits
+        type: cases.addComment
+        with:
+          case_id: "{{ steps.create_suspicious_extensions_case.output.case.id }}"
+          comment: |
+            ## Suspicious extension hits ({{ variables.suspicious_count }})
+
+            {{ steps.build_suspicious_case_hits.output.case_hits_body }}
+
+      - name: log_case_created
+        type: console
+        with:
+          message: "Kibana case created for {{ variables.suspicious_count }} suspicious extension(s): {{ steps.create_suspicious_extensions_case.output.case.id }}"
+
+      - name: remediate_suspicious_extensions
+        type: foreach
+        foreach: "${{ variables.suspicious_extensions }}"
+        steps:
+          - name: when_can_remediate
+            type: if
+            condition: 'foreach.item.agent_id: * and foreach.item.file_path: *Users*'
+            steps:
+              - name: set_remediation_paths
+                type: data.set
+                with:
+                  path_prefix: "{{ foreach.item.file_path | split: 'AppData' | first | strip }}"
+                  zip_path: "{{ foreach.item.file_path | split: 'AppData' | first | strip }}AppData\\Local\\Temp\\EXT-RSP-{{ foreach.item.extension_id }}.zip"
+                  extensions_dir: "{% if foreach.item.process_name == 'msedge.exe' %}{{ foreach.item.file_path | split: 'AppData' | first | strip }}AppData/Local/Microsoft/Edge/User Data/Default/Extensions/{{ foreach.item.extension_id }}{% else %}{{ foreach.item.file_path | split: 'AppData' | first | strip }}AppData/Local/Google/Chrome/User Data/Default/Extensions/{{ foreach.item.extension_id }}{% endif %}"
+
+              - name: when_edge_browser_remediate
+                type: if
+                condition: 'foreach.item.process_name: "msedge.exe"'
+                steps:
+                  - name: zip_extension_folder_edge
+                    type: kibana.request
+                    with:
+                      method: POST
+                      path: /api/endpoint/action/execute
+                      headers:
+                        kbn-xsrf: "true"
+                      body:
+                        endpoint_ids:
+                          - "{{ foreach.item.agent_id }}"
+                        comment: "EXT-RSP|{{ foreach.item.extension_id }}|zip extension folder"
+                        parameters:
+                          command: 'powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "Compress-Archive -LiteralPath ''{{ steps.set_remediation_paths.output.extensions_dir }}'' -DestinationPath ''{{ steps.set_remediation_paths.output.zip_path }}'' -Force"'
+                          timeout: 300
+                    on-failure:
+                      continue: true
+                else:
+                  - name: zip_extension_folder_chrome
+                    type: kibana.request
+                    with:
+                      method: POST
+                      path: /api/endpoint/action/execute
+                      headers:
+                        kbn-xsrf: "true"
+                      body:
+                        endpoint_ids:
+                          - "{{ foreach.item.agent_id }}"
+                        comment: "EXT-RSP|{{ foreach.item.extension_id }}|zip extension folder"
+                        parameters:
+                          command: 'powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "Compress-Archive -LiteralPath ''{{ steps.set_remediation_paths.output.extensions_dir }}'' -DestinationPath ''{{ steps.set_remediation_paths.output.zip_path }}'' -Force"'
+                          timeout: 300
+                    on-failure:
+                      continue: true
+
+              - name: wait_for_zip
+                type: wait
+                with:
+                  duration: 30s
+
+              - name: get_file_extension_zip
+                type: kibana.request
+                with:
+                  method: POST
+                  path: /api/endpoint/action/get_file
+                  headers:
+                    kbn-xsrf: "true"
+                  body:
+                    endpoint_ids:
+                      - "{{ foreach.item.agent_id }}"
+                    comment: "EXT-RSP|{{ foreach.item.extension_id }}|evidence zip"
+                    parameters:
+                      path: "{{ steps.set_remediation_paths.output.zip_path }}"
+                on-failure:
+                  continue: true
+
+              - name: delete_extension_folder
+                type: kibana.request
+                with:
+                  method: POST
+                  path: /api/endpoint/action/execute
+                  headers:
+                    kbn-xsrf: "true"
+                  body:
+                    endpoint_ids:
+                      - "{{ foreach.item.agent_id }}"
+                    comment: "EXT-RSP|{{ foreach.item.extension_id }}|delete extension folder"
+                    parameters:
+                      command: 'powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "if (Test-Path -LiteralPath ''{{ steps.set_remediation_paths.output.extensions_dir }}'') { Remove-Item -LiteralPath ''{{ steps.set_remediation_paths.output.extensions_dir }}'' -Recurse -Force -ErrorAction Stop; Write-Output ''EXT_DELETED'' } else { Write-Output ''EXT_NOT_FOUND'' }"'
+                      timeout: 120
+                on-failure:
+                  continue: true
+
+              - name: record_remediation_note
+                type: data.set
+                with:
+                  remediation_note: "Extension {{ foreach.item.extension_id }} (host {{ foreach.item.host_id }}, agent {{ foreach.item.agent_id }}): zip={{ steps.set_remediation_paths.output.zip_path }}, get-file action={% if steps.get_file_extension_zip.output.data.id %}{{ steps.get_file_extension_zip.output.data.id }}{% else %}failed{% endif %}, delete execute={% if steps.delete_extension_folder.output.data.id %}{{ steps.delete_extension_folder.output.data.id }}{% else %}failed{% endif %}"
+
+              - name: accumulate_remediation_note
+                type: data.set
+                with:
+                  remediation_notes: '${{ variables.remediation_notes | push: steps.record_remediation_note.output.remediation_note }}'
+
+              - name: log_remediation
+                type: console
+                with:
+                  message: "{{ steps.record_remediation_note.output.remediation_note }}"
+
+      - name: build_remediation_case_body
+        type: data.set
+        with:
+          remediation_body: "{% assign note_count = variables.remediation_notes | size %}{% if note_count == 0 %}No endpoint remediation ran (missing agent.id or user profile path).{% else %}{{ variables.remediation_notes | join: '\n' }}{% endif %}"
+
+      - name: add_case_remediation_comment
+        type: cases.addComment
+        with:
+          case_id: "{{ steps.create_suspicious_extensions_case.output.case.id }}"
+          comment: |
+            ## Endpoint response actions
+
+            Zip → get-file (password: elastic) → delete extension folder.
+
+            {{ steps.build_remediation_case_body.output.remediation_body }}
