@@ -54,7 +54,7 @@ consts:
   min_user_count: 1000
   suspicious_user_count: 100
   fresh_publish_days: 45
-  publish_popularity_anomaly_days: 45
+  publish_popularity_anomaly_days: 60
   anomaly_min_user_count: 10000
   anomaly_min_rating_count: 20
   suspicious_domain_max_age_days: 90
