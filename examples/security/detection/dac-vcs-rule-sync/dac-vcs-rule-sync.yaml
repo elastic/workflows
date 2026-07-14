@@ -1,0 +1,301 @@
+# =============================================================================
+# Workflow: DaC - VCS Rule Sync
+# Category: security/detection
+#
+# Detection-as-Code (DaC) sync into version control. Rules in a "dev" Kibana
+# space tagged "vcs" are managed by the version control system (GitHub):
+# whenever a tagged rule changes, this workflow opens a pull request against
+# the detection-rules fork's main branch containing the exported rules.
+# Nothing is copied between Kibana spaces — GitHub is the destination.
+#
+# On each run (scheduled + manual):
+# 1. Find rules in {{ consts.dev_space }} tagged {{ consts.sync_tag }}.
+# 2. Compare each rule's updated_at against the last recorded sync watermark
+#    (stored in the {{ consts.state_index }} index) — no changes, no PR.
+# 3. If anything changed and no sync PR is already open, use the GitHub
+#    connector to:
+#      - create a branch vcs-sync-<date-time of the sync>,
+#      - commit a sync-request file under .vcs-sync/ describing the sync,
+#      - open a PR from that branch against {{ consts.github_base_branch }}.
+# 4. The request commit triggers the companion GitHub Action in the fork
+#    (github/dac-vcs-rule-sync.yml), which exports the tagged rules into the
+#    branch with the detection-rules CLI (kibana export-rules -e -ac;
+#    existing TOML is overwritten so edits are included), commits them, runs
+#    the unit tests, and comments the results on the PR. Test results live
+#    entirely in GitHub (PR checks/comments) — there is no Kibana-side
+#    failure alerting.
+# 5. Record the new sync watermark so unchanged rules don't re-sync.
+#
+# Requirements:
+# - A GitHub connector in Kibana (created in the UI) whose credential can
+#   read/write the fork: create branches, commit files, and open PRs. Only
+#   connector tools verified to exist are used (create_branch,
+#   create_or_update_file, create_pull_request, searchPullRequests) — no
+#   GitHub Actions dispatch, no PAT in this YAML.
+# - The companion Action + secrets installed in the detection-rules fork.
+#   See README.md next to this file for full setup.
+#
+# All environment-specific values (space, tag, fork owner/repo, connector)
+# are parameterized in `consts` below. Note: the scheduled trigger interval
+# cannot reference consts, so adjust it directly in the trigger definition.
+#
+# Kibana workflows are space-specific: this workflow (and its execution
+# history) only appears in the space it was created in. Any space works —
+# steps target the dev space explicitly via /s/<space>/ paths — but remember
+# where you saved it.
+# =============================================================================
+version: "1"
+name: DaC - VCS Rule Sync
+description: |
+  Detection-as-Code sync to version control: finds rules in the dev space
+  tagged "vcs", and when any of them changed since the last sync, opens a
+  pull request on the detection-rules fork (branch vcs-sync-<timestamp>).
+  The fork's GitHub Action exports the tagged rules into the branch, runs
+  the detection-rules unit tests, and comments results on the PR.
+enabled: true
+tags:
+  - security
+  - detection
+  - dac
+  - automation
+
+consts:
+  # --- Kibana space rules are authored/tagged in -----------------------------
+  dev_space: "dev"
+  # --- Sync tag: rules with this tag are managed by version control ----------
+  sync_tag: "vcs"
+  # --- detection-rules fork the sync PRs are opened against ------------------
+  github_owner: "REPLACE_WITH_GITHUB_OWNER"      # fork owner (user or org)
+  github_repo_name: "detection-rules"           # fork repository name
+  github_base_branch: "main"                    # PR target branch
+  github_connector_id: "REPLACE_WITH_GITHUB_CONNECTOR_ID"
+  # --- Sync bookkeeping -------------------------------------------------------
+  sync_request_dir: ".vcs-sync"                 # request files committed to the branch
+  pr_title_prefix: "[VCS Sync]"                 # also used to detect an open sync PR
+  state_index: "dac-vcs-sync-state"             # ES index storing the sync watermark
+
+triggers:
+  - type: manual
+  # Adjust the sync cadence here (consts cannot be referenced in triggers).
+  # Unchanged rules are skipped, so frequent runs are cheap no-ops.
+  - type: scheduled
+    with:
+      every: 30m
+
+steps:
+  # Find all rules in the dev space carrying the sync tag. per_page caps a
+  # single sync batch; raise it if you tag more than 500 rules.
+  - name: find_tagged_rules
+    type: kibana.request
+    with:
+      method: GET
+      path: "/s/{{ consts.dev_space }}/api/detection_engine/rules/_find"
+      query:
+        filter: 'alert.attributes.tags:"{{ consts.sync_tag }}"'
+        per_page: "500"
+      headers:
+        kbn-xsrf: "true"
+
+  - name: if_rules_found
+    type: if
+    condition: steps.find_tagged_rules.output.total > 0
+    steps:
+      # The last sync watermark: the max updated_at across the tagged rules
+      # at the time of the previous sync. The wildcard index pattern makes a
+      # missing index (first run, before any sync is recorded) return empty
+      # hits instead of an index_not_found_exception error. No ES sort — the
+      # sort-string handling and field mappings vary across builds, so the
+      # newest watermark is computed from the hits in Liquid instead
+      # (see set_sync_context.last_sync).
+      - name: get_last_sync
+        type: elasticsearch.search
+        with:
+          index: "{{ consts.state_index }}*"
+          size: 500
+          query:
+            match_all: {}
+        on-failure:
+          continue: true
+
+      - name: set_sync_context
+        type: data.set
+        with:
+          sync_time: "{{ 'now' | date: '%Y-%m-%dT%H:%M:%SZ' }}"
+          branch_name: "vcs-sync-{{ 'now' | date: '%Y%m%d-%H%M%S' }}"
+          last_sync: "{% if steps.get_last_sync.output.hits.hits and steps.get_last_sync.output.hits.hits[0] %}{{ steps.get_last_sync.output.hits.hits | map: '_source' | map: 'synced_through' | sort | last }}{% endif %}"
+          # New watermark: the latest updated_at among all tagged rules.
+          # Recording this (instead of "now") means an edit made while this
+          # run executes is still strictly newer and syncs next cycle.
+          synced_through: "{{ steps.find_tagged_rules.output.data | map: 'updated_at' | sort | last }}"
+
+      # ISO-8601 UTC timestamps compare correctly as strings, so a plain
+      # lexicographic updated_at > last_sync finds the changed rules.
+      # rule_list_md is the pre-rendered markdown bullet list for the PR body
+      # (the workflow editor's validation rejects dynamic index paths like
+      # ids[forloop.index0], so name/id pairing happens here in one loop).
+      - name: set_changed_rules
+        type: data.set
+        with:
+          rule_ids: "{%- assign ls = steps.set_sync_context.output.last_sync | strip -%}{%- assign out = '' -%}{%- for r in steps.find_tagged_rules.output.data -%}{%- if ls == '' or r.updated_at > ls -%}{%- if out == '' -%}{%- assign out = r.rule_id -%}{%- else -%}{%- assign out = out | append: ',' | append: r.rule_id -%}{%- endif -%}{%- endif -%}{%- endfor -%}{{ out }}"
+          changed_count: "{%- assign ls = steps.set_sync_context.output.last_sync | strip -%}{%- assign n = 0 -%}{%- for r in steps.find_tagged_rules.output.data -%}{%- if ls == '' or r.updated_at > ls -%}{%- assign n = n | plus: 1 -%}{%- endif -%}{%- endfor -%}{{ n }}"
+          rule_list_md: |-
+            {%- assign ls = steps.set_sync_context.output.last_sync | strip -%}
+            {%- for r in steps.find_tagged_rules.output.data -%}
+            {%- if ls == '' or r.updated_at > ls %}
+            - {{ r.name }} (`{{ r.rule_id }}`)
+            {%- endif -%}
+            {%- endfor -%}
+
+      - name: if_changes
+        type: if
+        condition: 'steps.set_changed_rules.output.rule_ids: * AND not steps.set_changed_rules.output.rule_ids: ""'
+        steps:
+          # One sync PR at a time: changes made while a sync PR is open are
+          # picked up by the next cycle after it is merged or closed.
+          - name: search_open_sync_pr
+            type: github.searchPullRequests
+            connector-id: "{{ consts.github_connector_id }}"
+            timeout: 60s
+            with:
+              query: 'repo:{{ consts.github_owner }}/{{ consts.github_repo_name }} is:open "{{ consts.pr_title_prefix }}" in:title'
+              order: desc
+              sort: created
+              page: 1
+              perPage: 1
+            on-failure:
+              continue: true
+
+          # Reading output.total_count when the search failed (output is
+          # null) throws a TypeError in the condition evaluator, so guard
+          # the output access behind a search-succeeded check first.
+          - name: if_pr_search_ok
+            type: if
+            condition: "steps.search_open_sync_pr.output: * AND not steps.search_open_sync_pr.error: *"
+            steps:
+              - name: if_no_open_sync_pr
+                type: if
+                condition: "steps.search_open_sync_pr.output.total_count: 0"
+                steps:
+                  - name: create_sync_branch
+                    type: github.callTool
+                    connector-id: "{{ consts.github_connector_id }}"
+                    timeout: 60s
+                    with:
+                      name: create_branch
+                      arguments:
+                        owner: "{{ consts.github_owner }}"
+                        repo: "{{ consts.github_repo_name }}"
+                        branch: "{{ steps.set_sync_context.output.branch_name }}"
+                        from_branch: "{{ consts.github_base_branch }}"
+                    on-failure:
+                      continue: true
+
+                  - name: if_branch_created
+                    type: if
+                    condition: "not steps.create_sync_branch.error: *"
+                    steps:
+                      # One request file per sync (named after the branch), so it
+                      # never collides with a previously merged request. It also
+                      # carries the space/tag so the fork needs no duplicated
+                      # configuration, and doubles as a sync audit log on main.
+                      - name: set_sync_request
+                        type: data.set
+                        with:
+                          request_json: '{"requested_at":"{{ steps.set_sync_context.output.sync_time }}","dev_space":"{{ consts.dev_space }}","sync_tag":"{{ consts.sync_tag }}","branch":"{{ steps.set_sync_context.output.branch_name }}","workflow_execution_id":"{{ execution.id }}","changed_rule_ids":[{%- assign ids = steps.set_changed_rules.output.rule_ids | split: "," -%}{%- for id in ids -%}"{{ id }}"{% unless forloop.last %},{% endunless %}{%- endfor -%}]}'
+
+                      - name: commit_sync_request
+                        type: github.callTool
+                        connector-id: "{{ consts.github_connector_id }}"
+                        timeout: 120s
+                        with:
+                          name: create_or_update_file
+                          arguments:
+                            owner: "{{ consts.github_owner }}"
+                            repo: "{{ consts.github_repo_name }}"
+                            path: "{{ consts.sync_request_dir }}/{{ steps.set_sync_context.output.branch_name }}.json"
+                            branch: "{{ steps.set_sync_context.output.branch_name }}"
+                            message: "{{ consts.pr_title_prefix }} sync request {{ steps.set_sync_context.output.branch_name }}"
+                            content: "{{ steps.set_sync_request.output.request_json }}"
+                        on-failure:
+                          continue: true
+
+                      - name: open_sync_pr
+                        type: github.callTool
+                        connector-id: "{{ consts.github_connector_id }}"
+                        timeout: 120s
+                        with:
+                          name: create_pull_request
+                          arguments:
+                            owner: "{{ consts.github_owner }}"
+                            repo: "{{ consts.github_repo_name }}"
+                            title: "{{ consts.pr_title_prefix }} {{ steps.set_changed_rules.output.changed_count }} rule change(s) from space {{ consts.dev_space }} ({{ steps.set_sync_context.output.branch_name }})"
+                            head: "{{ steps.set_sync_context.output.branch_name }}"
+                            base: "{{ consts.github_base_branch }}"
+                            body: |
+                              Automated Detection-as-Code sync opened by the Elastic workflow **DaC - VCS Rule Sync** (execution `{{ execution.id }}`).
+
+                              Rules tagged `{{ consts.sync_tag }}` in the "{{ consts.dev_space }}" Kibana space changed since the last sync. The **DaC - VCS rule sync** GitHub Action now exports the tagged rules into this branch (detection-rules `kibana export-rules -e -ac`; existing files are overwritten so edits are included), commits them, runs the detection-rules unit tests, and comments the results here.
+
+                              Changed rule(s):{{ steps.set_changed_rules.output.rule_list_md }}
+
+                              Merging this PR accepts the rule state into version control. If the export produces no changes, the Action closes this PR automatically.
+                        on-failure:
+                          continue: true
+
+                      - name: if_pr_opened
+                        type: if
+                        condition: "not steps.open_sync_pr.error: *"
+                        steps:
+                          # Advance the watermark only after the PR exists, so a
+                          # failed sync is retried on the next cycle.
+                          - name: record_sync_state
+                            type: elasticsearch.index
+                            with:
+                              index: "{{ consts.state_index }}"
+                              document:
+                                synced_at: "{{ steps.set_sync_context.output.sync_time }}"
+                                synced_through: "{{ steps.set_sync_context.output.synced_through }}"
+                                branch: "{{ steps.set_sync_context.output.branch_name }}"
+                                rule_ids: "{{ steps.set_changed_rules.output.rule_ids }}"
+                            on-failure:
+                              continue: true
+
+                          - name: log_sync_opened
+                            type: console
+                            with:
+                              message: 'VCS sync PR opened for {{ steps.set_changed_rules.output.changed_count }} changed rule(s): https://github.com/{{ consts.github_owner }}/{{ consts.github_repo_name }}/pulls (branch {{ steps.set_sync_context.output.branch_name }}). state_recorded={% if steps.record_sync_state.error %}no ({{ steps.record_sync_state.error }}){% else %}yes{% endif %}'
+                        else:
+                          - name: log_pr_failed
+                            type: console
+                            with:
+                              message: "Failed to open the sync PR on {{ consts.github_owner }}/{{ consts.github_repo_name }}: {{ steps.open_sync_pr.error }} — commit_error={{ steps.commit_sync_request.error | default: 'none' }}. Check the GitHub connector ({{ consts.github_connector_id }}) permissions. Sync will retry next cycle."
+                    else:
+                      - name: log_branch_failed
+                        type: console
+                        with:
+                          message: "Failed to create branch {{ steps.set_sync_context.output.branch_name }} on {{ consts.github_owner }}/{{ consts.github_repo_name }}: {{ steps.create_sync_branch.error }} — check the GitHub connector ({{ consts.github_connector_id }}). Sync will retry next cycle."
+                else:
+                  - name: log_open_pr_exists
+                    type: console
+                    with:
+                      message: '{{ steps.set_changed_rules.output.changed_count }} changed rule(s) detected, but a "{{ consts.pr_title_prefix }}" PR is already open on {{ consts.github_owner }}/{{ consts.github_repo_name }}. Skipping — the next cycle after it is merged or closed will pick the changes up.'
+            else:
+              - name: log_pr_search_failed
+                type: console
+                with:
+                  message: "GitHub PR search failed: {{ steps.search_open_sync_pr.error }} — cannot verify whether a sync PR is already open, so skipping this cycle (will retry next run). Check the GitHub connector ({{ consts.github_connector_id }})."
+        else:
+          - name: log_no_changes
+            type: console
+            with:
+              message: '{{ steps.find_tagged_rules.output.total }} rule(s) tagged "{{ consts.sync_tag }}" in space "{{ consts.dev_space }}", but none changed since the last sync ({{ steps.set_sync_context.output.last_sync | default: "never" }}). Nothing to do.'
+    else:
+      - name: log_none_tagged
+        type: console
+        with:
+          message: 'No rules tagged "{{ consts.sync_tag }}" found in space "{{ consts.dev_space }}" — nothing to sync.'
+
+  - name: log_done
+    type: console
+    with:
+      message: "DaC VCS rule sync check finished. execution.id={{ execution.id }}"
