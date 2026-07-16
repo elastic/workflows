@@ -493,14 +493,22 @@ steps:
       - name: when_endpoint_remediation
         type: if
         condition: 'consts.enable_endpoint_remediation: true'
+        on-failure:
+          continue: true
         steps:
           - name: remediate_suspicious_extensions
             type: foreach
             foreach: "${{ variables.suspicious_extensions }}"
+            # kibana.request can throw ERR_FR_TOO_MANY_REDIRECTS even when Defend
+            # already accepted/ran the action — keep iterating remaining hits.
+            on-failure:
+              continue: true
             steps:
               - name: when_can_remediate
                 type: if
                 condition: 'foreach.item.agent_id: *'
+                on-failure:
+                  continue: true
                 steps:
                   - name: set_remediation_paths
                     type: data.set
@@ -595,6 +603,8 @@ steps:
                       - name: when_windows_remediate
                         type: if
                         condition: 'foreach.item.file_path: *Users* and foreach.item.file_path: *AppData*'
+                        on-failure:
+                          continue: true
                         steps:
                           - name: zip_extension_folder_windows
                             type: kibana.request
@@ -617,7 +627,7 @@ steps:
                                 - name: log_zip_windows_failure
                                   type: console
                                   with:
-                                    message: "WARN: zip_extension_folder_windows failed for {{ foreach.item.extension_id }} agent {{ foreach.item.agent_id }} — check Execute response-action privilege and agent online; ERR_FR_TOO_MANY_REDIRECTS is usually kibana.request auth/URL loop, not Compress-Archive"
+                                    message: "WARN: zip_extension_folder_windows kibana.request error for {{ foreach.item.extension_id }} — check Response actions history; Defend may still have run the zip"
 
                           - name: wait_for_zip_windows
                             type: wait
@@ -640,6 +650,11 @@ steps:
                                   path: "{{ steps.set_remediation_paths.output.zip_path }}"
                             on-failure:
                               continue: true
+                              fallback:
+                                - name: log_get_file_windows_failure
+                                  type: console
+                                  with:
+                                    message: "WARN: get_file_extension_zip_windows failed for {{ foreach.item.extension_id }} path {{ steps.set_remediation_paths.output.zip_path }}"
 
                           - name: delete_extension_folder_windows
                             type: kibana.request
@@ -658,11 +673,16 @@ steps:
                                   timeout: 120
                             on-failure:
                               continue: true
+                              fallback:
+                                - name: log_delete_windows_failure
+                                  type: console
+                                  with:
+                                    message: "WARN: delete_extension_folder_windows kibana.request error for {{ foreach.item.extension_id }} — check Response actions history"
 
                           - name: record_remediation_note_windows
                             type: data.set
                             with:
-                              remediation_note: "Extension {{ foreach.item.extension_id }} ({{ foreach.item.os_type }}, host {{ foreach.item.host_id }}, agent {{ foreach.item.agent_id }}): zip={{ steps.set_remediation_paths.output.zip_path }}, get-file action={% if steps.get_file_extension_zip_windows.output.data.id %}{{ steps.get_file_extension_zip_windows.output.data.id }}{% else %}failed{% endif %}, delete execute={% if steps.delete_extension_folder_windows.output.data.id %}{{ steps.delete_extension_folder_windows.output.data.id }}{% else %}failed{% endif %}"
+                              remediation_note: "Extension {{ foreach.item.extension_id }} ({{ foreach.item.os_type }}, host {{ foreach.item.host_id }}, agent {{ foreach.item.agent_id }}): zip={{ steps.set_remediation_paths.output.zip_path }}, get-file action={% if steps.get_file_extension_zip_windows.output.data.id %}{{ steps.get_file_extension_zip_windows.output.data.id }}{% else %}check Response actions / failed{% endif %}, delete execute={% if steps.delete_extension_folder_windows.output.data.id %}{{ steps.delete_extension_folder_windows.output.data.id }}{% else %}check Response actions / failed{% endif %}"
 
                           - name: accumulate_remediation_note_windows
                             type: data.set
@@ -677,8 +697,7 @@ steps:
           - name: build_remediation_case_body
             type: data.set
             with:
-              remediation_body: "{% assign note_count = variables.remediation_notes | size %}{% if note_count == 0 %}No endpoint remediation ran (missing agent.id or user profile path, or all actions failed).{% else %}{{ variables.remediation_notes | join: '\n' }}{% endif %}"
-
+              remediation_body: "{% assign note_count = variables.remediation_notes | size %}{% if note_count == 0 %}No endpoint remediation notes recorded (missing agent/path, or kibana.request errors — check Response actions history; Defend may still have run).{% else %}{{ variables.remediation_notes | join: '\n' }}{% endif %}"
           - name: add_case_remediation_comment
             type: cases.addComment
             with:
