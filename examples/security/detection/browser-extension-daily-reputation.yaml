@@ -62,6 +62,9 @@ consts:
   anomaly_min_user_count: 10000
   anomaly_min_rating_count: 20
   suspicious_domain_max_age_days: 90
+  # Set false if kibana.request → /api/endpoint/action/* fails (e.g. ERR_FR_TOO_MANY_REDIRECTS)
+  # so reputation + case still complete. Re-enable after Execute privilege / connectivity works.
+  enable_endpoint_remediation: true
   rdap_base_url: https://rdap.org/domain
   free_email_domains: "gmail.com,googlemail.com,outlook.com,hotmail.com,live.com,msn.com,yahoo.com,yahoo.co.uk,yahoo.fr,gmx.com,gmx.net,gmx.de,gmx.at,protonmail.com,proton.me,icloud.com,me.com,mac.com,aol.com,mail.com,yandex.ru,yandex.com,zoho.com,qq.com,163.com,126.com,outlook.fr,outlook.de,outlook.es,outlook.it,web.de,t-online.de,fastmail.com,tutanota.com,hey.com,pm.me"
   scheduled_esql_query: |
@@ -184,12 +187,12 @@ steps:
             with:
               http_status: "{{ steps.resolve_http_status.output.http_status }}"
               listing_found: "{% assign found = 'false' %}{% assign body = '' %}{% if steps.resolve_listing_response.output.fetch_failed != 'true' %}{% if steps.resolve_listing_response.output.fetch_source == 'chrome' and steps.fetch_store_listing.output.data %}{% assign body = steps.fetch_store_listing.output.data %}{% elsif steps.resolve_listing_response.output.fetch_source == 'edge' and steps.set_extension_context.output.store_family == 'chrome' and steps.do_fetch_edge_fallback.output.data %}{% assign body = steps.do_fetch_edge_fallback.output.data %}{% elsif steps.resolve_listing_response.output.fetch_source == 'edge' and steps.fetch_store_listing.output.data %}{% assign body = steps.fetch_store_listing.output.data %}{% endif %}{% if body contains 'WebApplication' or body contains 'SoftwareApplication' or body contains 'ratingValue' or body contains 'aggregateRating' or body contains 'AggregateRating' or body contains 'Average rating ' or body contains ' out of 5' or body contains ' ratings</' or body contains ' users</' or body contains 'class=\"CiI2if\">' or body contains 'data-item-id=\"' or body contains steps.set_extension_context.output.extension_id %}{% assign found = 'true' %}{% elsif body contains '<title>' %}{% assign title_parts = body | split: '<title>' %}{% if title_parts.size > 1 %}{% assign page_title = title_parts[1] | split: '</title>' | first | strip %}{% unless page_title contains 'Search Results' or page_title == 'Chrome Web Store' or page_title == 'Microsoft Edge Add-ons' %}{% assign found = 'true' %}{% endunless %}{% endif %}{% endif %}{% endif %}{{ found }}"
-              extension_name: "{% assign ext_name = '' %}{% assign body = '' %}{% if steps.resolve_listing_response.output.fetch_failed != 'true' %}{% if steps.resolve_listing_response.output.fetch_source == 'chrome' and steps.fetch_store_listing.output.data %}{% assign body = steps.fetch_store_listing.output.data %}{% elsif steps.resolve_listing_response.output.fetch_source == 'edge' and steps.set_extension_context.output.store_family == 'chrome' and steps.do_fetch_edge_fallback.output.data %}{% assign body = steps.do_fetch_edge_fallback.output.data %}{% elsif steps.resolve_listing_response.output.fetch_source == 'edge' and steps.fetch_store_listing.output.data %}{% assign body = steps.fetch_store_listing.output.data %}{% endif %}{% if body contains 'class=\"CiI2if\">' %}{% assign h2_parts = body | split: 'class=\"CiI2if\">' %}{% if h2_parts.size > 1 %}{% assign ext_name = h2_parts[1] | split: '</h2>' | first | strip %}{% endif %}{% endif %}{% if ext_name == '' and body contains '<title>' %}{% assign title_parts = body | split: '<title>' %}{% if title_parts.size > 1 %}{% assign ext_name = title_parts[1] | split: '</title>' | first | replace: ' - Microsoft Edge Add-ons', '' | replace: ' - Chrome Web Store', '' | strip %}{% endif %}{% endif %}{% if ext_name == '' and body contains '\"name\"' %}{% assign name_parts = body | split: '\"name\"' %}{% if name_parts.size > 1 %}{% assign ext_name = name_parts[1] | split: ',' | first | replace: ':', '' | replace: '\"', '' | strip %}{% endif %}{% endif %}{% if ext_name == 'Microsoft Edge Add-ons' or ext_name == 'Chrome Web Store' or ext_name == 'Search results' or ext_name contains 'Search Results' %}{% assign ext_name = '' %}{% endif %}{% endif %}{{ ext_name }}"
+              extension_name: "{% assign ext_name = '' %}{% assign body = '' %}{% if steps.resolve_listing_response.output.fetch_failed != 'true' %}{% if steps.resolve_listing_response.output.fetch_source == 'chrome' and steps.fetch_store_listing.output.data %}{% assign body = steps.fetch_store_listing.output.data %}{% elsif steps.resolve_listing_response.output.fetch_source == 'edge' and steps.set_extension_context.output.store_family == 'chrome' and steps.do_fetch_edge_fallback.output.data %}{% assign body = steps.do_fetch_edge_fallback.output.data %}{% elsif steps.resolve_listing_response.output.fetch_source == 'edge' and steps.fetch_store_listing.output.data %}{% assign body = steps.fetch_store_listing.output.data %}{% endif %}{% if body contains 'class=\"CiI2if\">' %}{% assign h2_parts = body | split: 'class=\"CiI2if\">' %}{% if h2_parts.size > 1 %}{% assign ext_name = h2_parts[1] | split: '</h2>' | first | strip %}{% endif %}{% endif %}{% if ext_name == '' and body contains '<title>' %}{% assign title_parts = body | split: '<title>' %}{% if title_parts.size > 1 %}{% assign ext_name = title_parts[1] | split: '</title>' | first | replace: ' - Microsoft Edge Add-ons', '' | replace: ' - Chrome Web Store', '' | strip %}{% endif %}{% endif %}{% if ext_name == '' and body contains '\"name\"' %}{% assign name_parts = body | split: '\"name\"' %}{% if name_parts.size > 1 %}{% assign ext_name = name_parts[1] | split: ',' | first | replace: ':', '' | replace: '\"', '' | strip %}{% endif %}{% endif %}{% if ext_name == 'Microsoft Edge Add-ons' or ext_name == 'Chrome Web Store' or ext_name == 'Search results' or ext_name contains 'Search Results' %}{% assign ext_name = '' %}{% endif %}{% endif %}{% if ext_name != '' %}{% assign ext_name = ext_name | replace: '&amp;', '&' %}{% endif %}{{ ext_name }}"
               rating_value: "{% assign rating_value = '' %}{% assign body = '' %}{% if steps.resolve_listing_response.output.fetch_failed != 'true' %}{% if steps.resolve_listing_response.output.fetch_source == 'chrome' and steps.fetch_store_listing.output.data %}{% assign body = steps.fetch_store_listing.output.data %}{% elsif steps.resolve_listing_response.output.fetch_source == 'edge' and steps.set_extension_context.output.store_family == 'chrome' and steps.do_fetch_edge_fallback.output.data %}{% assign body = steps.do_fetch_edge_fallback.output.data %}{% elsif steps.resolve_listing_response.output.fetch_source == 'edge' and steps.fetch_store_listing.output.data %}{% assign body = steps.fetch_store_listing.output.data %}{% endif %}{% if body contains 'ratingValue' %}{% assign rv_meta = body | split: 'ratingValue' %}{% if rv_meta.size > 1 %}{% assign cparts = rv_meta[1] | split: 'content=' %}{% if cparts.size > 1 %}{% assign qparts = cparts[1] | split: '\"' %}{% if qparts.size > 1 %}{% assign rating_value = qparts[1] | strip %}{% endif %}{% endif %}{% endif %}{% endif %}{% if rating_value == '' and body contains 'Average rating ' %}{% assign rv_parts = body | split: 'Average rating ' %}{% if rv_parts.size > 1 %}{% assign rating_value = rv_parts[1] | split: ' out of' | first | strip %}{% endif %}{% endif %}{% if rating_value == '' and body contains ' out of 5' %}{% assign rv_parts = body | split: ' out of 5' %}{% if rv_parts.size > 1 %}{% assign rating_value = rv_parts[0] | split: '>' | last | strip %}{% endif %}{% endif %}{% endif %}{{ rating_value }}"
               rating_count: "{% assign rating_count = '' %}{% assign body = '' %}{% if steps.resolve_listing_response.output.fetch_failed != 'true' %}{% if steps.resolve_listing_response.output.fetch_source == 'chrome' and steps.fetch_store_listing.output.data %}{% assign body = steps.fetch_store_listing.output.data %}{% elsif steps.resolve_listing_response.output.fetch_source == 'edge' and steps.set_extension_context.output.store_family == 'chrome' and steps.do_fetch_edge_fallback.output.data %}{% assign body = steps.do_fetch_edge_fallback.output.data %}{% elsif steps.resolve_listing_response.output.fetch_source == 'edge' and steps.fetch_store_listing.output.data %}{% assign body = steps.fetch_store_listing.output.data %}{% endif %}{% if body contains 'ratingCount' %}{% assign rc_meta = body | split: 'ratingCount' %}{% if rc_meta.size > 1 %}{% assign cparts = rc_meta[1] | split: 'content=' %}{% if cparts.size > 1 %}{% assign qparts = cparts[1] | split: '\"' %}{% if qparts.size > 1 %}{% assign rating_count = qparts[1] | strip %}{% endif %}{% endif %}{% endif %}{% endif %}{% if rating_count == '' and body contains ' ratings</' %}{% assign rc_raw = body | split: ' ratings</' | first | split: '>' | last | strip %}{% if rc_raw contains 'M' or rc_raw contains 'm' %}{% assign rc_base = rc_raw | replace: 'M', '' | replace: 'm', '' | strip %}{% assign rating_count = rc_base | times: 1000000 %}{% elsif rc_raw contains 'K' or rc_raw contains 'k' %}{% assign rc_base = rc_raw | replace: 'K', '' | replace: 'k', '' | strip %}{% assign rating_count = rc_base | times: 1000 %}{% else %}{% assign rating_count = rc_raw | replace: ',', '' | replace: '+', '' | strip %}{% endif %}{% endif %}{% if rating_count == '' and body contains 'class=\"CiI2if\">' %}{% assign ext_name_tmp = body | split: 'class=\"CiI2if\">' | last | split: '</h2>' | first | strip %}{% assign name_key = ext_name_tmp | append: '\"' | append: ',' %}{% if body contains name_key %}{% assign rc_parts = body | split: name_key %}{% if rc_parts.size > 1 %}{% assign rc_tail = rc_parts[1] | split: ',' %}{% if rc_tail.size > 1 %}{% assign rating_count = rc_tail[1] | split: '\"' | first | strip %}{% endif %}{% endif %}{% endif %}{% endif %}{% endif %}{{ rating_count }}"
-              user_count: "{% assign user_count = '' %}{% assign body = '' %}{% if steps.resolve_listing_response.output.fetch_failed != 'true' %}{% if steps.resolve_listing_response.output.fetch_source == 'chrome' and steps.fetch_store_listing.output.data %}{% assign body = steps.fetch_store_listing.output.data %}{% elsif steps.resolve_listing_response.output.fetch_source == 'edge' and steps.set_extension_context.output.store_family == 'chrome' and steps.do_fetch_edge_fallback.output.data %}{% assign body = steps.do_fetch_edge_fallback.output.data %}{% elsif steps.resolve_listing_response.output.fetch_source == 'edge' and steps.fetch_store_listing.output.data %}{% assign body = steps.fetch_store_listing.output.data %}{% endif %}{% if body contains 'userInteractionCount' %}{% assign uc_meta = body | split: 'userInteractionCount' %}{% if uc_meta.size > 1 %}{% assign cparts = uc_meta[1] | split: 'content=' %}{% if cparts.size > 1 %}{% assign qparts = cparts[1] | split: '\"' %}{% if qparts.size > 1 %}{% assign user_count = qparts[1] | strip %}{% endif %}{% endif %}{% endif %}{% endif %}{% if user_count == '' and body contains ' users</' %}{% assign user_count = body | split: ' users</' | first | split: '>' | last | strip | replace: ',', '' | replace: '+', '' %}{% endif %}{% if user_count == '' and body contains ' weekly active users' %}{% assign user_count = body | split: ' weekly active users' | first | split: '>' | last | strip | replace: ',', '' | replace: '+', '' %}{% endif %}{% assign ext_key = steps.set_extension_context.output.extension_id | append: '\",' %}{% if user_count == '' and body contains ext_key %}{% assign af_tail = body | split: ext_key | last %}{% if af_tail contains ',1,1,' %}{% assign uc_parts = af_tail | split: ',1,1,' %}{% if uc_parts.size > 1 %}{% assign user_count = uc_parts[1] | split: ',' | first | strip | replace: '+', '' %}{% endif %}{% endif %}{% endif %}{% if user_count == '' and body contains '],1,null,' %}{% assign uc_parts = body | split: '],1,null,' %}{% if uc_parts.size > 1 %}{% assign user_count = uc_parts[1] | split: ',' | first | strip | replace: '+', '' %}{% endif %}{% endif %}{% endif %}{% if user_count == 'null' or user_count == 'undefined' or user_count == 'None' %}{% assign user_count = '' %}{% endif %}{% if user_count != '' %}{% assign _uc_num = user_count | plus: 0 %}{% if _uc_num == 0 and user_count != '0' %}{% assign user_count = '' %}{% endif %}{% endif %}{{ user_count }}"
+              user_count: "{% assign user_count = '' %}{% assign body = '' %}{% if steps.resolve_listing_response.output.fetch_failed != 'true' %}{% if steps.resolve_listing_response.output.fetch_source == 'chrome' and steps.fetch_store_listing.output.data %}{% assign body = steps.fetch_store_listing.output.data %}{% elsif steps.resolve_listing_response.output.fetch_source == 'edge' and steps.set_extension_context.output.store_family == 'chrome' and steps.do_fetch_edge_fallback.output.data %}{% assign body = steps.do_fetch_edge_fallback.output.data %}{% elsif steps.resolve_listing_response.output.fetch_source == 'edge' and steps.fetch_store_listing.output.data %}{% assign body = steps.fetch_store_listing.output.data %}{% endif %}{% if body contains 'userInteractionCount' %}{% assign uc_meta = body | split: 'userInteractionCount' %}{% if uc_meta.size > 1 %}{% assign cparts = uc_meta[1] | split: 'content=' %}{% if cparts.size > 1 %}{% assign qparts = cparts[1] | split: '\"' %}{% if qparts.size > 1 %}{% assign user_count = qparts[1] | strip %}{% endif %}{% endif %}{% endif %}{% endif %}{% if user_count == '' and body contains ' users</' %}{% assign user_count = body | split: ' users</' | first | split: '>' | last | strip | replace: ',', '' | replace: '+', '' %}{% endif %}{% if user_count == '' and body contains ' weekly active users' %}{% assign user_count = body | split: ' weekly active users' | first | split: '>' | last | strip | replace: ',', '' | replace: '+', '' %}{% endif %}{% assign ext_key = steps.set_extension_context.output.extension_id | append: '\",' %}{% if user_count == '' and body contains ext_key %}{% assign af_tail = body | split: ext_key | last %}{% if af_tail contains ',1,1,' %}{% assign uc_parts = af_tail | split: ',1,1,' %}{% if uc_parts.size > 1 %}{% assign user_count = uc_parts[1] | split: ',' | first | strip | replace: '+', '' %}{% endif %}{% endif %}{% endif %}{% if user_count == '' and body contains '],1,null,' %}{% assign uc_parts = body | split: '],1,null,' %}{% if uc_parts.size > 1 %}{% assign user_count = uc_parts[1] | split: ',' | first | strip | replace: '+', '' %}{% endif %}{% endif %}{% endif %}{% if user_count == 'null' or user_count == 'undefined' or user_count == 'None' %}{% assign user_count = '' %}{% endif %}{% if user_count != '' %}{% assign _uc_num = user_count | plus: 0 %}{% if _uc_num == 0 and user_count != '0' %}{% assign user_count = '' %}{% endif %}{% endif %}{% if user_count == '1' %}{% assign user_count = '' %}{% endif %}{{ user_count }}"
               published_epoch: "{% assign published_epoch = '' %}{% assign body = '' %}{% if steps.resolve_listing_response.output.fetch_failed != 'true' %}{% if steps.resolve_listing_response.output.fetch_source == 'chrome' and steps.fetch_store_listing.output.data %}{% assign body = steps.fetch_store_listing.output.data %}{% elsif steps.resolve_listing_response.output.fetch_source == 'edge' and steps.set_extension_context.output.store_family == 'chrome' and steps.do_fetch_edge_fallback.output.data %}{% assign body = steps.do_fetch_edge_fallback.output.data %}{% elsif steps.resolve_listing_response.output.fetch_source == 'edge' and steps.fetch_store_listing.output.data %}{% assign body = steps.fetch_store_listing.output.data %}{% endif %}{% assign published_epoch = '' %}{% assign ext_key = steps.set_extension_context.output.extension_id | append: '\",' %}{% if body contains ext_key %}{% assign af_tail = body | split: ext_key | last %}{% if af_tail contains ',[' %}{% assign pub_parts = af_tail | split: ',[' %}{% if published_epoch == '' and pub_parts.size > 1 %}{% assign c = pub_parts[1] | split: ']' | first | split: ',' | first | strip %}{% assign n = c | plus: 0 %}{% if n > 1000000000 %}{% assign published_epoch = c %}{% endif %}{% endif %}{% if published_epoch == '' and pub_parts.size > 2 %}{% assign c = pub_parts[2] | split: ']' | first | split: ',' | first | strip %}{% assign n = c | plus: 0 %}{% if n > 1000000000 %}{% assign published_epoch = c %}{% endif %}{% endif %}{% if published_epoch == '' and pub_parts.size > 3 %}{% assign c = pub_parts[3] | split: ']' | first | split: ',' | first | strip %}{% assign n = c | plus: 0 %}{% if n > 1000000000 %}{% assign published_epoch = c %}{% endif %}{% endif %}{% if published_epoch == '' and pub_parts.size > 4 %}{% assign c = pub_parts[4] | split: ']' | first | split: ',' | first | strip %}{% assign n = c | plus: 0 %}{% if n > 1000000000 %}{% assign published_epoch = c %}{% endif %}{% endif %}{% if published_epoch == '' and pub_parts.size > 5 %}{% assign c = pub_parts[5] | split: ']' | first | split: ',' | first | strip %}{% assign n = c | plus: 0 %}{% if n > 1000000000 %}{% assign published_epoch = c %}{% endif %}{% endif %}{% endif %}{% endif %}{% endif %}{{ published_epoch }}"
-              published_days: "{% assign published_days = '' %}{% assign body = '' %}{% if steps.resolve_listing_response.output.fetch_failed != 'true' %}{% if steps.resolve_listing_response.output.fetch_source == 'chrome' and steps.fetch_store_listing.output.data %}{% assign body = steps.fetch_store_listing.output.data %}{% elsif steps.resolve_listing_response.output.fetch_source == 'edge' and steps.set_extension_context.output.store_family == 'chrome' and steps.do_fetch_edge_fallback.output.data %}{% assign body = steps.do_fetch_edge_fallback.output.data %}{% elsif steps.resolve_listing_response.output.fetch_source == 'edge' and steps.fetch_store_listing.output.data %}{% assign body = steps.fetch_store_listing.output.data %}{% endif %}{% assign published_epoch = '' %}{% assign ext_key = steps.set_extension_context.output.extension_id | append: '\",' %}{% if body contains ext_key %}{% assign af_tail = body | split: ext_key | last %}{% if af_tail contains ',[' %}{% assign pub_parts = af_tail | split: ',[' %}{% if published_epoch == '' and pub_parts.size > 1 %}{% assign c = pub_parts[1] | split: ']' | first | split: ',' | first | strip %}{% assign n = c | plus: 0 %}{% if n > 1000000000 %}{% assign published_epoch = c %}{% endif %}{% endif %}{% if published_epoch == '' and pub_parts.size > 2 %}{% assign c = pub_parts[2] | split: ']' | first | split: ',' | first | strip %}{% assign n = c | plus: 0 %}{% if n > 1000000000 %}{% assign published_epoch = c %}{% endif %}{% endif %}{% if published_epoch == '' and pub_parts.size > 3 %}{% assign c = pub_parts[3] | split: ']' | first | split: ',' | first | strip %}{% assign n = c | plus: 0 %}{% if n > 1000000000 %}{% assign published_epoch = c %}{% endif %}{% endif %}{% if published_epoch == '' and pub_parts.size > 4 %}{% assign c = pub_parts[4] | split: ']' | first | split: ',' | first | strip %}{% assign n = c | plus: 0 %}{% if n > 1000000000 %}{% assign published_epoch = c %}{% endif %}{% endif %}{% if published_epoch == '' and pub_parts.size > 5 %}{% assign c = pub_parts[5] | split: ']' | first | split: ',' | first | strip %}{% assign n = c | plus: 0 %}{% if n > 1000000000 %}{% assign published_epoch = c %}{% endif %}{% endif %}{% endif %}{% endif %}{% if published_epoch != '' %}{% assign now_sec = 'now' | date: '%s' | plus: 0 %}{% assign published_sec = published_epoch | plus: 0 %}{% assign age_sec = now_sec | minus: published_sec %}{% if age_sec >= 0 %}{% assign published_days = age_sec | divided_by: 86400 %}{% endif %}{% endif %}{% endif %}{{ published_days }}"
+              published_days: "{% assign published_days = '' %}{% assign body = '' %}{% if steps.resolve_listing_response.output.fetch_failed != 'true' %}{% if steps.resolve_listing_response.output.fetch_source == 'chrome' and steps.fetch_store_listing.output.data %}{% assign body = steps.fetch_store_listing.output.data %}{% elsif steps.resolve_listing_response.output.fetch_source == 'edge' and steps.set_extension_context.output.store_family == 'chrome' and steps.do_fetch_edge_fallback.output.data %}{% assign body = steps.do_fetch_edge_fallback.output.data %}{% elsif steps.resolve_listing_response.output.fetch_source == 'edge' and steps.fetch_store_listing.output.data %}{% assign body = steps.fetch_store_listing.output.data %}{% endif %}{% assign published_epoch = '' %}{% assign ext_key = steps.set_extension_context.output.extension_id | append: '\",' %}{% if body contains ext_key %}{% assign af_tail = body | split: ext_key | last %}{% if af_tail contains ',[' %}{% assign pub_parts = af_tail | split: ',[' %}{% if published_epoch == '' and pub_parts.size > 1 %}{% assign c = pub_parts[1] | split: ']' | first | split: ',' | first | strip %}{% assign n = c | plus: 0 %}{% if n > 1000000000 %}{% assign published_epoch = c %}{% endif %}{% endif %}{% if published_epoch == '' and pub_parts.size > 2 %}{% assign c = pub_parts[2] | split: ']' | first | split: ',' | first | strip %}{% assign n = c | plus: 0 %}{% if n > 1000000000 %}{% assign published_epoch = c %}{% endif %}{% endif %}{% if published_epoch == '' and pub_parts.size > 3 %}{% assign c = pub_parts[3] | split: ']' | first | split: ',' | first | strip %}{% assign n = c | plus: 0 %}{% if n > 1000000000 %}{% assign published_epoch = c %}{% endif %}{% endif %}{% if published_epoch == '' and pub_parts.size > 4 %}{% assign c = pub_parts[4] | split: ']' | first | split: ',' | first | strip %}{% assign n = c | plus: 0 %}{% if n > 1000000000 %}{% assign published_epoch = c %}{% endif %}{% endif %}{% if published_epoch == '' and pub_parts.size > 5 %}{% assign c = pub_parts[5] | split: ']' | first | split: ',' | first | strip %}{% assign n = c | plus: 0 %}{% if n > 1000000000 %}{% assign published_epoch = c %}{% endif %}{% endif %}{% endif %}{% endif %}{% if published_epoch != '' %}{% assign now_sec = 'now' | date: '%s' | plus: 0 %}{% assign published_sec = published_epoch | plus: 0 %}{% assign age_sec = now_sec | minus: published_sec %}{% if age_sec >= 0 %}{% assign published_days = age_sec | divided_by: 86400 | floor %}{% endif %}{% endif %}{% endif %}{{ published_days }}"
 
 
           - name: when_fill_edge_review_age
@@ -236,17 +239,18 @@ steps:
                   - name: parse_edge_oldest_review_age
                     type: data.set
                     with:
+                      for_extension_id: "{{ steps.set_extension_context.output.extension_id }}"
                       oldest_review_date: "{% assign d = '' %}{% assign raw = steps.fetch_edge_oldest_review.output.data | json %}{% if raw contains '\"SubmittedDateTime\":\"' %}{% assign d = raw | split: '\"SubmittedDateTime\":\"' | last | split: '\"' | first | strip %}{% endif %}{{ d }}"
                       published_epoch: "{% assign epoch = '' %}{% assign d = '' %}{% assign raw = steps.fetch_edge_oldest_review.output.data | json %}{% if raw contains '\"SubmittedDateTime\":\"' %}{% assign d = raw | split: '\"SubmittedDateTime\":\"' | last | split: '\"' | first | strip %}{% endif %}{% if d != '' %}{% assign epoch = d | date: '%s' %}{% endif %}{{ epoch }}"
-                      published_days: "{% assign days = '' %}{% assign d = '' %}{% assign raw = steps.fetch_edge_oldest_review.output.data | json %}{% if raw contains '\"SubmittedDateTime\":\"' %}{% assign d = raw | split: '\"SubmittedDateTime\":\"' | last | split: '\"' | first | strip %}{% endif %}{% if d != '' %}{% assign now_sec = 'now' | date: '%s' | plus: 0 %}{% assign rev_sec = d | date: '%s' | plus: 0 %}{% assign age_sec = now_sec | minus: rev_sec %}{% if age_sec >= 0 %}{% assign days = age_sec | divided_by: 86400 %}{% endif %}{% endif %}{{ days }}"
+                      published_days: "{% assign days = '' %}{% assign d = '' %}{% assign raw = steps.fetch_edge_oldest_review.output.data | json %}{% if raw contains '\"SubmittedDateTime\":\"' %}{% assign d = raw | split: '\"SubmittedDateTime\":\"' | last | split: '\"' | first | strip %}{% endif %}{% if d != '' %}{% assign now_sec = 'now' | date: '%s' | plus: 0 %}{% assign rev_sec = d | date: '%s' | plus: 0 %}{% assign age_sec = now_sec | minus: rev_sec %}{% if age_sec >= 0 %}{% assign days = age_sec | divided_by: 86400 | floor %}{% endif %}{% endif %}{{ days }}"
                       age_source: "{% assign d = '' %}{% assign raw = steps.fetch_edge_oldest_review.output.data | json %}{% if raw contains '\"SubmittedDateTime\":\"' %}{% assign d = raw | split: '\"SubmittedDateTime\":\"' | last | split: '\"' | first | strip %}{% endif %}{% if d != '' %}edge-oldest-review{% else %}none{% endif %}"
 
           - name: resolve_listing_age
             type: data.set
             with:
-              published_days: "{% if steps.parse_store_listing.output.published_days != '' %}{{ steps.parse_store_listing.output.published_days }}{% elsif steps.parse_edge_oldest_review_age.output.published_days != '' %}{{ steps.parse_edge_oldest_review_age.output.published_days }}{% else %}{% endif %}"
-              published_epoch: "{% if steps.parse_store_listing.output.published_epoch != '' %}{{ steps.parse_store_listing.output.published_epoch }}{% elsif steps.parse_edge_oldest_review_age.output.published_epoch != '' %}{{ steps.parse_edge_oldest_review_age.output.published_epoch }}{% else %}{% endif %}"
-              age_source: "{% if steps.parse_store_listing.output.published_days != '' %}chrome-af{% elsif steps.parse_edge_oldest_review_age.output.age_source == 'edge-oldest-review' %}edge-oldest-review{% else %}none{% endif %}"
+              published_days: "{% assign days = '' %}{% if steps.parse_store_listing.output.published_days != '' %}{% assign days = steps.parse_store_listing.output.published_days | plus: 0 | floor %}{% elsif steps.resolve_listing_response.output.fetch_source == 'edge' and steps.parse_edge_oldest_review_age.output.for_extension_id == steps.set_extension_context.output.extension_id and steps.parse_edge_oldest_review_age.output.published_days != '' %}{% assign days = steps.parse_edge_oldest_review_age.output.published_days | plus: 0 | floor %}{% endif %}{{ days }}"
+              published_epoch: "{% assign epoch = '' %}{% if steps.parse_store_listing.output.published_epoch != '' %}{% assign epoch = steps.parse_store_listing.output.published_epoch %}{% elsif steps.resolve_listing_response.output.fetch_source == 'edge' and steps.parse_edge_oldest_review_age.output.for_extension_id == steps.set_extension_context.output.extension_id and steps.parse_edge_oldest_review_age.output.published_epoch != '' %}{% assign epoch = steps.parse_edge_oldest_review_age.output.published_epoch %}{% endif %}{{ epoch }}"
+              age_source: "{% assign src = 'none' %}{% if steps.parse_store_listing.output.published_days != '' %}{% assign src = 'chrome-af' %}{% elsif steps.resolve_listing_response.output.fetch_source == 'edge' and steps.parse_edge_oldest_review_age.output.for_extension_id == steps.set_extension_context.output.extension_id and steps.parse_edge_oldest_review_age.output.age_source == 'edge-oldest-review' %}{% assign src = 'edge-oldest-review' %}{% endif %}{{ src }}"
 
           - name: fetch_chrome_detail_for_email
             type: if
@@ -486,182 +490,211 @@ steps:
         with:
           message: "Kibana case created for {{ variables.suspicious_count }} suspicious extension(s): {{ steps.create_suspicious_extensions_case.output.case.id }}"
 
-      - name: remediate_suspicious_extensions
-        type: foreach
-        foreach: "${{ variables.suspicious_extensions }}"
+      - name: when_endpoint_remediation
+        type: if
+        condition: 'consts.enable_endpoint_remediation: true'
         steps:
-          - name: when_can_remediate
-            type: if
-            condition: 'foreach.item.agent_id: *'
+          - name: remediate_suspicious_extensions
+            type: foreach
+            foreach: "${{ variables.suspicious_extensions }}"
             steps:
-              - name: set_remediation_paths
-                type: data.set
-                with:
-                  zip_path: "{% if foreach.item.os_type == 'macos' %}/tmp/EXT-RSP-{{ foreach.item.extension_id }}.zip{% elsif foreach.item.file_path contains 'AppData' %}{{ foreach.item.file_path | split: 'AppData' | first | strip }}AppData\\Local\\Temp\\EXT-RSP-{{ foreach.item.extension_id }}.zip{% else %}C:\\Windows\\Temp\\EXT-RSP-{{ foreach.item.extension_id }}.zip{% endif %}"
-                  # Windows: derive from CRX temp Users\{user}\AppData path. macOS CRX temp is under /private/var/folders — discover install dir at runtime via find.
-                  windows_extensions_dir: "{% assign pfx = foreach.item.file_path | split: 'AppData' | first | strip %}{% assign bf = foreach.item.browser_family %}{% if bf == 'edge' %}{{ pfx }}AppData/Local/Microsoft/Edge/User Data/Default/Extensions/{{ foreach.item.extension_id }}{% elsif bf == 'brave' %}{{ pfx }}AppData/Local/BraveSoftware/Brave-Browser/User Data/Default/Extensions/{{ foreach.item.extension_id }}{% elsif bf == 'opera' %}{{ pfx }}AppData/Roaming/Opera Software/Opera Stable/Extensions/{{ foreach.item.extension_id }}{% elsif bf == 'vivaldi' %}{{ pfx }}AppData/Local/Vivaldi/User Data/Default/Extensions/{{ foreach.item.extension_id }}{% elsif bf == 'chromium' %}{{ pfx }}AppData/Local/Chromium/User Data/Default/Extensions/{{ foreach.item.extension_id }}{% else %}{{ pfx }}AppData/Local/Google/Chrome/User Data/Default/Extensions/{{ foreach.item.extension_id }}{% endif %}"
-                  macos_extensions_glob: "{% assign bf = foreach.item.browser_family %}{% if bf == 'edge' %}*/Library/Application Support/Microsoft Edge/*/Extensions/{{ foreach.item.extension_id }}{% elsif bf == 'brave' %}*/Library/Application Support/BraveSoftware/Brave-Browser/*/Extensions/{{ foreach.item.extension_id }}{% elsif bf == 'opera' %}*/Library/Application Support/com.operasoftware.Opera/*/Extensions/{{ foreach.item.extension_id }}{% elsif bf == 'vivaldi' %}*/Library/Application Support/Vivaldi/*/Extensions/{{ foreach.item.extension_id }}{% elsif bf == 'chromium' %}*/Library/Application Support/Chromium/*/Extensions/{{ foreach.item.extension_id }}{% else %}*/Library/Application Support/Google/Chrome/*/Extensions/{{ foreach.item.extension_id }}{% endif %}"
-
-              - name: when_macos_remediate
+              - name: when_can_remediate
                 type: if
-                condition: 'foreach.item.os_type: "macos"'
+                condition: 'foreach.item.agent_id: *'
                 steps:
-                  - name: zip_extension_folder_macos
-                    type: kibana.request
-                    with:
-                      method: POST
-                      path: /api/endpoint/action/execute
-                      headers:
-                        kbn-xsrf: "true"
-                      body:
-                        endpoint_ids:
-                          - "{{ foreach.item.agent_id }}"
-                        comment: "EXT-RSP|{{ foreach.item.extension_id }}|zip extension folder"
-                        parameters:
-                          command: "/bin/bash -c 'EXT=$(find /Users -type d -path \"{{ steps.set_remediation_paths.output.macos_extensions_glob }}\" 2>/dev/null | head -1); if [ -z \"$EXT\" ]; then echo EXT_NOT_FOUND; exit 0; fi; ditto -c -k --sequesterRsrc \"$EXT\" \"{{ steps.set_remediation_paths.output.zip_path }}\"; echo EXT_ZIPPED:$EXT'"
-                          timeout: 300
-                    on-failure:
-                      continue: true
-
-                  - name: wait_for_zip_macos
-                    type: wait
-                    with:
-                      duration: 30s
-
-                  - name: get_file_extension_zip_macos
-                    type: kibana.request
-                    with:
-                      method: POST
-                      path: /api/endpoint/action/get_file
-                      headers:
-                        kbn-xsrf: "true"
-                      body:
-                        endpoint_ids:
-                          - "{{ foreach.item.agent_id }}"
-                        comment: "EXT-RSP|{{ foreach.item.extension_id }}|evidence zip"
-                        parameters:
-                          path: "{{ steps.set_remediation_paths.output.zip_path }}"
-                    on-failure:
-                      continue: true
-
-                  - name: delete_extension_folder_macos
-                    type: kibana.request
-                    with:
-                      method: POST
-                      path: /api/endpoint/action/execute
-                      headers:
-                        kbn-xsrf: "true"
-                      body:
-                        endpoint_ids:
-                          - "{{ foreach.item.agent_id }}"
-                        comment: "EXT-RSP|{{ foreach.item.extension_id }}|delete extension folder"
-                        parameters:
-                          command: "/bin/bash -c 'EXT=$(find /Users -type d -path \"{{ steps.set_remediation_paths.output.macos_extensions_glob }}\" 2>/dev/null | head -1); if [ -z \"$EXT\" ]; then echo EXT_NOT_FOUND; exit 0; fi; rm -rf \"$EXT\"; echo EXT_DELETED:$EXT'"
-                          timeout: 120
-                    on-failure:
-                      continue: true
-
-                  - name: record_remediation_note_macos
+                  - name: set_remediation_paths
                     type: data.set
                     with:
-                      remediation_note: "Extension {{ foreach.item.extension_id }} ({{ foreach.item.os_type }}, host {{ foreach.item.host_id }}, agent {{ foreach.item.agent_id }}): zip={{ steps.set_remediation_paths.output.zip_path }}, get-file action={% if steps.get_file_extension_zip_macos.output.data.id %}{{ steps.get_file_extension_zip_macos.output.data.id }}{% else %}failed{% endif %}, delete execute={% if steps.delete_extension_folder_macos.output.data.id %}{{ steps.delete_extension_folder_macos.output.data.id }}{% else %}failed{% endif %}"
+                      zip_path: "{% if foreach.item.os_type == 'macos' %}/tmp/EXT-RSP-{{ foreach.item.extension_id }}.zip{% elsif foreach.item.file_path contains 'AppData' %}{{ foreach.item.file_path | split: 'AppData' | first | strip }}AppData\\Local\\Temp\\EXT-RSP-{{ foreach.item.extension_id }}.zip{% else %}C:\\Windows\\Temp\\EXT-RSP-{{ foreach.item.extension_id }}.zip{% endif %}"
+                      # Windows: derive from CRX temp Users\{user}\AppData path (backslashes). macOS: discover install dir via find.
+                      windows_extensions_dir: "{% assign pfx = foreach.item.file_path | split: 'AppData' | first | strip %}{% assign bf = foreach.item.browser_family %}{% if bf == 'edge' %}{{ pfx }}AppData\\Local\\Microsoft\\Edge\\User Data\\Default\\Extensions\\{{ foreach.item.extension_id }}{% elsif bf == 'brave' %}{{ pfx }}AppData\\Local\\BraveSoftware\\Brave-Browser\\User Data\\Default\\Extensions\\{{ foreach.item.extension_id }}{% elsif bf == 'opera' %}{{ pfx }}AppData\\Roaming\\Opera Software\\Opera Stable\\Extensions\\{{ foreach.item.extension_id }}{% elsif bf == 'vivaldi' %}{{ pfx }}AppData\\Local\\Vivaldi\\User Data\\Default\\Extensions\\{{ foreach.item.extension_id }}{% elsif bf == 'chromium' %}{{ pfx }}AppData\\Local\\Chromium\\User Data\\Default\\Extensions\\{{ foreach.item.extension_id }}{% else %}{{ pfx }}AppData\\Local\\Google\\Chrome\\User Data\\Default\\Extensions\\{{ foreach.item.extension_id }}{% endif %}"
+                      macos_extensions_glob: "{% assign bf = foreach.item.browser_family %}{% if bf == 'edge' %}*/Library/Application Support/Microsoft Edge/*/Extensions/{{ foreach.item.extension_id }}{% elsif bf == 'brave' %}*/Library/Application Support/BraveSoftware/Brave-Browser/*/Extensions/{{ foreach.item.extension_id }}{% elsif bf == 'opera' %}*/Library/Application Support/com.operasoftware.Opera/*/Extensions/{{ foreach.item.extension_id }}{% elsif bf == 'vivaldi' %}*/Library/Application Support/Vivaldi/*/Extensions/{{ foreach.item.extension_id }}{% elsif bf == 'chromium' %}*/Library/Application Support/Chromium/*/Extensions/{{ foreach.item.extension_id }}{% else %}*/Library/Application Support/Google/Chrome/*/Extensions/{{ foreach.item.extension_id }}{% endif %}"
 
-                  - name: accumulate_remediation_note_macos
-                    type: data.set
-                    with:
-                      remediation_notes: '${{ variables.remediation_notes | push: steps.record_remediation_note_macos.output.remediation_note }}'
-
-                  - name: log_remediation_macos
-                    type: console
-                    with:
-                      message: "{{ steps.record_remediation_note_macos.output.remediation_note }}"
-                else:
-                  - name: when_windows_remediate
+                  - name: when_macos_remediate
                     type: if
-                    condition: 'foreach.item.file_path: *Users* and foreach.item.file_path: *AppData*'
+                    condition: 'foreach.item.os_type: "macos"'
                     steps:
-                      - name: zip_extension_folder_windows
+                      - name: zip_extension_folder_macos
                         type: kibana.request
                         with:
                           method: POST
                           path: /api/endpoint/action/execute
-                          headers:
-                            kbn-xsrf: "true"
                           body:
+                            agent_type: endpoint
                             endpoint_ids:
                               - "{{ foreach.item.agent_id }}"
+                            case_ids:
+                              - "{{ steps.create_suspicious_extensions_case.output.case.id }}"
                             comment: "EXT-RSP|{{ foreach.item.extension_id }}|zip extension folder"
                             parameters:
-                              command: 'powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "Compress-Archive -LiteralPath ''{{ steps.set_remediation_paths.output.windows_extensions_dir }}'' -DestinationPath ''{{ steps.set_remediation_paths.output.zip_path }}'' -Force"'
+                              command: "/bin/bash -c 'EXT=$(find /Users -type d -path \"{{ steps.set_remediation_paths.output.macos_extensions_glob }}\" 2>/dev/null | head -1); if [ -z \"$EXT\" ]; then echo EXT_NOT_FOUND; exit 0; fi; ditto -c -k --sequesterRsrc \"$EXT\" \"{{ steps.set_remediation_paths.output.zip_path }}\"; echo EXT_ZIPPED:$EXT'"
                               timeout: 300
                         on-failure:
                           continue: true
+                          fallback:
+                            - name: log_zip_macos_failure
+                              type: console
+                              with:
+                                message: "WARN: zip_extension_folder_macos failed for {{ foreach.item.extension_id }} agent {{ foreach.item.agent_id }}"
 
-                      - name: wait_for_zip_windows
+                      - name: wait_for_zip_macos
                         type: wait
                         with:
                           duration: 30s
 
-                      - name: get_file_extension_zip_windows
+                      - name: get_file_extension_zip_macos
                         type: kibana.request
                         with:
                           method: POST
                           path: /api/endpoint/action/get_file
-                          headers:
-                            kbn-xsrf: "true"
                           body:
+                            agent_type: endpoint
                             endpoint_ids:
                               - "{{ foreach.item.agent_id }}"
+                            case_ids:
+                              - "{{ steps.create_suspicious_extensions_case.output.case.id }}"
                             comment: "EXT-RSP|{{ foreach.item.extension_id }}|evidence zip"
                             parameters:
                               path: "{{ steps.set_remediation_paths.output.zip_path }}"
                         on-failure:
                           continue: true
 
-                      - name: delete_extension_folder_windows
+                      - name: delete_extension_folder_macos
                         type: kibana.request
                         with:
                           method: POST
                           path: /api/endpoint/action/execute
-                          headers:
-                            kbn-xsrf: "true"
                           body:
+                            agent_type: endpoint
                             endpoint_ids:
                               - "{{ foreach.item.agent_id }}"
+                            case_ids:
+                              - "{{ steps.create_suspicious_extensions_case.output.case.id }}"
                             comment: "EXT-RSP|{{ foreach.item.extension_id }}|delete extension folder"
                             parameters:
-                              command: 'powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "if (Test-Path -LiteralPath ''{{ steps.set_remediation_paths.output.windows_extensions_dir }}'') { Remove-Item -LiteralPath ''{{ steps.set_remediation_paths.output.windows_extensions_dir }}'' -Recurse -Force -ErrorAction Stop; Write-Output ''EXT_DELETED'' } else { Write-Output ''EXT_NOT_FOUND'' }"'
+                              command: "/bin/bash -c 'EXT=$(find /Users -type d -path \"{{ steps.set_remediation_paths.output.macos_extensions_glob }}\" 2>/dev/null | head -1); if [ -z \"$EXT\" ]; then echo EXT_NOT_FOUND; exit 0; fi; rm -rf \"$EXT\"; echo EXT_DELETED:$EXT'"
                               timeout: 120
                         on-failure:
                           continue: true
 
-                      - name: record_remediation_note_windows
+                      - name: record_remediation_note_macos
                         type: data.set
                         with:
-                          remediation_note: "Extension {{ foreach.item.extension_id }} ({{ foreach.item.os_type }}, host {{ foreach.item.host_id }}, agent {{ foreach.item.agent_id }}): zip={{ steps.set_remediation_paths.output.zip_path }}, get-file action={% if steps.get_file_extension_zip_windows.output.data.id %}{{ steps.get_file_extension_zip_windows.output.data.id }}{% else %}failed{% endif %}, delete execute={% if steps.delete_extension_folder_windows.output.data.id %}{{ steps.delete_extension_folder_windows.output.data.id }}{% else %}failed{% endif %}"
+                          remediation_note: "Extension {{ foreach.item.extension_id }} ({{ foreach.item.os_type }}, host {{ foreach.item.host_id }}, agent {{ foreach.item.agent_id }}): zip={{ steps.set_remediation_paths.output.zip_path }}, get-file action={% if steps.get_file_extension_zip_macos.output.data.id %}{{ steps.get_file_extension_zip_macos.output.data.id }}{% else %}failed{% endif %}, delete execute={% if steps.delete_extension_folder_macos.output.data.id %}{{ steps.delete_extension_folder_macos.output.data.id }}{% else %}failed{% endif %}"
 
-                      - name: accumulate_remediation_note_windows
+                      - name: accumulate_remediation_note_macos
                         type: data.set
                         with:
-                          remediation_notes: '${{ variables.remediation_notes | push: steps.record_remediation_note_windows.output.remediation_note }}'
+                          remediation_notes: '${{ variables.remediation_notes | push: steps.record_remediation_note_macos.output.remediation_note }}'
 
-                      - name: log_remediation_windows
+                      - name: log_remediation_macos
                         type: console
                         with:
-                          message: "{{ steps.record_remediation_note_windows.output.remediation_note }}"
+                          message: "{{ steps.record_remediation_note_macos.output.remediation_note }}"
+                    else:
+                      - name: when_windows_remediate
+                        type: if
+                        condition: 'foreach.item.file_path: *Users* and foreach.item.file_path: *AppData*'
+                        steps:
+                          - name: zip_extension_folder_windows
+                            type: kibana.request
+                            with:
+                              method: POST
+                              path: /api/endpoint/action/execute
+                              body:
+                                agent_type: endpoint
+                                endpoint_ids:
+                                  - "{{ foreach.item.agent_id }}"
+                                case_ids:
+                                  - "{{ steps.create_suspicious_extensions_case.output.case.id }}"
+                                comment: "EXT-RSP|{{ foreach.item.extension_id }}|zip extension folder"
+                                parameters:
+                                  command: "powershell.exe -NoProfile -ExecutionPolicy Bypass -Command Compress-Archive -LiteralPath '{{ steps.set_remediation_paths.output.windows_extensions_dir }}' -DestinationPath '{{ steps.set_remediation_paths.output.zip_path }}' -Force"
+                                  timeout: 300
+                            on-failure:
+                              continue: true
+                              fallback:
+                                - name: log_zip_windows_failure
+                                  type: console
+                                  with:
+                                    message: "WARN: zip_extension_folder_windows failed for {{ foreach.item.extension_id }} agent {{ foreach.item.agent_id }} — check Execute response-action privilege and agent online; ERR_FR_TOO_MANY_REDIRECTS is usually kibana.request auth/URL loop, not Compress-Archive"
 
-      - name: build_remediation_case_body
-        type: data.set
-        with:
-          remediation_body: "{% assign note_count = variables.remediation_notes | size %}{% if note_count == 0 %}No endpoint remediation ran (missing agent.id or user profile path).{% else %}{{ variables.remediation_notes | join: '\n' }}{% endif %}"
+                          - name: wait_for_zip_windows
+                            type: wait
+                            with:
+                              duration: 30s
 
-      - name: add_case_remediation_comment
-        type: cases.addComment
-        with:
-          case_id: "{{ steps.create_suspicious_extensions_case.output.case.id }}"
-          comment: |
-            ## Endpoint response actions
+                          - name: get_file_extension_zip_windows
+                            type: kibana.request
+                            with:
+                              method: POST
+                              path: /api/endpoint/action/get_file
+                              body:
+                                agent_type: endpoint
+                                endpoint_ids:
+                                  - "{{ foreach.item.agent_id }}"
+                                case_ids:
+                                  - "{{ steps.create_suspicious_extensions_case.output.case.id }}"
+                                comment: "EXT-RSP|{{ foreach.item.extension_id }}|evidence zip"
+                                parameters:
+                                  path: "{{ steps.set_remediation_paths.output.zip_path }}"
+                            on-failure:
+                              continue: true
 
-            Zip → get-file (password: elastic) → delete extension folder.
+                          - name: delete_extension_folder_windows
+                            type: kibana.request
+                            with:
+                              method: POST
+                              path: /api/endpoint/action/execute
+                              body:
+                                agent_type: endpoint
+                                endpoint_ids:
+                                  - "{{ foreach.item.agent_id }}"
+                                case_ids:
+                                  - "{{ steps.create_suspicious_extensions_case.output.case.id }}"
+                                comment: "EXT-RSP|{{ foreach.item.extension_id }}|delete extension folder"
+                                parameters:
+                                  command: "powershell.exe -NoProfile -ExecutionPolicy Bypass -Command if (Test-Path -LiteralPath '{{ steps.set_remediation_paths.output.windows_extensions_dir }}') { Remove-Item -LiteralPath '{{ steps.set_remediation_paths.output.windows_extensions_dir }}' -Recurse -Force; Write-Output EXT_DELETED } else { Write-Output EXT_NOT_FOUND }"
+                                  timeout: 120
+                            on-failure:
+                              continue: true
 
-            {{ steps.build_remediation_case_body.output.remediation_body }}
+                          - name: record_remediation_note_windows
+                            type: data.set
+                            with:
+                              remediation_note: "Extension {{ foreach.item.extension_id }} ({{ foreach.item.os_type }}, host {{ foreach.item.host_id }}, agent {{ foreach.item.agent_id }}): zip={{ steps.set_remediation_paths.output.zip_path }}, get-file action={% if steps.get_file_extension_zip_windows.output.data.id %}{{ steps.get_file_extension_zip_windows.output.data.id }}{% else %}failed{% endif %}, delete execute={% if steps.delete_extension_folder_windows.output.data.id %}{{ steps.delete_extension_folder_windows.output.data.id }}{% else %}failed{% endif %}"
+
+                          - name: accumulate_remediation_note_windows
+                            type: data.set
+                            with:
+                              remediation_notes: '${{ variables.remediation_notes | push: steps.record_remediation_note_windows.output.remediation_note }}'
+
+                          - name: log_remediation_windows
+                            type: console
+                            with:
+                              message: "{{ steps.record_remediation_note_windows.output.remediation_note }}"
+
+          - name: build_remediation_case_body
+            type: data.set
+            with:
+              remediation_body: "{% assign note_count = variables.remediation_notes | size %}{% if note_count == 0 %}No endpoint remediation ran (missing agent.id or user profile path, or all actions failed).{% else %}{{ variables.remediation_notes | join: '\n' }}{% endif %}"
+
+          - name: add_case_remediation_comment
+            type: cases.addComment
+            with:
+              case_id: "{{ steps.create_suspicious_extensions_case.output.case.id }}"
+              comment: |
+                ## Endpoint response actions
+
+                Zip → get-file (password: elastic) → delete extension folder.
+
+                {{ steps.build_remediation_case_body.output.remediation_body }}
+        else:
+          - name: add_case_remediation_skipped
+            type: cases.addComment
+            with:
+              case_id: "{{ steps.create_suspicious_extensions_case.output.case.id }}"
+              comment: |
+                ## Endpoint response actions
+
+                Skipped (`consts.enable_endpoint_remediation: false`). Reputation and case completed without Defend zip/get-file/delete.
