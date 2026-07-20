@@ -20,8 +20,8 @@
 #    default exception list (the list built by the rule's "Add rule
 #    exception" flow).
 # 2. For each such rule, read its default-list items, and resolve the
-#    matching rule (same rule_id) in the target space — rules with no items
-#    or no counterpart in the target space are skipped.
+#    matching rule (same rule_id) in the target space — rules with no
+#    counterpart in the target space are skipped.
 # 3. For each item, look it up by item_id in the target space; if missing,
 #    recreate it on the target rule via
 #    POST /api/detection_engine/rules/<id>/exceptions — this also creates
@@ -31,18 +31,28 @@
 #    overwrite_existing: true, it is overwritten (PUT) whenever the source
 #    copy was updated more recently than the target copy; with the default
 #    (false), existing items are never touched.
+# 5. With sync_deletions: true, items on the target rule's default list
+#    that this workflow previously pushed (recognized by their provenance
+#    comment) and that no longer exist on the source rule are deleted.
+#    Exceptions created directly in the target space carry no provenance
+#    comment and are never deleted.
 # Unchanged items are skipped (lookup by item_id, POST 409 also treated as
 # already-synced), so frequent runs are cheap, idempotent no-ops.
 #
 # Scope and caveats:
-# - One-way: source → target. Deletions are not synced — removing an item in
-#   the source space does not remove the copy already pushed to the target.
+# - One-way: source → target. Nothing is ever written to the source space.
 # - Edits sync only when overwrite_existing: true. Items are matched by
 #   item_id and compared by updated_at (source newer than target = push),
 #   so edits made directly to the target copy survive until the source item
 #   changes again — at which point the source version wins. With the
 #   default (false), items already pushed are never touched; delete the
 #   target copy to force a re-push.
+# - Deletions sync only when sync_deletions: true, and only for items the
+#   workflow itself pushed (identified by the provenance comment added on
+#   creation). Removing that comment from a target copy exempts it from
+#   deletion. When enabling this, keep the per_page caps above your real
+#   rule/item counts — a source item beyond the fetch cap would look
+#   deleted.
 # - Only rule default exception lists are synced. Space-bound shared
 #   exception lists attached to a rule are reported but not copied — for
 #   those, prefer a space-agnostic shared list (API-only to create), which
@@ -58,8 +68,8 @@
 # - Rule listing: GET /api/detection_engine/rules/_find
 # - Create rule exception items (creates the default list if needed):
 #   POST /api/detection_engine/rules/<rule UUID>/exceptions
-# - Exception list item lookup:
-#   GET /api/exception_lists/items?item_id=...&namespace_type=single
+# - Exception list item lookup / update / delete:
+#   GET|PUT|DELETE /api/exception_lists/items (item_id + namespace_type)
 # =============================================================================
 version: "1"
 name: Sync Rule Exceptions Across Spaces
@@ -69,8 +79,9 @@ description: |
   space) are pushed to the matching rule (same rule_id) in the target space
   (e.g. the "main" space). Items are matched by item_id, so re-runs skip
   anything already synced; with overwrite_existing: true, source edits
-  overwrite the target copy when the source item is newer. Shared exception
-  lists are reported but not copied.
+  overwrite the target copy when the source item is newer, and with
+  sync_deletions: true, workflow-pushed copies whose source item was removed
+  are deleted. Shared exception lists are reported but not copied.
 enabled: true
 tags:
   - security
@@ -90,6 +101,13 @@ consts:
   # target copy. When false (default), items already synced are never
   # touched.
   overwrite_existing: false
+  # --- Deletions: remove workflow-pushed copies whose source is gone ---------
+  # When true, items on a target rule's default list that were pushed by
+  # this workflow (recognized by their provenance comment) and no longer
+  # exist on the source rule are deleted. Exceptions created directly in
+  # the target space are never deleted. When false (default), nothing is
+  # ever deleted.
+  sync_deletions: false
 
 triggers:
   - type: manual
@@ -138,7 +156,8 @@ steps:
         condition: 'steps.set_rule_ctx.output.src_list_id: * AND not steps.set_rule_ctx.output.src_list_id: ""'
         steps:
           # per_page caps a single sync batch; raise it if a rule carries
-          # more than 500 exception items.
+          # more than 500 exception items. With sync_deletions enabled this
+          # cap matters doubly: a source item beyond it would look deleted.
           - name: get_source_items
             type: kibana.request
             with:
@@ -151,35 +170,37 @@ steps:
               headers:
                 kbn-xsrf: "true"
 
-          - name: if_items_found
-            type: if
-            condition: steps.get_source_items.output.total > 0
-            steps:
-              # The matching rule in the target space, by the same stable
-              # rule_id. A 404 surfaces as a step error, handled below.
-              - name: get_target_rule
-                type: kibana.request
-                with:
-                  method: GET
-                  path: "/s/{{ consts.target_space }}/api/detection_engine/rules"
-                  query:
-                    rule_id: "{{ steps.set_rule_ctx.output.rule_id }}"
-                  headers:
-                    kbn-xsrf: "true"
-                on-failure:
-                  continue: true
+          # The matching rule in the target space, by the same stable
+          # rule_id. Resolved even when the source list is empty — the
+          # deletion pass must still run after the last source item is
+          # removed. A 404 surfaces as a step error, handled below.
+          - name: get_target_rule
+            type: kibana.request
+            with:
+              method: GET
+              path: "/s/{{ consts.target_space }}/api/detection_engine/rules"
+              query:
+                rule_id: "{{ steps.set_rule_ctx.output.rule_id }}"
+              headers:
+                kbn-xsrf: "true"
+            on-failure:
+              continue: true
 
-              - name: if_target_rule_found
+          - name: if_target_rule_found
+            type: if
+            condition: "not steps.get_target_rule.error: *"
+            steps:
+              - name: if_items_found
                 type: if
-                condition: "not steps.get_target_rule.error: *"
+                condition: steps.get_source_items.output.total > 0
                 steps:
                   - name: per_item_sync
                     type: foreach
                     foreach: "{{ steps.get_source_items.output.data }}"
                     steps:
-                      # 200 = already synced (skip). 404 = missing (push).
-                      # item_id is preserved on push, so this lookup is the
-                      # idempotency check.
+                      # 200 = already synced (skip/overwrite). 404 = missing
+                      # (push). item_id is preserved on push, so this lookup
+                      # is the idempotency check.
                       - name: get_target_item
                         type: kibana.request
                         with:
@@ -253,7 +274,9 @@ steps:
                           # injects the real arrays; plain {{ }} renders to
                           # a string and the API rejects it with a 400.
                           # item_id is kept so future runs recognize the
-                          # copy.
+                          # copy, and the provenance comment marks it as
+                          # workflow-managed (the deletion pass relies on
+                          # it).
                           - name: create_target_item
                             type: kibana.request
                             with:
@@ -280,15 +303,77 @@ steps:
                             with:
                               message: "{% if steps.create_target_item.error %}{% if steps.create_target_item.error.message contains '409' or steps.create_target_item.error.message contains 'already exists' %}Exception \"{{ foreach.item.name }}\" (item_id {{ foreach.item.item_id }}) already exists in space \"{{ consts.target_space }}\", skipping.{% else %}Failed to push exception \"{{ foreach.item.name }}\" (item_id {{ foreach.item.item_id }}) to space \"{{ consts.target_space }}\": {{ steps.create_target_item.error }}{% endif %}{% else %}Pushed exception \"{{ foreach.item.name }}\" (item_id {{ foreach.item.item_id }}) to rule \"{{ steps.get_target_rule.output.name }}\" in space \"{{ consts.target_space }}\".{% endif %}"
 
-                  - name: log_rule_summary
-                    type: console
+              # Deletion pass: remove workflow-pushed copies whose source
+              # item is gone. Runs only with sync_deletions: true and only
+              # once the target rule has a default list to inspect.
+              - name: set_deletion_ctx
+                type: data.set
+                with:
+                  deletions_enabled: "{% if consts.sync_deletions %}true{% else %}false{% endif %}"
+                  tgt_list_id: "{%- for l in steps.get_target_rule.output.exceptions_list -%}{%- if l.type == 'rule_default' -%}{{ l.list_id }}{%- endif -%}{%- endfor -%}"
+                  source_item_ids: "{{ steps.get_source_items.output.data | map: 'item_id' | join: ',' }}"
+
+              - name: if_deletions_enabled
+                type: if
+                condition: 'steps.set_deletion_ctx.output.deletions_enabled: "true" AND steps.set_deletion_ctx.output.tgt_list_id: * AND not steps.set_deletion_ctx.output.tgt_list_id: ""'
+                steps:
+                  - name: get_target_items
+                    type: kibana.request
                     with:
-                      message: 'Rule "{{ steps.set_rule_ctx.output.rule_name }}" (rule_id {{ steps.set_rule_ctx.output.rule_id }}): {{ steps.get_source_items.output.total }} exception item(s) checked against space "{{ consts.target_space }}" (see per-item logs above).{% assign shared = steps.set_rule_ctx.output.shared_list_count | plus: 0 %}{% if shared > 0 %} Note: {{ shared }} space-bound shared exception list(s) attached to this rule were NOT synced — use space-agnostic shared lists for those.{% endif %}'
-                else:
-                  - name: log_target_missing
-                    type: console
-                    with:
-                      message: 'Rule "{{ steps.set_rule_ctx.output.rule_name }}" (rule_id {{ steps.set_rule_ctx.output.rule_id }}) has {{ steps.get_source_items.output.total }} exception item(s) in space "{{ consts.source_space }}" but no matching rule in space "{{ consts.target_space }}" — skipping. Install or create the rule there to sync it.'
+                      method: GET
+                      path: "/s/{{ consts.target_space }}/api/exception_lists/items/_find"
+                      query:
+                        list_id: "{{ steps.set_deletion_ctx.output.tgt_list_id }}"
+                        namespace_type: "single"
+                        per_page: "500"
+                      headers:
+                        kbn-xsrf: "true"
+
+                  - name: per_target_item_cleanup
+                    type: foreach
+                    foreach: "{{ steps.get_target_items.output.data }}"
+                    steps:
+                      # Delete only when BOTH hold: the item carries this
+                      # workflow's provenance comment (so it was pushed by
+                      # the sync, not created by an analyst in the target
+                      # space) AND its item_id is gone from the source
+                      # rule's list.
+                      - name: check_orphan
+                        type: data.set
+                        with:
+                          should_delete: "{%- assign managed = false -%}{%- for c in foreach.item.comments -%}{%- if c.comment contains 'Synced from space' -%}{%- assign managed = true -%}{%- endif -%}{%- endfor -%}{%- assign present = false -%}{%- assign ids = steps.set_deletion_ctx.output.source_item_ids | split: ',' -%}{%- for id in ids -%}{%- if id == foreach.item.item_id -%}{%- assign present = true -%}{%- endif -%}{%- endfor -%}{%- if managed and present == false -%}true{%- else -%}false{%- endif -%}"
+
+                      - name: if_orphaned_copy
+                        type: if
+                        condition: 'steps.check_orphan.output.should_delete: "true"'
+                        steps:
+                          - name: delete_target_item
+                            type: kibana.request
+                            with:
+                              method: DELETE
+                              path: "/s/{{ consts.target_space }}/api/exception_lists/items"
+                              query:
+                                item_id: "{{ foreach.item.item_id }}"
+                                namespace_type: "single"
+                              headers:
+                                kbn-xsrf: "true"
+                            on-failure:
+                              continue: true
+
+                          - name: log_deleted
+                            type: console
+                            with:
+                              message: "{% if steps.delete_target_item.error %}Failed to delete orphaned exception \"{{ foreach.item.name }}\" (item_id {{ foreach.item.item_id }}) from space \"{{ consts.target_space }}\": {{ steps.delete_target_item.error }}{% else %}Deleted exception \"{{ foreach.item.name }}\" (item_id {{ foreach.item.item_id }}) from space \"{{ consts.target_space }}\" — its source item was removed from space \"{{ consts.source_space }}\".{% endif %}"
+
+              - name: log_rule_summary
+                type: console
+                with:
+                  message: 'Rule "{{ steps.set_rule_ctx.output.rule_name }}" (rule_id {{ steps.set_rule_ctx.output.rule_id }}): {{ steps.get_source_items.output.total }} exception item(s) checked against space "{{ consts.target_space }}" (see per-item logs above).{% assign shared = steps.set_rule_ctx.output.shared_list_count | plus: 0 %}{% if shared > 0 %} Note: {{ shared }} space-bound shared exception list(s) attached to this rule were NOT synced — use space-agnostic shared lists for those.{% endif %}'
+            else:
+              - name: log_target_missing
+                type: console
+                with:
+                  message: 'Rule "{{ steps.set_rule_ctx.output.rule_name }}" (rule_id {{ steps.set_rule_ctx.output.rule_id }}) has {{ steps.get_source_items.output.total }} exception item(s) in space "{{ consts.source_space }}" but no matching rule in space "{{ consts.target_space }}" — skipping. Install or create the rule there to sync it.'
 
   - name: log_done
     type: console
