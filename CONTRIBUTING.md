@@ -41,7 +41,7 @@ Every template lives at:
 library/workflows/<slug>/<slug>.yaml
 ```
 
-- The `<slug>` directory name and the YAML file name **must match the `slug` value** inside the file's `template-metadata` block. The catalog generator enforces this.
+- The `<slug>` directory name and the YAML file name **must match the `slug` value** inside the file's `template-metadata` block. (Enforced by the validation step, planned to run in CI.)
 - Slug format: kebab-case, lowercase ASCII alphanumeric + hyphens. Should be descriptive and unique across the library.
 - One template per directory. Future multi-version coexistence will live as `<slug>/<slug>-v<n>.yaml` siblings, but the starter set is all v1.
 
@@ -60,7 +60,6 @@ template-metadata:
     with geolocation data. Produces a low / medium / high risk verdict.
   solutions: [security]                        # optional. absent or empty = cross-solution (every solution context)
   categories: [enrichment, threat-intel]       # closed-vocab; entries MUST exist in library/categories.yaml
-  icon: abuseipdb                              # optional; references a known icon ID
   install:                                     # only required when the body uses __install__.<name>
     form:
       - name: abuseipdb-connector
@@ -72,17 +71,16 @@ template-metadata:
 ```
 
 **Required fields:** `slug`, `version`, `availability`, `name`, `description`, `categories`.
-**Optional fields:** `solutions`, `icon`, `install`.
+**Optional fields:** `solutions`, `install`.
 
 Notes on the optional fields:
 
 - **`solutions`** — when present, an array of solution ids (e.g. `[security]`, `[security, observability]`). Absent or empty means the template is **cross-solution** and appears in every solution context.
-- **`icon`** — references an icon known to the Kibana UI (e.g. `abuseipdb`, `slack`, `virustotal`). Omit if there's no obvious match yet.
 - **`install`** — required if and only if the workflow body references any `__install__.<name>` placeholder. See [Install-time inputs](#install-time-inputs-installform--__install__) below.
 
 ### Categories vocabulary
 
-`categories: [...]` is a **closed vocabulary**. Every value used in any template's `categories` array must exist as an `id` in [`library/categories.yaml`](./library/categories.yaml). The catalog generator rejects any template referencing an unknown id.
+`categories: [...]` is a **closed vocabulary**. Every value used in any template's `categories` array must exist as an `id` in [`library/categories.yaml`](./library/categories.yaml). The validation step (planned to run in CI) rejects any template referencing an unknown id.
 
 If your template genuinely needs a category that is not in the vocab, **add the entry to `library/categories.yaml` in the same PR** — never invent values used only in a template. Reviewers will either accept the new entry or point you at an existing one.
 
@@ -135,6 +133,8 @@ Two rules:
 1. **Prefer the dedicated vendor step type.** If a vendor has a dedicated step (e.g. `abuseipdb.checkIp`, `virustotal.scanFileHash`, `slack2.createConversation`, `brave-search.webSearch`), use it. The legacy generic `http` step is an escape hatch and should only appear when no dedicated step exists.
 2. **Never invent a step type or a connector type.** If you think one is missing, file an issue rather than working around it locally.
 
+The catalog generator derives `stepTypes` and `triggerTypes` for each template — the full `type` of every step (including nested steps) and every trigger — into the catalog row. The Library UI renders the step/trigger icons on each template card from these, which is why templates no longer carry a manual `icon` field.
+
 ### Style and idiomatic patterns
 
 - **2-space YAML indentation.**
@@ -148,7 +148,7 @@ Two rules:
 
 ## Validating locally
 
-The repo ships a small Node script that walks every template, validates its `template-metadata` block, verifies every `categories[]` entry against the vocab, and produces the per-Kibana-version catalogs the CDN serves.
+The repo ships a small Node script that walks every template, checks its `template-metadata` block has the required fields, and produces the per-Kibana-version catalogs the CDN serves.
 
 ```bash
 npm install
@@ -175,15 +175,13 @@ KIBANA_MAIN_VERSION=9.6.0 KIBANA_NAMED_MINORS="" npm run build:catalog
 
 ### What "valid" means
 
-The script enforces:
+The generator enforces only:
 
-- File parses with `js-yaml`.
-- `template-metadata` is present with all required fields.
-- `slug` matches the parent directory name.
-- `version` is valid semver; `availability` is a valid semver range.
-- Every `categories[]` entry exists in `library/categories.yaml`.
+- The file parses as YAML.
+- `template-metadata` is present with all required fields (`slug`, `version`, `availability`, `name`, `description`, `categories`).
+- At least one template is discovered.
 
-It does **not** re-validate what the sibling CI validation job already checks.
+Deeper authoring invariants — slug ⇄ directory parity, valid `version` semver and `availability` range, `categories[]` membership in the vocab, `install.form` ⇄ `__install__` consistency, and step/connector type validity — are delegated to the separate validation step (planned to run in CI), not the generator.
 
 ---
 

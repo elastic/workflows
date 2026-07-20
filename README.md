@@ -82,7 +82,6 @@ template-metadata:
   description: "Assess the reputation of an IP address using AbuseIPDB."
   solutions: [security]                     # optional; omit for cross-solution
   categories: [enrichment, threat-intel]    # closed vocab; entries from library/categories.yaml
-  icon: abuseipdb                           # optional
   install:                                  # only when the body uses __install__.<name>
     form:
       - name: abuseipdb-connector
