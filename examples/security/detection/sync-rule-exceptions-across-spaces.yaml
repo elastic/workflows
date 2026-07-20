@@ -1,0 +1,296 @@
+# =============================================================================
+# Workflow: Sync Rule Exceptions Across Spaces
+# Category: security/detection
+#
+# Rule exceptions are space-dependent: an exception added to a rule in one
+# Kibana space does not apply to the "same" rule in another space. This
+# workflow keeps them in sync — one-way, for every rule in the source space:
+# exceptions added to any rule's default exception list in a source space
+# (e.g. a "subset" space covering only some logs) are pushed to the matching
+# rule in a target space (e.g. the "main" space covering all logs). Rules
+# are matched across spaces by their stable rule_id (identical in every
+# space for prebuilt rules).
+#
+# Entirely self-contained in Kibana (kibana.request against the detection
+# engine + exceptions APIs) — no GitHub, no detection-rules CLI, no external
+# connectors.
+#
+# On each run (scheduled + manual):
+# 1. List the rules in the source space and pick out those carrying a
+#    default exception list (the list built by the rule's "Add rule
+#    exception" flow).
+# 2. For each such rule, read its default-list items, and resolve the
+#    matching rule (same rule_id) in the target space — rules with no items
+#    or no counterpart in the target space are skipped.
+# 3. For each item, look it up by item_id in the target space; if missing,
+#    recreate it on the target rule via
+#    POST /api/detection_engine/rules/<id>/exceptions — this also creates
+#    the target rule's default exception list on first sync, so target
+#    rules need no manual preparation.
+# 4. If the item already exists in the target space: with
+#    overwrite_existing: true, it is overwritten (PUT) whenever the source
+#    copy was updated more recently than the target copy; with the default
+#    (false), existing items are never touched.
+# Unchanged items are skipped (lookup by item_id, POST 409 also treated as
+# already-synced), so frequent runs are cheap, idempotent no-ops.
+#
+# Scope and caveats:
+# - One-way: source → target. Deletions are not synced — removing an item in
+#   the source space does not remove the copy already pushed to the target.
+# - Edits sync only when overwrite_existing: true. Items are matched by
+#   item_id and compared by updated_at (source newer than target = push),
+#   so edits made directly to the target copy survive until the source item
+#   changes again — at which point the source version wins. With the
+#   default (false), items already pushed are never touched; delete the
+#   target copy to force a re-push.
+# - Only rule default exception lists are synced. Space-bound shared
+#   exception lists attached to a rule are reported but not copied — for
+#   those, prefer a space-agnostic shared list (API-only to create), which
+#   every space sees natively.
+# - Comments and expiration dates (expire_time) are not carried over; each
+#   pushed item gets a provenance comment recording where it came from.
+# - per_page caps a run at 500 rules and 500 items per rule; raise the
+#   respective query params if your source space exceeds them.
+#
+# References:
+# - Rule exceptions:
+#   https://www.elastic.co/docs/solutions/security/detect-and-alert/add-manage-exceptions
+# - Rule listing: GET /api/detection_engine/rules/_find
+# - Create rule exception items (creates the default list if needed):
+#   POST /api/detection_engine/rules/<rule UUID>/exceptions
+# - Exception list item lookup:
+#   GET /api/exception_lists/items?item_id=...&namespace_type=single
+# =============================================================================
+version: "1"
+name: Sync Rule Exceptions Across Spaces
+description: |
+  One-way sync of rule exceptions between Kibana spaces: exceptions added to
+  any rule's default exception list in the source space (e.g. a "subset"
+  space) are pushed to the matching rule (same rule_id) in the target space
+  (e.g. the "main" space). Items are matched by item_id, so re-runs skip
+  anything already synced; with overwrite_existing: true, source edits
+  overwrite the target copy when the source item is newer. Shared exception
+  lists are reported but not copied.
+enabled: true
+tags:
+  - security
+  - detection
+  - exceptions
+  - spaces
+  - automation
+
+consts:
+  # --- Space the exceptions are authored in (space ID, not display name) -----
+  source_space: "subset"
+  # --- Space the exceptions are pushed to ("default" is the initial space) ---
+  target_space: "default"
+  # --- Overwrite: push source edits over existing target copies --------------
+  # When true, an item that already exists in the target space is
+  # overwritten whenever the source copy was updated more recently than the
+  # target copy. When false (default), items already synced are never
+  # touched.
+  overwrite_existing: false
+
+triggers:
+  - type: manual
+  # Adjust the sync cadence here (consts cannot be referenced in triggers).
+  # Already-synced items are skipped, so frequent runs are cheap no-ops.
+  - type: scheduled
+    with:
+      every: 15m
+
+steps:
+  # All rules in the source space, including their exception list
+  # references. per_page caps a single sync batch; raise it if the space
+  # holds more than 500 rules.
+  - name: get_source_rules
+    type: kibana.request
+    with:
+      method: GET
+      path: "/s/{{ consts.source_space }}/api/detection_engine/rules/_find"
+      query:
+        per_page: "500"
+      headers:
+        kbn-xsrf: "true"
+
+  - name: per_rule_sync
+    type: foreach
+    foreach: "{{ steps.get_source_rules.output.data }}"
+    steps:
+      # Capture the rule's context: the inner per-item foreach shadows
+      # foreach.item, so anything from the rule is referenced through this
+      # step. Picks the default exception list (type rule_default) and
+      # counts space-bound shared lists so the per-rule summary can flag
+      # them (they are not synced).
+      - name: set_rule_ctx
+        type: data.set
+        with:
+          rule_id: "{{ foreach.item.rule_id }}"
+          rule_name: "{{ foreach.item.name }}"
+          src_list_id: "{%- for l in foreach.item.exceptions_list -%}{%- if l.type == 'rule_default' -%}{{ l.list_id }}{%- endif -%}{%- endfor -%}"
+          src_namespace: "{%- for l in foreach.item.exceptions_list -%}{%- if l.type == 'rule_default' -%}{{ l.namespace_type }}{%- endif -%}{%- endfor -%}"
+          shared_list_count: "{%- assign n = 0 -%}{%- for l in foreach.item.exceptions_list -%}{%- if l.type != 'rule_default' and l.namespace_type == 'single' -%}{%- assign n = n | plus: 1 -%}{%- endif -%}{%- endfor -%}{{ n }}"
+
+      # Rules without a default exception list (the vast majority) are
+      # skipped without logging to keep the execution log readable.
+      - name: if_rule_has_default_list
+        type: if
+        condition: 'steps.set_rule_ctx.output.src_list_id: * AND not steps.set_rule_ctx.output.src_list_id: ""'
+        steps:
+          # per_page caps a single sync batch; raise it if a rule carries
+          # more than 500 exception items.
+          - name: get_source_items
+            type: kibana.request
+            with:
+              method: GET
+              path: "/s/{{ consts.source_space }}/api/exception_lists/items/_find"
+              query:
+                list_id: "{{ steps.set_rule_ctx.output.src_list_id }}"
+                namespace_type: "{{ steps.set_rule_ctx.output.src_namespace }}"
+                per_page: "500"
+              headers:
+                kbn-xsrf: "true"
+
+          - name: if_items_found
+            type: if
+            condition: steps.get_source_items.output.total > 0
+            steps:
+              # The matching rule in the target space, by the same stable
+              # rule_id. A 404 surfaces as a step error, handled below.
+              - name: get_target_rule
+                type: kibana.request
+                with:
+                  method: GET
+                  path: "/s/{{ consts.target_space }}/api/detection_engine/rules"
+                  query:
+                    rule_id: "{{ steps.set_rule_ctx.output.rule_id }}"
+                  headers:
+                    kbn-xsrf: "true"
+                on-failure:
+                  continue: true
+
+              - name: if_target_rule_found
+                type: if
+                condition: "not steps.get_target_rule.error: *"
+                steps:
+                  - name: per_item_sync
+                    type: foreach
+                    foreach: "{{ steps.get_source_items.output.data }}"
+                    steps:
+                      # 200 = already synced (skip). 404 = missing (push).
+                      # item_id is preserved on push, so this lookup is the
+                      # idempotency check.
+                      - name: get_target_item
+                        type: kibana.request
+                        with:
+                          method: GET
+                          path: "/s/{{ consts.target_space }}/api/exception_lists/items"
+                          query:
+                            item_id: "{{ foreach.item.item_id }}"
+                            namespace_type: "single"
+                          headers:
+                            kbn-xsrf: "true"
+                        on-failure:
+                          continue: true
+
+                      - name: create_only_if_missing
+                        type: if
+                        condition: "not steps.get_target_item.error: *"
+                        steps:
+                          # The item already exists in the target space.
+                          # Overwrite it only when overwrite_existing is
+                          # enabled AND the source copy is newer than the
+                          # target copy (ISO-8601 UTC timestamps compare
+                          # correctly as strings). The initial push always
+                          # leaves the target copy newer, so steady-state
+                          # runs stay no-ops.
+                          - name: check_item_changed
+                            type: data.set
+                            with:
+                              needs_update: "{% if consts.overwrite_existing and foreach.item.updated_at > steps.get_target_item.output.updated_at %}true{% else %}false{% endif %}"
+
+                          - name: if_source_newer
+                            type: if
+                            condition: 'steps.check_item_changed.output.needs_update: "true"'
+                            steps:
+                              # Same typed ${{ }} handling as the create.
+                              # comments are omitted so the target copy's
+                              # existing comments (incl. the provenance
+                              # note) are preserved.
+                              - name: update_target_item
+                                type: kibana.request
+                                with:
+                                  method: PUT
+                                  path: "/s/{{ consts.target_space }}/api/exception_lists/items"
+                                  headers:
+                                    kbn-xsrf: "true"
+                                  body:
+                                    item_id: "{{ foreach.item.item_id }}"
+                                    namespace_type: "single"
+                                    name: "{{ foreach.item.name }}"
+                                    description: "{{ foreach.item.description }}"
+                                    type: "{{ foreach.item.type }}"
+                                    entries: ${{ foreach.item.entries }}
+                                    os_types: ${{ foreach.item.os_types }}
+                                    tags: ${{ foreach.item.tags }}
+                                on-failure:
+                                  continue: true
+
+                              - name: log_updated
+                                type: console
+                                with:
+                                  message: "{% if steps.update_target_item.error %}Failed to overwrite exception \"{{ foreach.item.name }}\" (item_id {{ foreach.item.item_id }}) in space \"{{ consts.target_space }}\": {{ steps.update_target_item.error }}{% else %}Overwrote exception \"{{ foreach.item.name }}\" (item_id {{ foreach.item.item_id }}) in space \"{{ consts.target_space }}\" with the newer source version.{% endif %}"
+                            else:
+                              - name: log_already_synced
+                                type: console
+                                with:
+                                  message: 'Exception "{{ foreach.item.name }}" (item_id {{ foreach.item.item_id }}) already exists in space "{{ consts.target_space }}" — {% if consts.overwrite_existing %}up to date (source not newer), skipping{% else %}skipping (set overwrite_existing: true in consts to push source edits){% endif %}.'
+                        else:
+                          # Recreates the item on the target rule's default
+                          # exception list (creating that list on first
+                          # sync). entries/os_types/tags pass through
+                          # unchanged — note the typed ${{ }} syntax, which
+                          # injects the real arrays; plain {{ }} renders to
+                          # a string and the API rejects it with a 400.
+                          # item_id is kept so future runs recognize the
+                          # copy.
+                          - name: create_target_item
+                            type: kibana.request
+                            with:
+                              method: POST
+                              path: "/s/{{ consts.target_space }}/api/detection_engine/rules/{{ steps.get_target_rule.output.id }}/exceptions"
+                              headers:
+                                kbn-xsrf: "true"
+                              body:
+                                items:
+                                  - item_id: "{{ foreach.item.item_id }}"
+                                    name: "{{ foreach.item.name }}"
+                                    description: "{{ foreach.item.description }}"
+                                    type: "{{ foreach.item.type }}"
+                                    entries: ${{ foreach.item.entries }}
+                                    os_types: ${{ foreach.item.os_types }}
+                                    tags: ${{ foreach.item.tags }}
+                                    comments:
+                                      - comment: 'Synced from space "{{ consts.source_space }}" (rule_id {{ steps.set_rule_ctx.output.rule_id }}) by workflow "Sync Rule Exceptions Across Spaces", execution {{ execution.id }}.'
+                            on-failure:
+                              continue: true
+
+                          - name: log_pushed
+                            type: console
+                            with:
+                              message: "{% if steps.create_target_item.error %}{% if steps.create_target_item.error.message contains '409' or steps.create_target_item.error.message contains 'already exists' %}Exception \"{{ foreach.item.name }}\" (item_id {{ foreach.item.item_id }}) already exists in space \"{{ consts.target_space }}\", skipping.{% else %}Failed to push exception \"{{ foreach.item.name }}\" (item_id {{ foreach.item.item_id }}) to space \"{{ consts.target_space }}\": {{ steps.create_target_item.error }}{% endif %}{% else %}Pushed exception \"{{ foreach.item.name }}\" (item_id {{ foreach.item.item_id }}) to rule \"{{ steps.get_target_rule.output.name }}\" in space \"{{ consts.target_space }}\".{% endif %}"
+
+                  - name: log_rule_summary
+                    type: console
+                    with:
+                      message: 'Rule "{{ steps.set_rule_ctx.output.rule_name }}" (rule_id {{ steps.set_rule_ctx.output.rule_id }}): {{ steps.get_source_items.output.total }} exception item(s) checked against space "{{ consts.target_space }}" (see per-item logs above).{% assign shared = steps.set_rule_ctx.output.shared_list_count | plus: 0 %}{% if shared > 0 %} Note: {{ shared }} space-bound shared exception list(s) attached to this rule were NOT synced — use space-agnostic shared lists for those.{% endif %}'
+                else:
+                  - name: log_target_missing
+                    type: console
+                    with:
+                      message: 'Rule "{{ steps.set_rule_ctx.output.rule_name }}" (rule_id {{ steps.set_rule_ctx.output.rule_id }}) has {{ steps.get_source_items.output.total }} exception item(s) in space "{{ consts.source_space }}" but no matching rule in space "{{ consts.target_space }}" — skipping. Install or create the rule there to sync it.'
+
+  - name: log_done
+    type: console
+    with:
+      message: 'Rule exception sync finished: checked {{ steps.get_source_rules.output.total }} rule(s) in space "{{ consts.source_space }}" against space "{{ consts.target_space }}"{% if steps.get_source_rules.output.total > 500 %} (only the first 500 were processed this run — raise per_page in get_source_rules){% endif %}. execution.id={{ execution.id }}'
