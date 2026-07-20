@@ -67,9 +67,14 @@ set +x  # never echo the service-account key
 gcloud auth activate-service-account --key-file <(echo "${GCS_SA_KEY}")
 
 echo "--- Publish dist/v1 → gs://${BUCKET}/${DEST}"
-# `rsync -d` mirrors the tree (deletes objects for templates removed from the
-# repo). Uniform short TTL + ETag revalidation per the catalog cache contract:
-# body URLs are stable but NOT immutable, so no `immutable` header.
-gsutil -m -h "Cache-Control:public, max-age=300" rsync -d -r dist/v1 "gs://${BUCKET}/${DEST}"
+# Mirror the tree with `gcloud storage rsync` (the recommended CLI; gsutil's
+# rsync is deprecated and unreliable on some platforms).
+# `--delete-unmatched-destination-objects` removes objects for templates deleted
+# from the repo. Short TTL per the catalog cache contract: body URLs are stable
+# but NOT immutable, so no `immutable` cache directive.
+gcloud storage rsync dist/v1 "gs://${BUCKET}/${DEST}" \
+  --recursive \
+  --delete-unmatched-destination-objects \
+  --cache-control="public, max-age=300"
 
 echo "--- Done"
