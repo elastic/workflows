@@ -7,8 +7,7 @@ steps:
     command: .buildkite/scripts/publish_catalog.sh prod
     timeout_in_minutes: 20
     agents:
-      # TODO(eng-prod): confirm a core image/family that provides
-      # node 20 + gcloud/gsutil + vault out of the box (the script installs
-      # node as a fallback if the image doesn't ship it).
-      provider: gcp
-      image: family/core-ubuntu-2204
+      # Kibana-owned CI image with node + Cloud SDK (gcloud) + vault preinstalled
+      # (recommended by eng-prod). Kibana owns version bumps; we can move to a
+      # newer nodejs image later since we only require node >= 20.
+      image: "docker.elastic.co/ci-agent-images/kibana/chainguard-nodejs-20"

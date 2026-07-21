@@ -56,11 +56,11 @@ npm ci
 npm run build:catalog
 
 echo "--- Fetch GCS publisher credentials from Vault"
-# TODO(eng-prod): confirm the exact repo-scoped path + field where the
-# bekitzur-workflows service-account key lands (see elastic/security-team#18016).
-VAULT_SECRET_PATH="secret/ci/elastic-workflows/gcs-publish"
+# Repo-scoped CI secret, provisioned as a KV2Path resource in Terrazzo
+# (see elastic/security-team#18016). KV v2 → read with `vault kv get`.
+VAULT_SECRET_PATH="kv/ci-shared/workflows-library/gcs-publish"
 VAULT_FIELD="credentials"
-GCS_SA_KEY="$(retry 5 5 vault read -field="${VAULT_FIELD}" "${VAULT_SECRET_PATH}")"
+GCS_SA_KEY="$(retry 5 5 vault kv get -field="${VAULT_FIELD}" "${VAULT_SECRET_PATH}")"
 
 echo "--- Authenticate to GCP"
 set +x  # never echo the service-account key
