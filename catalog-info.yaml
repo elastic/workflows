@@ -84,6 +84,6 @@ spec:
         trigger_mode: code
       teams:
         everyone:
-          access_level: BUILD_AND_READ
+          access_level: READ_ONLY
         workflows-eng:
           access_level: MANAGE_BUILD_AND_READ

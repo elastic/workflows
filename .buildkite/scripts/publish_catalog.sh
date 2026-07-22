@@ -5,9 +5,9 @@
 # Usage: publish_catalog.sh <prod|staging>
 #
 # Runs on a Buildkite agent, which already has repo-scoped Vault access
-# (secret/ci/elastic-workflows/*) via the standard agent env hook — no explicit
-# `vault login` is needed. The only privileged action is uploading generated,
-# public catalog files to a public, read-only bucket.
+# (kv/ci-shared/workflows-library/gcs-publish) via the standard agent env
+# hook — no explicit `vault login` is needed. The only privileged action is
+# uploading generated, public catalog files to a public, read-only bucket.
 #
 # See tracking issue elastic/security-team#18016.
 
@@ -23,6 +23,7 @@ case "$TARGET" in
   prod)
     BUCKET="elastic-workflows-library-prod"
     DEST="library/v1"
+    CDN_BASE="https://workflows.elastic.co/library/v1"
     ;;
   staging)
     # Staging is for maintainer-pushed branches only (fork PRs are not built on
@@ -30,6 +31,7 @@ case "$TARGET" in
     # the previous staging preview.
     BUCKET="elastic-workflows-library-staging"
     DEST="library/v1"
+    CDN_BASE="https://workflows-staging.elastic.co/library/v1"
     ;;
   *)
     echo "Unknown target '${TARGET}' (expected 'prod' or 'staging')" >&2
@@ -61,9 +63,15 @@ echo "--- Fetch GCS publisher credentials from Vault"
 VAULT_SECRET_PATH="kv/ci-shared/workflows-library/gcs-publish"
 VAULT_FIELD="credentials"
 GCS_SA_KEY="$(retry 5 5 vault kv get -field="${VAULT_FIELD}" "${VAULT_SECRET_PATH}")"
+if [[ -z "${GCS_SA_KEY}" ]]; then
+  echo "Vault returned empty GCS credentials (${VAULT_SECRET_PATH}, field ${VAULT_FIELD})" >&2
+  exit 1
+fi
 
 echo "--- Authenticate to GCP"
-set +x  # never echo the service-account key
+set +x  # defensive: make sure the service-account key is never traced
+# Revoke the activated credentials when the script exits, even on failure.
+trap 'gcloud auth revoke --all 2>/dev/null || true' EXIT
 gcloud auth activate-service-account --key-file <(echo "${GCS_SA_KEY}")
 
 echo "--- Publish dist/v1 → gs://${BUCKET}/${DEST}"
@@ -76,5 +84,9 @@ gcloud storage rsync dist/v1 "gs://${BUCKET}/${DEST}" \
   --recursive \
   --delete-unmatched-destination-objects \
   --cache-control="public, max-age=300"
+
+echo "--- Annotate build"
+buildkite-agent annotate --style "success" --context "catalog-publish" \
+  "Published to ${CDN_BASE}/ — verify: \`curl -s ${CDN_BASE}/main/catalogs/templates.json | jq '.templates[].slug'\`"
 
 echo "--- Done"
