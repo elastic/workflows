@@ -88,10 +88,43 @@ If your template genuinely needs a category that is not in the vocab, **add the 
 
 When the operator installs a template into their Kibana, the catalog UI renders an install form derived from `template-metadata.install.form`. Whatever values the user submits get substituted into the workflow body wherever it references `__install__.<name>`.
 
-Two rules to internalize:
+Three rules to internalize:
 
 1. **`install.form` is the single source of truth.** Every `__install__.<name>` reference in the body MUST have a matching entry in `install.form`. The installer does not auto-derive form fields from `consts:` or anywhere else; an undeclared reference fails the install.
 2. **Form field names are kebab-case by convention** (e.g. `abuseipdb-connector`, `max-age-in-days`). They are internal template identifiers and are substituted away during rendering — end users never see them in the final workflow YAML.
+3. **References are plain text substitution — never wrap them in `{{ }}`.** See the next section; this is the most common authoring mistake.
+
+#### How `__install__.*` references render
+
+Substitution is **textual and happens once, at install time — before the workflow ever runs**. The installer replaces every `__install__.<name>` occurrence in the body with the submitted value. Liquid (`{{ ... }}`) is a **runtime** templating layer evaluated on each execution against the run context (`consts`, `inputs`, `steps.*`); install fields do not exist in that context.
+
+Therefore, **never wrap an install reference in Liquid braces**:
+
+```yaml
+# ❌ WRONG — after install this becomes path: "/_ml/jobs/{{ my-job }}/_forecast",
+# and at runtime Liquid resolves `my-job` as a (nonexistent) variable → empty string.
+path: "/_ml/jobs/{{ __install__.job-id }}/_forecast"
+
+# ✅ Bare reference — interpolated as text at install time.
+path: "/_ml/jobs/__install__.job-id/_forecast"
+```
+
+Bare references work as a whole scalar (`maxAgeInDays: __install__.max-age-in-days` — the value keeps its type), inline inside longer strings, and inside `|`/`>` block scalars.
+
+**Recommended pattern for anything used more than once (or embedded in strings): assign the install value to a const, then use normal Liquid on the const.** This gives the value a single, quote-safe injection point and keeps the body reading as ordinary workflow YAML:
+
+```yaml
+consts:
+  job_id: __install__.job-id        # snake_case! `{{ consts.job-id }}` would not parse in Liquid
+
+steps:
+  - name: run_forecast
+    type: elasticsearch.request
+    with:
+      path: "/_ml/anomaly_detectors/{{ consts.job_id }}/_forecast"
+```
+
+**Exception: `connector-id` always references the install field directly** (`connector-id: __install__.slack-connector`). It is resolved as a saved-object reference, not a Liquid-rendered value — this is the established pattern across all library templates.
 
 What belongs in the install form (vs `consts:`):
 
@@ -110,6 +143,7 @@ Templates that don't need any install-time inputs **omit the `install:` block en
 | `boolean` | Toggle | — |
 | `select` | Single choice from a fixed list | `options: [{ value, label }, ...]` |
 | `connector` | Picks an existing Kibana stack connector | `connectorType: .<vendor>` |
+| `esIndex` | An Elasticsearch index name | — (renders as a plain text input for now; index autocomplete is planned) |
 
 Every field can carry `label`, `description`, `required` (default `false`), and `default`.
 
