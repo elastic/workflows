@@ -24,6 +24,6 @@
     "eslint": "9.39.4",
     "eslint-config-prettier": "10.1.8",
     "globals": "16.5.0",
-    "prettier": "3.8.4"
+    "prettier": "3.9.5"
   }
 }
