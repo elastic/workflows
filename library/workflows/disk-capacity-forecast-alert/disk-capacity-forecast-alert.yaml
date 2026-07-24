@@ -24,7 +24,7 @@ template-metadata:
         description: >-
           The index that holds this job's anomaly and forecast results
           (e.g. .ml-anomalies-disk-usage-forecast).
-        inputType: text
+        inputType: esIndex
         required: true
       - name: slack-connector
         label: "Slack (v2) connector"
@@ -48,6 +48,9 @@ description: >
   confidence bound crosses 90% at a future timestamp.
 
 consts:
+  job_id: __install__.job-id
+  results_index: __install__.results-index
+  slack_channel: __install__.slack-channel
   forecast_duration: 14d
   forecast_expires_in: 24h
   # max_model_memory is capped at min(500mb, 40% of the job's model_memory_limit);
@@ -72,7 +75,7 @@ steps:
     type: elasticsearch.request
     with:
       method: POST
-      path: "/_ml/anomaly_detectors/{{ __install__.job-id }}/_forecast"
+      path: "/_ml/anomaly_detectors/{{ consts.job_id }}/_forecast"
       body:
         duration: "{{ consts.forecast_duration }}"
         expires_in: "{{ consts.forecast_expires_in }}"
@@ -96,14 +99,14 @@ steps:
         type: elasticsearch.request
         with:
           method: POST
-          path: "/{{ __install__.results-index }}/_search"
+          path: "/{{ consts.results_index }}/_search"
           body:
             size: 0
             query:
               bool:
                 filter:
                   - term:
-                      job_id: "{{ __install__.job-id }}"
+                      job_id: "{{ consts.job_id }}"
                   - term:
                       result_type: model_forecast_request_stats
                   - term:
@@ -115,7 +118,7 @@ steps:
     type: elasticsearch.request
     with:
       method: POST
-      path: "/{{ __install__.results-index }}/_search"
+      path: "/{{ consts.results_index }}/_search"
       body:
         size: 0
         # Combine host + mount into one key so we can count distinct affected
@@ -129,7 +132,7 @@ steps:
           bool:
             filter:
               - term:
-                  job_id: "{{ __install__.job-id }}"
+                  job_id: "{{ consts.job_id }}"
               - term:
                   result_type: model_forecast
               - term:
@@ -172,9 +175,9 @@ steps:
         type: slack2.sendMessage
         connector-id: __install__.slack-connector
         with:
-          channel: "{{ __install__.slack-channel }}"
+          channel: "{{ consts.slack_channel }}"
           text: |
-            Disk capacity forecast alert (job: {{ __install__.job-id }})
+            Disk capacity forecast alert (job: {{ consts.job_id }})
             Forecast ID: {{ steps.run_forecast.output.forecast_id }}
             Future breach buckets (forecast_upper >= {{ consts.breach_threshold }}): {{ steps.search_breaches.output.hits.total.value }} across {{ steps.search_breaches.output.aggregations.total_affected.value }} partition(s)
             Horizon: {{ consts.forecast_duration }}
@@ -186,4 +189,4 @@ steps:
       - name: no_breach_log
         type: console
         with:
-          message: "No disk forecast breaches above {{ consts.breach_threshold }} for {{ __install__.job-id }}"
+          message: "No disk forecast breaches above {{ consts.breach_threshold }} for {{ consts.job_id }}"
