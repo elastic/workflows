@@ -1,6 +1,6 @@
 ---
 name: create-library-template
-description: Author or modify a Workflow Template Library template (library/workflows/<slug>/<slug>.yaml). Use when creating a new workflow template, adding a workflow to the library, migrating an example to a template, editing a template-metadata block or install.form, fixing __install__ placeholders, or preparing a template PR for elastic/workflows.
+description: Author or modify a Workflow Template Library template. Use when creating a template, migrating an example to a template, editing template-metadata or install.form, or preparing a template PR.
 ---
 
 # Create a Workflow Template Library template

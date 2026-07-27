@@ -101,12 +101,12 @@ Substitution is **textual and happens once, at install time — before the workf
 Therefore, **never wrap an install reference in Liquid braces**:
 
 ```yaml
-# ❌ WRONG — after install this becomes path: "/_ml/jobs/{{ my-job }}/_forecast",
+# ❌ WRONG — after install this becomes path: "/_ml/anomaly_detectors/{{ my-job }}/_forecast",
 # and at runtime Liquid resolves `my-job` as a (nonexistent) variable → empty string.
-path: "/_ml/jobs/{{ __install__.job-id }}/_forecast"
+path: "/_ml/anomaly_detectors/{{ __install__.job-id }}/_forecast"
 
 # ✅ Bare reference — interpolated as text at install time.
-path: "/_ml/jobs/__install__.job-id/_forecast"
+path: "/_ml/anomaly_detectors/__install__.job-id/_forecast"
 ```
 
 Bare references work as a whole scalar (`maxAgeInDays: __install__.max-age-in-days` — the value keeps its type), inline inside longer strings, and inside `|`/`>` block scalars.
