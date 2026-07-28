@@ -2,11 +2,12 @@
 
 Threat detection, alerting, and rule management workflows
 
-## Workflows (10)
+## Workflows (11)
 
 | Workflow | Description |
 |----------|-------------|
 | [DaC - VCS Rule Sync](./dac-vcs-rule-sync/dac-vcs-rule-sync.yaml) | Detection-as-Code sync to version control: rules tagged `vcs` in a dev space are exported through a detection-rules fork and opened as pull requests against main, with unit tests reported on the PR ([setup guide](./dac-vcs-rule-sync/README.md)) |
+| [Sync Rule Exceptions Across Spaces](./sync-rule-exceptions-across-spaces.yaml) | One-way sync of rule exceptions between Kibana spaces: exceptions added to any rule's default exception list in a source space (e.g. a "subset" space) are pushed to the matching rules (same rule_id) in a target space (e.g. the "main" space), skipping items already synced, with opt-in consts to overwrite items when the source copy is newer and to delete workflow-pushed copies whose source exception was removed. It is self-contained in Kibana, no external services |
 | [Disable Noisy Elastic Defend Behavior Rules](./disable-noisy-endpoint-rules-from-esql.yaml) | Detects noisy Elastic Defend behavior rules via ES\|QL (FP bursts) and auto-creates scoped Endpoint Security exceptions by rule version; new artifact versions are unaffected |
 | [␆ Mark Alert as Acknowledged](./mark-alert-as-acknowledged.yaml) | This workflow YAML defines a manual trigger for acknowledging security alerts |
 | [🏷️ Add Alert Tag - FP](./add-alert-tag-fp.yaml) | This workflow YAML defines a manual trigger for adding a tag to a security alert |
