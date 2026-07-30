@@ -1,0 +1,205 @@
+# DaC VCS rule sync — companion to the Elastic workflow "DaC - VCS Rule Sync".
+#
+# Install this file in your detection-rules FORK at:
+#   .github/workflows/dac-vcs-rule-sync.yml
+#
+# The Elastic workflow (via the Kibana GitHub connector) creates a
+# `vcs-sync-<timestamp>` branch, commits a sync-request file under .vcs-sync/,
+# and opens a PR against main. That request commit triggers this workflow,
+# which:
+#   1. exports the rules tagged with the sync tag (default "vcs") from the dev
+#      Kibana space into the fork's custom rules directory on this branch
+#      (kibana export-rules -e -ac; existing TOML files are overwritten by
+#      default, so rule edits are picked up),
+#   2. commits and pushes the exported rules to the sync branch (the PR diff
+#      becomes the actual rule changes),
+#   3. runs the detection-rules unit tests and comments the result on the PR
+#      (a test failure also fails this run, showing red on the PR).
+#
+# If the export produces no file changes, the sync PR is closed automatically.
+#
+# Loop safety: commits made here use the built-in GITHUB_TOKEN (which does not
+# trigger workflows), and the `paths` filter only matches the sync-request
+# files the Elastic workflow writes — the rule commits this workflow pushes
+# can never re-trigger it.
+#
+# Required repository secrets (Settings > Secrets and variables > Actions):
+#   Either:
+#     DR_CLOUD_ID    Elastic Cloud ID (deployment overview page in the Cloud console)
+#   or:
+#     DR_KIBANA_URL  e.g. https://my-deployment.kb.us-east-1.aws.elastic.cloud
+#   And always:
+#     DR_API_KEY     base64 Elasticsearch API key that can read rules in the dev space
+#   Do not set DR_CLOUD_ID together with DR_KIBANA_URL — the detection-rules
+#   client rejects a cloud id combined with a mismatching Kibana URL.
+#
+# Recommended: commit a custom rules directory to the fork once
+# (`python -m detection_rules custom-rules setup-config dac-vcs-rules`)
+# so its _config.yaml / test config are version-controlled. If it is missing,
+# this workflow bootstraps a default one for the run.
+
+name: DaC - VCS rule sync
+
+on:
+  push:
+    branches:
+      - "vcs-sync-*"
+    paths:
+      - ".vcs-sync/**"
+
+permissions:
+  contents: write
+  pull-requests: write
+
+env:
+  DR_CLOUD_ID: ${{ secrets.DR_CLOUD_ID }}
+  DR_KIBANA_URL: ${{ secrets.DR_KIBANA_URL }}
+  DR_API_KEY: ${{ secrets.DR_API_KEY }}
+  CUSTOM_RULES_DIR: ${{ github.workspace }}/dac-vcs-rules
+  GH_TOKEN: ${{ github.token }}
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Validate connection settings
+        run: |
+          if [ -z "${DR_API_KEY}" ]; then
+            echo "::error::DR_API_KEY secret is not set."
+            exit 1
+          fi
+          if [ -n "${DR_CLOUD_ID}" ] && [ -n "${DR_KIBANA_URL}" ]; then
+            echo "::error::Set either DR_CLOUD_ID or DR_KIBANA_URL, not both."
+            exit 1
+          fi
+          if [ -z "${DR_CLOUD_ID}" ] && [ -z "${DR_KIBANA_URL}" ]; then
+            echo "::error::Set the DR_CLOUD_ID secret, or DR_KIBANA_URL."
+            exit 1
+          fi
+
+      - name: Checkout sync branch
+        uses: actions/checkout@v4
+
+      # The Elastic workflow commits one request file per sync, named after
+      # the branch. It carries the space and tag so the fork needs no
+      # duplicated configuration.
+      - name: Read sync request
+        run: |
+          request=".vcs-sync/${GITHUB_REF_NAME}.json"
+          if [ ! -f "${request}" ]; then
+            echo "::error::Sync request file ${request} not found on this branch."
+            exit 1
+          fi
+          echo "DEV_SPACE=$(jq -r '.dev_space' "${request}")" >> "${GITHUB_ENV}"
+          echo "SYNC_TAG=$(jq -r '.sync_tag' "${request}")" >> "${GITHUB_ENV}"
+          jq . "${request}"
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      # Install the package first, then overlay the fork's local lib copies in
+      # separate pip runs (mirrors upstream pythonpackage.yml). Combining them
+      # in one command makes pip resolve the local lib/kql path against the
+      # git-URL pin in pyproject.toml — two direct references for the same
+      # package — which fails with ResolutionImpossible.
+      - name: Install detection-rules
+        run: |
+          python -m pip install --upgrade pip
+          pip install ".[dev]"
+          pip install lib/kibana
+          pip install lib/kql
+
+      # The CLI refuses to start when CUSTOM_RULES_DIR points at a directory
+      # without _config.yaml, so the bootstrap itself must run with it unset.
+      - name: Bootstrap custom rules directory (first run only)
+        run: |
+          if [ ! -f "${CUSTOM_RULES_DIR}/_config.yaml" ]; then
+            echo "No committed custom rules directory found — creating a default one."
+            dir="${CUSTOM_RULES_DIR}"
+            env -u CUSTOM_RULES_DIR python -m detection_rules custom-rules setup-config "${dir}"
+          fi
+
+      # export-rules overwrites existing TOML files by default, so edited
+      # rules are updated in place — that's what makes this a sync.
+      - name: Export tagged rules from the dev space
+        id: export
+        run: |
+          python -m detection_rules kibana --space "${DEV_SPACE}" export-rules \
+            --directory "${CUSTOM_RULES_DIR}/rules" \
+            --exceptions-directory "${CUSTOM_RULES_DIR}/exceptions" \
+            --action-connectors-directory "${CUSTOM_RULES_DIR}/action_connectors" \
+            --export-exceptions \
+            --export-action-connectors \
+            --export-query "alert.attributes.tags: \"${SYNC_TAG}\"" \
+            --custom-rules-only \
+            --strip-version \
+            --skip-errors
+
+      - name: Commit exported rules to the sync branch
+        id: commit
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898994+github-actions[bot]@users.noreply.github.com"
+          git add "${CUSTOM_RULES_DIR}"
+          if git diff --cached --quiet; then
+            echo "changed=false" >> "${GITHUB_OUTPUT}"
+            echo "Export produced no rule changes — closing the sync PR."
+            gh pr close "${GITHUB_REF_NAME}" --delete-branch \
+              --comment "Automated VCS sync: the export produced no changes (the tagged rules are already in sync with this repository). Closing."
+          else
+            echo "changed=true" >> "${GITHUB_OUTPUT}"
+            git commit -m "[VCS Sync] Export '${SYNC_TAG}' tagged rules from space '${DEV_SPACE}'"
+            git push origin "HEAD:${GITHUB_REF_NAME}"
+          fi
+
+      - name: Run unit tests
+        id: unit_tests
+        if: steps.commit.outputs.changed == 'true'
+        run: |
+          set -o pipefail
+          python -m detection_rules test 2>&1 | tee "${RUNNER_TEMP}/unit-tests.log"
+
+      - name: Comment test results on the PR
+        if: always() && steps.commit.outputs.changed == 'true'
+        env:
+          TESTS_OUTCOME: ${{ steps.unit_tests.outcome }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          {
+            if [ "${TESTS_OUTCOME}" = "success" ]; then
+              echo "✅ **VCS sync complete — unit tests passed.**"
+              echo
+              echo "The \`${SYNC_TAG}\` tagged rules from space \`${DEV_SPACE}\` were exported into this branch and the detection-rules unit tests passed. Review the diff and merge to accept the rules into version control."
+            else
+              echo "❌ **VCS sync: unit tests failed.**"
+              echo
+              echo "The rules were exported and committed so the diff is reviewable, but the detection-rules unit tests failed — fix the rule(s) in the \`${DEV_SPACE}\` space and re-sync, or push a fix to this branch."
+              echo
+              echo "<details><summary>Unit test output (tail)</summary>"
+              echo
+              echo '```'
+              tail -c 8000 "${RUNNER_TEMP}/unit-tests.log" 2>/dev/null || echo "no unit test output captured"
+              echo '```'
+              echo
+              echo "</details>"
+            fi
+            echo
+            echo "[Workflow run](${RUN_URL})"
+          } > "${RUNNER_TEMP}/pr-comment.md"
+          gh pr comment "${GITHUB_REF_NAME}" --body-file "${RUNNER_TEMP}/pr-comment.md"
+
+      - name: Upload exported rules and test log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dac-vcs-sync-${{ github.run_id }}
+          path: |
+            ${{ env.CUSTOM_RULES_DIR }}/rules
+            ${{ env.CUSTOM_RULES_DIR }}/exceptions
+            ${{ env.CUSTOM_RULES_DIR }}/action_connectors
+            ${{ runner.temp }}/unit-tests.log
+          if-no-files-found: ignore
