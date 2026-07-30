@@ -1,0 +1,404 @@
+template-metadata:
+  slug: remediate-identity-suspected-phishing-kit-or-aitm-compromise
+  version: "1.0.0"
+  availability: ">=9.5.0"
+  name: "Remediate Identity - Suspected Phishing Kit or AiTM Compromise"
+  description: >-
+    Investigate and contain a suspected AiTM or phishing-kit identity
+    compromise (session, refresh-token, or OAuth theft), independent of the
+    kit used. Correlates victims from open Entra AiTM / phishing-kit alerts
+    (matched by rule_id), corroborates with recent post-authentication
+    persistence artifacts in the audit logs, and gates hard containment on
+    that corroboration. Reversible soft containment (session revocation,
+    confirm-compromised) runs automatically; account disable, device deletion,
+    and OAuth revocation require analyst approval. Every Microsoft Graph read
+    and write goes through an HTTP connector configured at install time.
+  solutions: [security]
+  categories: [response, case-management]
+  install:
+    form:
+      - name: microsoft-graph-connector
+        label: "Microsoft Graph HTTP connector"
+        description: >-
+          HTTP connector for Microsoft Graph, used for every Graph read and
+          write in this workflow. Configure it with base URL
+          https://graph.microsoft.com/v1.0 and OAuth 2.0 client credentials
+          (scope https://graph.microsoft.com/.default). The app registration
+          needs these admin-consented application permissions:
+          User.ReadWrite.All, Device.ReadWrite.All,
+          DelegatedPermissionGrant.ReadWrite.All, IdentityRiskyUser.ReadWrite.All.
+        inputType: connector
+        connectorType: .http
+        required: true
+
+name: Remediate Identity - Suspected Phishing Kit or AiTM Compromise
+description: |
+  Investigate and contain a suspected AiTM or phishing-kit identity compromise
+  (session, refresh-token, or OAuth theft), independent of the kit used.
+
+  Correlation identifies victims from open alerts raised by the Entra AiTM /
+  phishing-kit detection rules (matched by rule_id). Corroboration counts recent
+  post-authentication persistence artifacts (auth-method registration, OAuth
+  consent, device registration) in the audit logs and gates hard containment.
+
+  Reversible soft containment (session revocation and confirm-compromised) runs
+  automatically. Account disable, device deletion, and OAuth revocation require
+  analyst approval. All Graph writes use the Microsoft Graph HTTP connector.
+
+triggers:
+  # Attach as a custom action on the AiTM / phishing-kit detection rules, and/or
+  # run on the schedule. Both paths run the same rule_id-filtered correlation.
+  - type: manual
+    inputs:
+      # Keep the rule_id set in the default query below in sync with the Entra
+      # AiTM / phishing-kit detection rules installed in your tenant
+      # (rules/integrations/azure).
+      - name: correlation_esql
+        type: string
+        required: true
+        description: >-
+          Correlation over the security alerts index, filtered to the Entra AiTM /
+          phishing-kit rule_id set. Columns: [0] user.name, [1] alert_count,
+          [2] rules, [3] src_ips, [4] src_asn, [5] src_as_org, [6] user_agents.
+        default: |
+          FROM .alerts-security.alerts-*
+          | WHERE @timestamp > NOW() - 1 hour
+              AND kibana.alert.workflow_status != "closed"
+              AND user.name IS NOT NULL
+              AND user.name LIKE "*@*"
+              AND kibana.alert.rule.rule_id IN (
+                "d2c02b2b-bd01-4d4a-a17a-8df8f357b015",   /* AiTM Phishing-Kit Chain Detected */
+                "e5420ced-bc42-4783-a8df-99320567e090",   /* OAuth Device Code Phishing via AiTM */
+                "6e6376c1-a71e-4789-a795-198b05664064",   /* Potential AiTM Sign-In via OfficeHome (Tycoon2FA) */
+                "4b11dbab-ce37-49c4-bdf1-cdf64b405d96",   /* Kali365 Default User-Agent Detected */
+                "14fa0285-fe78-4843-ac8e-f4b481f49da9",   /* OAuth Phishing via First-Party Microsoft Application */
+                "4f95e0f8-18b7-459a-b8b5-b2f5c94bf6eb",   /* MS Auth Broker Sign-In to Unusual Resource */
+                "a83b3dac-325a-11ef-b3e6-f661ea17fbce",   /* OAuth Device Code Grant by MS Auth Broker */
+                "af22d970-7106-45b4-b5e3-460d15333727",   /* OAuth Device Code Grant by Unusual User */
+                "375132c6-25d5-11f0-8745-f661ea17fbcd",   /* OAuth Flow by MS Auth Broker to DRS */
+                "82629eed-5516-446e-ad73-03b8c4f4d571",   /* Device Registration with Phishing Kit Default OS Build */
+                "d4695889-0410-4e7b-a4aa-59be525a11a6",   /* Register Device with Unusual User Agent */
+                "90efea04-5675-11f0-8f80-f661ea17fbcd",   /* Unusual Cloud Device Registration */
+                "960b1cef-f94d-4150-863d-b1dc311739de")   /* Multiple Device Registrations by a Single User */
+          | STATS
+              alert_count = COUNT(*),
+              rules = VALUES(kibana.alert.rule.name),
+              src_ips = VALUES(source.ip),
+              src_asn = VALUES(source.`as`.number),
+              src_as_org = VALUES(source.`as`.organization.name),
+              user_agents = VALUES(`user_agent`.original)
+              BY user.name
+          | WHERE alert_count >= 1
+          | KEEP user.name, alert_count, rules, src_ips, src_asn, src_as_org, user_agents
+  - type: scheduled
+    with:
+      every: 15m
+
+steps:
+  # Phase 1: correlation. Victims with open AiTM / phishing-kit alerts (by rule_id).
+  - name: run_correlation
+    type: elasticsearch.esql.query
+    with:
+      query: "{{ inputs.correlation_esql }}"
+
+  - name: process_hits
+    type: if
+    condition: "steps.run_correlation.output.values.length > 0"
+    steps:
+      - name: per_user
+        type: foreach
+        foreach: "{{ steps.run_correlation.output.values }}"
+        steps:
+          - name: set_ctx
+            type: data.set
+            with:
+              upn: "{{ foreach.item[0] }}"
+
+          - name: log_hit
+            type: console
+            with:
+              message: "AiTM candidate {{ steps.set_ctx.output.upn }}: alerts={{ foreach.item[1] }}, rules={{ foreach.item[2] }}, ips={{ foreach.item[3] }} (row {{ foreach.index }})."
+
+          # Skip if an open containment case already exists for this user.
+          - name: find_existing_case
+            type: cases.findCases
+            with:
+              searchFields: ["title"]
+              search: "{{ steps.set_ctx.output.upn }}"
+              tags: ["aitm-containment"]
+            on-failure:
+              continue: true
+
+          - name: decide_skip
+            type: data.set
+            with:
+              should_skip: "{% if steps.find_existing_case.output.total > 0 %}true{% else %}false{% endif %}"
+
+          - name: already_contained
+            type: if
+            condition: "steps.decide_skip.output.should_skip : \"true\""
+            steps:
+              - name: log_skip
+                type: console
+                with:
+                  message: "Skipping {{ steps.set_ctx.output.upn }}: open aitm-containment case exists."
+            else:
+              # Phase 2: corroboration. Audit logs have no user.name, and the victim
+              # can appear in initiated_by or any target_resources slot depending on
+              # the operation, so match across initiated_by and the first 3 targets.
+              - name: corroborate
+                type: elasticsearch.esql.query
+                with:
+                  query: >-
+                    FROM logs-azure.auditlogs-*
+                    | WHERE @timestamp > NOW() - 6 hours
+                        AND azure.auditlogs.operation_name IN ("User registered security info", "POST UserAuthMethod.SecurityInfoRegistrationCallback", "Consent to application", "Add app role assignment grant to user", "Add delegated permission grant", "Register device", "Add device", "Add registered users to device", "Add registered owner to device", "Update PasswordProfile", "Reset user password")
+                        AND ("{{ steps.set_ctx.output.upn }}" IN (
+                              `azure.auditlogs.properties.initiated_by.user.userPrincipalName`,
+                              `azure.auditlogs.properties.target_resources.0.user_principal_name`,
+                              `azure.auditlogs.properties.target_resources.1.user_principal_name`,
+                              `azure.auditlogs.properties.target_resources.2.user_principal_name`))
+                    | STATS artifacts = COUNT(*), ops = VALUES(azure.auditlogs.operation_name)
+                    | KEEP artifacts, ops
+                on-failure:
+                  continue: true
+
+              - name: set_corroboration
+                type: data.set
+                with:
+                  corroboration: "{% if steps.corroborate.output.values.size > 0 %}{{ steps.corroborate.output.values[0][0] }}{% else %}0{% endif %}"
+
+              # Connector requests: put query parameters in `query`, not in `path`.
+              # The connector URL-encodes the path, so a query string embedded there
+              # is treated as part of the id and Graph returns 400 Invalid id format.
+              - name: get_user
+                type: http
+                connector-id: __install__.microsoft-graph-connector
+                with:
+                  path: "/users/{{ steps.set_ctx.output.upn }}"
+                  method: GET
+                  query:
+                    $select: "id,accountEnabled,onPremisesSyncEnabled,signInSessionsValidFromDateTime"
+                on-failure:
+                  continue: true
+
+              - name: create_case
+                type: cases.createCase
+                with:
+                  title: "AiTM/phishing-kit compromise: {{ steps.set_ctx.output.upn }}"
+                  description: |
+                    Suspected AiTM / phishing-kit identity compromise (session, refresh-token, or OAuth theft).
+
+                    Indicators:
+                    - UPN: {{ steps.set_ctx.output.upn }} (objectId {{ steps.get_user.output.data.id }})
+                    - Source: {{ foreach.item[3] }}, ASN {{ foreach.item[4] }} ({{ foreach.item[5] }})
+                    - User agent: {{ foreach.item[6] }}
+                    - Detections: {{ foreach.item[1] }} alerts, {{ foreach.item[2] }}
+                    - Post-auth artifacts ({{ steps.set_corroboration.output.corroboration }}): {{ steps.corroborate.output.values }}
+                    - On-prem synced: {{ steps.get_user.output.data.onPremisesSyncEnabled }}
+
+                    Auto soft-containment (reversible): revokeSignInSessions, confirmCompromised.
+                  tags: ["aitm", "session-theft", "identity-compromise", "aitm-containment"]
+                  owner: "securitySolution"
+                  severity: "high"
+                  settings:
+                    syncAlerts: true
+                    extractObservables: true
+
+              # Phase 3: soft containment. Reversible, runs for every hit.
+              - name: revoke_sessions
+                type: http
+                connector-id: __install__.microsoft-graph-connector
+                with:
+                  path: "/users/{{ steps.set_ctx.output.upn }}/revokeSignInSessions"
+                  method: POST
+                  headers:
+                    Content-Type: "application/json"
+                on-failure:
+                  continue: true
+
+              - name: confirm_compromised
+                type: http
+                connector-id: __install__.microsoft-graph-connector
+                with:
+                  path: "/identityProtection/riskyUsers/confirmCompromised"
+                  method: POST
+                  headers:
+                    Content-Type: "application/json"
+                  body:
+                    userIds:
+                      - "{{ steps.get_user.output.data.id }}"
+                on-failure:
+                  continue: true
+
+              # Phase 4/5: hard containment. Only when corroborated and approved.
+              - name: corroborated
+                type: if
+                condition: "steps.set_corroboration.output.corroboration > 0"
+                steps:
+                  - name: approve_hard_containment
+                    type: waitForApproval
+                    timeout: 4h
+                    with:
+                      message: |
+                        Approve hard containment for {{ steps.set_ctx.output.upn }}?
+                        {{ steps.set_corroboration.output.corroboration }} corroborating post-auth
+                        artifact(s); sessions already revoked. Approving will, in order:
+                        delete the user's registered and owned device objects, disable
+                        the account, revoke OAuth grants, and re-revoke sessions.
+                        Device deletion is destructive (BitLocker, Windows Hello, Intune).
+                      approveLabel: "Delete devices, disable & remediate"
+                      rejectLabel: "Hold (soft-containment only)"
+
+                  # Delete device objects first: a device-bound PRT survives session
+                  # revocation, so break device persistence before disabling/revoking.
+                  - name: get_registered_devices
+                    type: http
+                    connector-id: __install__.microsoft-graph-connector
+                    with:
+                      path: "/users/{{ steps.get_user.output.data.id }}/registeredDevices"
+                      method: GET
+                      query:
+                        $select: "id,displayName"
+                    on-failure:
+                      continue: true
+
+                  - name: get_owned_devices
+                    type: http
+                    connector-id: __install__.microsoft-graph-connector
+                    with:
+                      path: "/users/{{ steps.get_user.output.data.id }}/ownedDevices"
+                      method: GET
+                      query:
+                        $select: "id,displayName"
+                    on-failure:
+                      continue: true
+
+                  - name: delete_registered_devices
+                    type: foreach
+                    foreach: "{{ steps.get_registered_devices.output.data.value }}"
+                    steps:
+                      - name: delete_registered_device
+                        type: http
+                        connector-id: __install__.microsoft-graph-connector
+                        with:
+                          path: "/devices/{{ foreach.item.id }}"
+                          method: DELETE
+                        on-failure:
+                          continue: true
+
+                  - name: delete_owned_devices
+                    type: foreach
+                    foreach: "{{ steps.get_owned_devices.output.data.value }}"
+                    steps:
+                      - name: delete_owned_device
+                        type: http
+                        connector-id: __install__.microsoft-graph-connector
+                        with:
+                          path: "/devices/{{ foreach.item.id }}"
+                          method: DELETE
+                        on-failure:
+                          continue: true
+
+                  - name: disable_user
+                    type: http
+                    connector-id: __install__.microsoft-graph-connector
+                    with:
+                      path: "/users/{{ steps.set_ctx.output.upn }}"
+                      method: PATCH
+                      headers:
+                        Content-Type: "application/json"
+                      body:
+                        accountEnabled: false
+                    on-failure:
+                      continue: true
+
+                  - name: get_oauth_grants
+                    type: http
+                    connector-id: __install__.microsoft-graph-connector
+                    with:
+                      path: "/users/{{ steps.get_user.output.data.id }}/oauth2PermissionGrants"
+                      method: GET
+                    on-failure:
+                      continue: true
+
+                  - name: revoke_oauth_grants
+                    type: foreach
+                    foreach: "{{ steps.get_oauth_grants.output.data.value }}"
+                    steps:
+                      - name: delete_grant
+                        type: http
+                        connector-id: __install__.microsoft-graph-connector
+                        with:
+                          path: "/oauth2PermissionGrants/{{ foreach.item.id }}"
+                          method: DELETE
+                        on-failure:
+                          continue: true
+
+                  - name: revoke_sessions_final
+                    type: http
+                    connector-id: __install__.microsoft-graph-connector
+                    with:
+                      path: "/users/{{ steps.set_ctx.output.upn }}/revokeSignInSessions"
+                      method: POST
+                      headers:
+                        Content-Type: "application/json"
+                    on-failure:
+                      continue: true
+                else:
+                  - name: log_soft_only
+                    type: console
+                    with:
+                      message: "{{ steps.set_ctx.output.upn }}: AiTM alert without corroborating post-auth artifact, soft-contained only, queued for analyst review."
+
+              # Phase 6: validation. Confirm the revoke artifact and that no devices remain.
+              - name: validate_revoke
+                type: elasticsearch.esql.query
+                with:
+                  query: >-
+                    FROM logs-azure.auditlogs-*
+                    | WHERE @timestamp > NOW() - 1 hour
+                        AND `azure.auditlogs.properties.target_resources.0.user_principal_name` == "{{ steps.set_ctx.output.upn }}"
+                        AND azure.auditlogs.operation_name == "Update StsRefreshTokenValidFrom Timestamp"
+                    | STATS revoke_events = COUNT(*)
+                    | KEEP revoke_events
+                on-failure:
+                  continue: true
+
+              - name: validate_devices_gone
+                type: http
+                connector-id: __install__.microsoft-graph-connector
+                with:
+                  path: "/users/{{ steps.get_user.output.data.id }}/registeredDevices"
+                  method: GET
+                  query:
+                    $select: "id,displayName"
+                on-failure:
+                  continue: true
+
+              - name: record_outcome
+                type: cases.addComment
+                with:
+                  case_id: "{{ steps.create_case.output.case.id }}"
+                  comment: |
+                    Containment outcome:
+                    - Account disabled (accountEnabled=false)
+                    - Sessions revoked; StsRefreshTokenValidFrom events: {{ steps.validate_revoke.output.values }}
+                    - Devices deleted: registered={{ steps.get_registered_devices.output.data.value }}, owned={{ steps.get_owned_devices.output.data.value }}
+                    - OAuth grants revoked: {{ steps.get_oauth_grants.output.data.value }}
+                    - Registered devices remaining (must be 0): {{ steps.validate_devices_gone.output.data.value }}
+
+                    Analyst follow-up: reset password out-of-band; remove attacker-registered auth methods; review inbox rules and forwarding; re-enable only after identity re-verification.
+                on-failure:
+                  continue: true
+
+    else:
+      - name: log_no_hits
+        type: console
+        with:
+          message: "No open Entra AiTM / phishing-kit alerts in the correlation window."
+
+  - name: log_summary
+    type: console
+    with:
+      message: "Processed {{ steps.run_correlation.output.values | size }} correlated identity target(s)."
