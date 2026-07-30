@@ -6,6 +6,7 @@ Incident response, case management, and remediation workflows
 
 | Workflow | Description |
 |----------|-------------|
+| [Remediate Behavior — Windows Script File](./remediate-behavior-windows-script-file.yaml) | Alert or daily ES|QL; extracts .js/.vbs paths from behavior alerts and deletes script files via get-file + execute |
 | [Windows ClickFix Investigation](./windows-clickfix-investigation.yaml) | Uses the ClickFix Investigation Agent to analyze Windows ClickFix activity and deliver the result to an Elastic Security Case |
 | [📁 Case workflow - Prod](./case-workflow-prod.yaml) | The YAML workflow outlines a security operations process that triggers on alerts |
 | [📁 Traditional Triage](./traditional-triage.yaml) | The "Traditional Triage" workflow automates the response to security alerts, par |
