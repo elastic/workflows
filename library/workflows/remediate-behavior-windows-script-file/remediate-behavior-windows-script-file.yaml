@@ -1,0 +1,322 @@
+template-metadata:
+  slug: remediate-behavior-windows-script-file
+  version: "1.0.0"
+  availability: ">=9.5.0"
+  name: "Remediate Behavior - Windows Script File"
+  description: >-
+    On a Malicious Behavior Prevention alert or a daily schedule, find Windows
+    behavior alerts involving JavaScript / Visual Basic / mshta script
+    execution (subtechniques T1059.005, T1059.007, T1218.005), extract the
+    script file path from the process or parent command line, archive it from
+    the endpoint with Elastic Defend get-file, then delete it. Skips files
+    already archived (checked against the response-actions history).
+  solutions: [security]
+  categories: [response]
+
+name: Remediate Behavior — Windows Script File
+description: |
+  On alert or daily schedule, find behavior alerts with JavaScript/Visual Basic
+  script execution, extract the script file path from process.command_line or
+  process.parent.command_line, archive it with get-file, then delete the file on the endpoint.
+consts:
+  history_lookback: now-1d
+  script_subtechnique_ids: T1059.005,T1059.007,T1218.005
+  script_subtechnique_names: Visual Basic,JavaScript,Mshta
+  scheduled_esql_query: |
+    FROM .alerts-security.alerts-*
+    | WHERE @timestamp > NOW() - 24 hours AND host.os.type == "windows" AND message like "Malicious Behavior Prevention Alert*" AND  
+      KQL(""" threat.technique.subtechnique.id : ("T1059.005" or "T1059.007" or "T1218.005") """)
+      AND (
+        TO_LOWER(process.command_line) LIKE "*.vbs*"
+        OR TO_LOWER(process.command_line) LIKE "*.js*"
+        OR TO_LOWER(process.command_line) LIKE "*.jse*"
+        OR TO_LOWER(process.command_line) LIKE "*.vbe*"
+        OR TO_LOWER(process.command_line) LIKE "*.wsf*"
+        OR TO_LOWER(process.command_line) LIKE "*.hta*"
+        OR TO_LOWER(process.parent.command_line) LIKE "*.vbs*"
+        OR TO_LOWER(process.parent.command_line) LIKE "*.js*"
+        OR TO_LOWER(process.parent.command_line) LIKE "*.jse*"
+        OR TO_LOWER(process.parent.command_line) LIKE "*.vbe*"
+        OR TO_LOWER(process.parent.command_line) LIKE "*.wsf*"
+        OR TO_LOWER(process.parent.command_line) LIKE "*.hta*"
+      )
+    | STATS BY agent.id, host.id, process.command_line, process.parent.command_line, process.working_directory
+    | LIMIT 50
+triggers:
+  - type: alert
+  - type: scheduled
+    with:
+      every: 24h
+  - type: manual
+    inputs:
+      - name: agent_id
+        description: Agent ID for direct remediation when testing without an alert.
+        default: ""
+        type: string
+      - name: script_path
+        description: Full path to the script file to remove (e.g. C:\Users\user\Downloads\test.vbs).
+        default: ""
+        type: string
+      - name: esql_query
+        description: ES|QL returning agent.id, host.id, process.command_line, process.parent.command_line, process.working_directory per row.
+        default: |
+          FROM .alerts-security.alerts-*
+          | WHERE @timestamp > NOW() - 24 hours AND host.os.type == "windows" AND message like "Malicious Behavior Prevention Alert*" AND  
+            KQL(""" threat.technique.subtechnique.id : ("T1059.005" or "T1059.007" or "T1218.005") """)
+            AND (
+              TO_LOWER(process.command_line) LIKE "*.vbs*"
+              OR TO_LOWER(process.command_line) LIKE "*.js*"
+              OR TO_LOWER(process.command_line) LIKE "*.jse*"
+              OR TO_LOWER(process.command_line) LIKE "*.vbe*"
+              OR TO_LOWER(process.command_line) LIKE "*.wsf*"
+              OR TO_LOWER(process.command_line) LIKE "*.hta*"
+              OR TO_LOWER(process.parent.command_line) LIKE "*.vbs*"
+              OR TO_LOWER(process.parent.command_line) LIKE "*.js*"
+              OR TO_LOWER(process.parent.command_line) LIKE "*.jse*"
+              OR TO_LOWER(process.parent.command_line) LIKE "*.vbe*"
+              OR TO_LOWER(process.parent.command_line) LIKE "*.wsf*"
+              OR TO_LOWER(process.parent.command_line) LIKE "*.hta*"
+            )
+          | STATS BY agent.id, host.id, process.command_line, process.parent.command_line, process.working_directory
+          | LIMIT 50
+        type: string
+      - name: history_lookback
+        description: How far back to search response actions history (Date Math, e.g. now-1d).
+        default: now-1d
+        type: string
+steps:
+  - name: set_alert_context
+    type: data.set
+    with:
+      agent_id: "{% if event.alerts[0].agent.id != '' and event.alerts[0].agent.id != null %}{{ event.alerts[0].agent.id }}{% elsif event.alerts[0].elastic.agent.id != '' and event.alerts[0].elastic.agent.id != null %}{{ event.alerts[0].elastic.agent.id }}{% else %}{{ inputs.agent_id }}{% endif %}"
+      host_id: "{% if event.alerts[0].host.id != '' and event.alerts[0].host.id != null %}{{ event.alerts[0].host.id }}{% endif %}"
+      host_name: "{% if event.alerts[0].host.name != '' and event.alerts[0].host.name != null %}{{ event.alerts[0].host.name }}{% endif %}"
+      command_line: "{% if event.alerts[0].process.command_line != '' and event.alerts[0].process.command_line != null %}{{ event.alerts[0].process.command_line }}{% endif %}"
+      parent_command_line: "{% if event.alerts[0].process.parent.command_line != '' and event.alerts[0].process.parent.command_line != null %}{{ event.alerts[0].process.parent.command_line }}{% endif %}"
+      rule_name: "{% if event.alerts[0].kibana.alert.rule.name != '' and event.alerts[0].kibana.alert.rule.name != null %}{{ event.alerts[0].kibana.alert.rule.name }}{% elsif event.alerts[0].message != '' and event.alerts[0].message != null %}{{ event.alerts[0].message }}{% else %}manual{% endif %}"
+      alert_id: "{% if event.alerts[0].kibana.alert.uuid != '' and event.alerts[0].kibana.alert.uuid != null %}{{ event.alerts[0].kibana.alert.uuid }}{% elsif event.alerts[0]._id != '' and event.alerts[0]._id != null %}{{ event.alerts[0]._id }}{% else %}manual{% endif %}"
+      working_directory: "{% if event.alerts[0].process.working_directory != '' and event.alerts[0].process.working_directory != null %}{{ event.alerts[0].process.working_directory }}{% endif %}"
+      run_mode: "{% if event.alerts[0].process.command_line != '' and event.alerts[0].process.command_line != null %}alert{% elsif event.alerts[0].process.parent.command_line != '' and event.alerts[0].process.parent.command_line != null %}alert{% elsif inputs.script_path != '' and inputs.script_path != null %}alert{% else %}scheduled{% endif %}"
+      script_path: "{% assign script_path = '' %}{% if inputs.script_path != '' and inputs.script_path != null %}{{ inputs.script_path }}{% else %}{% assign wd = '' %}{% if event.alerts[0].process.working_directory %}{% assign wd = event.alerts[0].process.working_directory | strip %}{% endif %}{% if event.alerts[0].process.args %}{% for arg in event.alerts[0].process.args %}{% if script_path == '' %}{% assign al = arg | downcase | strip %}{% if al != 'wscript.exe' and al != 'cscript.exe' and al != 'mshta.exe' and al != 'cmd.exe' %}{% if al contains '.vbs' or al contains '.js' or al contains '.jse' or al contains '.vbe' or al contains '.wsf' or al contains '.hta' %}{% if al contains ':' %}{% assign script_path = arg | strip %}{% elsif wd != '' %}{% if wd ends with '\\' %}{% assign script_path = wd | append: arg | strip %}{% else %}{% assign script_path = wd | append: '\\' | append: arg | strip %}{% endif %}{% else %}{% assign script_path = arg | strip %}{% endif %}{% endif %}{% endif %}{% endif %}{% endfor %}{% endif %}{% if script_path == '' and event.alerts[0].process.command_line != '' %}{% assign parts = event.alerts[0].process.command_line | split: '\"' %}{% for part in parts %}{% if script_path == '' %}{% assign pl = part | downcase | strip %}{% if pl contains '.vbs' or pl contains '.js' or pl contains '.jse' or pl contains '.vbe' or pl contains '.wsf' or pl contains '.hta' %}{% if pl contains ':' %}{% assign script_path = part | strip %}{% elsif wd != '' %}{% if wd ends with '\\' %}{% assign script_path = wd | append: part | strip %}{% else %}{% assign script_path = wd | append: '\\' | append: part | strip %}{% endif %}{% else %}{% assign script_path = part | strip %}{% endif %}{% endif %}{% endif %}{% endfor %}{% endif %}{% if script_path == '' and event.alerts[0].process.command_line != '' %}{% for token in event.alerts[0].process.command_line | split: ' ' %}{% if script_path == '' %}{% assign tl = token | downcase | strip %}{% if tl != '' and tl != 'wscript.exe' and tl != 'cscript.exe' and tl != 'mshta.exe' and tl != 'cmd.exe' %}{% if tl contains '.vbs' or tl contains '.js' or tl contains '.jse' or tl contains '.vbe' or tl contains '.wsf' or tl contains '.hta' %}{% if tl contains ':' %}{% assign script_path = token | strip %}{% elsif wd != '' %}{% if wd ends with '\\' %}{% assign script_path = wd | append: token | strip %}{% else %}{% assign script_path = wd | append: '\\' | append: token | strip %}{% endif %}{% else %}{% assign script_path = token | strip %}{% endif %}{% endif %}{% endif %}{% endif %}{% endfor %}{% endif %}{% if script_path == '' and event.alerts[0].process.parent.working_directory %}{% assign wd = event.alerts[0].process.parent.working_directory | strip %}{% endif %}{% if script_path == '' and event.alerts[0].process.parent.args %}{% for arg in event.alerts[0].process.parent.args %}{% if script_path == '' %}{% assign al = arg | downcase | strip %}{% if al != 'wscript.exe' and al != 'cscript.exe' and al != 'mshta.exe' and al != 'cmd.exe' %}{% if al contains '.vbs' or al contains '.js' or al contains '.jse' or al contains '.vbe' or al contains '.wsf' or al contains '.hta' %}{% if al contains ':' %}{% assign script_path = arg | strip %}{% elsif wd != '' %}{% if wd ends with '\\' %}{% assign script_path = wd | append: arg | strip %}{% else %}{% assign script_path = wd | append: '\\' | append: arg | strip %}{% endif %}{% else %}{% assign script_path = arg | strip %}{% endif %}{% endif %}{% endif %}{% endif %}{% endfor %}{% endif %}{% if script_path == '' and event.alerts[0].process.parent.command_line != '' %}{% assign parts = event.alerts[0].process.parent.command_line | split: '\"' %}{% for part in parts %}{% if script_path == '' %}{% assign pl = part | downcase | strip %}{% if pl contains '.vbs' or pl contains '.js' or pl contains '.jse' or pl contains '.vbe' or pl contains '.wsf' or pl contains '.hta' %}{% if pl contains ':' %}{% assign script_path = part | strip %}{% elsif wd != '' %}{% if wd ends with '\\' %}{% assign script_path = wd | append: part | strip %}{% else %}{% assign script_path = wd | append: '\\' | append: part | strip %}{% endif %}{% else %}{% assign script_path = part | strip %}{% endif %}{% endif %}{% endif %}{% endfor %}{% endif %}{% if script_path == '' and event.alerts[0].process.parent.command_line != '' %}{% for token in event.alerts[0].process.parent.command_line | split: ' ' %}{% if script_path == '' %}{% assign tl = token | downcase | strip %}{% if tl != '' and tl != 'wscript.exe' and tl != 'cscript.exe' and tl != 'mshta.exe' and tl != 'cmd.exe' %}{% if tl contains '.vbs' or tl contains '.js' or tl contains '.jse' or tl contains '.vbe' or tl contains '.wsf' or tl contains '.hta' %}{% if tl contains ':' %}{% assign script_path = token | strip %}{% elsif wd != '' %}{% if wd ends with '\\' %}{% assign script_path = wd | append: token | strip %}{% else %}{% assign script_path = wd | append: '\\' | append: token | strip %}{% endif %}{% else %}{% assign script_path = token | strip %}{% endif %}{% endif %}{% endif %}{% endif %}{% endfor %}{% endif %}{{ script_path }}{% endif %}"
+  - name: log_context
+    type: console
+    with:
+      message: Script file remediation — rule {{ steps.set_alert_context.output.rule_name }}, host {{ steps.set_alert_context.output.host_name }}, script {% if steps.set_alert_context.output.script_path != '' and steps.set_alert_context.output.script_path != null %}{{ steps.set_alert_context.output.script_path }}{% else %}(not extracted){% endif %}{% if steps.set_alert_context.output.agent_id != '' and steps.set_alert_context.output.agent_id != null %}, agent {{ steps.set_alert_context.output.agent_id }}{% endif %}, alert {{ steps.set_alert_context.output.alert_id }}.
+  - name: route_alert_or_scheduled
+    type: if
+    condition: 'steps.set_alert_context.output.run_mode: "alert"'
+    steps:
+      - name: when_script_on_alert
+        type: if
+        condition: 'not steps.set_alert_context.output.script_path: ""'
+        steps:
+          - name: resolve_alert_agent
+            type: elasticsearch.esql.query
+            with:
+              query: |
+                FROM logs-endpoint.events.*
+                | WHERE @timestamp > NOW() - 24 hours
+                  {% if steps.set_alert_context.output.host_id != '' and steps.set_alert_context.output.host_id != null %}
+                  AND host.id == "{{ steps.set_alert_context.output.host_id }}"
+                  {% endif %}
+                | STATS BY agent.id
+                | LIMIT 1
+            on-failure:
+              continue: true
+          - name: complete_alert_agent
+            type: data.set
+            with:
+              agent_id: "{% if steps.set_alert_context.output.agent_id != '' and steps.set_alert_context.output.agent_id != null %}{{ steps.set_alert_context.output.agent_id }}{% elsif steps.resolve_alert_agent.output.values.length > 0 %}{{ steps.resolve_alert_agent.output.values[0][0] }}{% endif %}"
+              agent_ready: "{% if steps.set_alert_context.output.agent_id != '' and steps.set_alert_context.output.agent_id != null %}true{% elsif steps.resolve_alert_agent.output.values.length > 0 %}true{% else %}false{% endif %}"
+              script_path: "{{ steps.set_alert_context.output.script_path }}"
+              file_path_key: "{{ steps.set_alert_context.output.script_path | downcase }}"
+          - name: when_alert_agent_ready
+            type: if
+            condition: 'steps.complete_alert_agent.output.agent_ready: "true"'
+            steps:
+              - name: alert_check_get_file_history
+                type: kibana.request
+                with:
+                  method: GET
+                  path: /api/endpoint/action
+                  headers:
+                    kbn-xsrf: "true"
+                  query:
+                    agentIds: "{{ steps.complete_alert_agent.output.agent_id }}"
+                    commands: get-file
+                    startDate: "{% if inputs.history_lookback != '' and inputs.history_lookback != null %}{{ inputs.history_lookback }}{% else %}{{ consts.history_lookback }}{% endif %}"
+                    endDate: now
+                    pageSize: 1
+                on-failure:
+                  continue: true
+              - name: alert_capture_history
+                type: data.set
+                with:
+                  should_skip: "{% if steps.alert_check_get_file_history.output.total == 0 %}false{% else %}{% for action in steps.alert_check_get_file_history.output.data limit:1 %}{% assign fp = steps.complete_alert_agent.output.file_path_key %}{% assign hp = action.parameters.path | downcase %}{% assign hc = action.comment | downcase %}{% if hp == fp %}true{% elsif hc contains fp %}true{% else %}false{% endif %}{% endfor %}{% endif %}"
+              - name: alert_already_archived
+                type: if
+                condition: 'steps.alert_capture_history.output.should_skip: "true"'
+                steps:
+                  - name: log_alert_skip_history
+                    type: console
+                    with:
+                      message: Skipping {{ steps.complete_alert_agent.output.script_path }} on agent {{ steps.complete_alert_agent.output.agent_id }} — get-file already in response actions history.
+                else:
+                  - name: alert_download_script
+                    type: kibana.request
+                    with:
+                      method: POST
+                      path: /api/endpoint/action/get_file
+                      body:
+                        endpoint_ids:
+                          - "{{ steps.complete_alert_agent.output.agent_id }}"
+                        comment: Workflow Remediate Behavior — Windows Script File — download {{ steps.complete_alert_agent.output.script_path }} (alert {{ steps.set_alert_context.output.alert_id }}).
+                        parameters:
+                          path: "{{ steps.complete_alert_agent.output.script_path }}"
+                      headers:
+                        kbn-xsrf: "true"
+                    on-failure:
+                      continue: true
+                  - name: alert_wait_for_download
+                    type: wait
+                    with:
+                      duration: 20s
+                  - name: alert_delete_script
+                    type: kibana.request
+                    with:
+                      method: POST
+                      path: /api/endpoint/action/execute
+                      body:
+                        endpoint_ids:
+                          - "{{ steps.complete_alert_agent.output.agent_id }}"
+                        comment: Workflow Remediate Behavior — Windows Script File — delete {{ steps.complete_alert_agent.output.script_path }} (alert {{ steps.set_alert_context.output.alert_id }}).
+                        parameters:
+                          command: cmd.exe /c if exist "{{ steps.complete_alert_agent.output.script_path }}" del /f /q "{{ steps.complete_alert_agent.output.script_path }}"
+                          timeout: 120
+                      headers:
+                        kbn-xsrf: "true"
+                    on-failure:
+                      continue: true
+                  - name: log_alert_remediation
+                    type: console
+                    with:
+                      message: "{% if steps.alert_download_script.error %}Download warning for {{ steps.complete_alert_agent.output.script_path }}: {{ steps.alert_download_script.error }}{% else %}get-file submitted for {{ steps.complete_alert_agent.output.script_path }}.{% endif %} {% if steps.alert_delete_script.error %}Delete warning: {{ steps.alert_delete_script.error }}{% else %}Delete command submitted for {{ steps.complete_alert_agent.output.script_path }}.{% endif %}"
+            else:
+              - name: log_alert_no_agent
+                type: console
+                with:
+                  message: Cannot remediate {{ steps.set_alert_context.output.script_path }} — no agent.id on alert and none found for host.id {{ steps.set_alert_context.output.host_id }}.
+        else:
+          - name: log_alert_no_script_path
+            type: console
+            with:
+              message: "Skipping alert {{ steps.set_alert_context.output.alert_id }} — could not extract a .js/.vbs script path from process or parent process args/command_line (working dir: {% if steps.set_alert_context.output.working_directory != '' %}{{ steps.set_alert_context.output.working_directory }}{% else %}none{% endif %})."
+    else:
+      - name: run_esql
+        type: elasticsearch.esql.query
+        with:
+          query: "{% if inputs.esql_query != '' and inputs.esql_query != null %}{{ inputs.esql_query }}{% else %}{{ consts.scheduled_esql_query }}{% endif %}"
+      - name: process_scheduled_hits
+        type: if
+        condition: steps.run_esql.output.values.length > 0
+        steps:
+          - name: per_script_hit
+            type: foreach
+            foreach: "{{ steps.run_esql.output.values }}"
+            steps:
+              - name: set_hit_context
+                type: data.set
+                with:
+                  command_line: "{{ foreach.item[2] }}"
+                  parent_command_line: "{{ foreach.item[3] }}"
+                  working_directory: "{{ foreach.item[4] }}"
+                  script_path: "{% assign script_path = '' %}{% assign wd = '' %}{% if foreach.item[4] %}{% assign wd = foreach.item[4] | strip %}{% endif %}{% assign cl = foreach.item[2] %}{% assign parts = cl | split: '\"' %}{% for part in parts %}{% if script_path == '' %}{% assign pl = part | downcase | strip %}{% if pl contains '.vbs' or pl contains '.js' or pl contains '.jse' or pl contains '.vbe' or pl contains '.wsf' or pl contains '.hta' %}{% if pl contains ':' %}{% assign script_path = part | strip %}{% elsif wd != '' %}{% if wd ends with '\\' %}{% assign script_path = wd | append: part | strip %}{% else %}{% assign script_path = wd | append: '\\' | append: part | strip %}{% endif %}{% else %}{% assign script_path = part | strip %}{% endif %}{% endif %}{% endif %}{% endfor %}{% if script_path == '' %}{% for token in cl | split: ' ' %}{% if script_path == '' %}{% assign tl = token | downcase | strip %}{% if tl != '' and tl != 'wscript.exe' and tl != 'cscript.exe' and tl != 'mshta.exe' and tl != 'cmd.exe' %}{% if tl contains '.vbs' or tl contains '.js' or tl contains '.jse' or tl contains '.vbe' or tl contains '.wsf' or tl contains '.hta' %}{% if tl contains ':' %}{% assign script_path = token | strip %}{% elsif wd != '' %}{% if wd ends with '\\' %}{% assign script_path = wd | append: token | strip %}{% else %}{% assign script_path = wd | append: '\\' | append: token | strip %}{% endif %}{% else %}{% assign script_path = token | strip %}{% endif %}{% endif %}{% endif %}{% endif %}{% endfor %}{% endif %}{% if script_path == '' %}{% assign cl = foreach.item[3] %}{% assign parts = cl | split: '\"' %}{% for part in parts %}{% if script_path == '' %}{% assign pl = part | downcase | strip %}{% if pl contains '.vbs' or pl contains '.js' or pl contains '.jse' or pl contains '.vbe' or pl contains '.wsf' or pl contains '.hta' %}{% if pl contains ':' %}{% assign script_path = part | strip %}{% elsif wd != '' %}{% if wd ends with '\\' %}{% assign script_path = wd | append: part | strip %}{% else %}{% assign script_path = wd | append: '\\' | append: part | strip %}{% endif %}{% else %}{% assign script_path = part | strip %}{% endif %}{% endif %}{% endif %}{% endfor %}{% if script_path == '' %}{% for token in cl | split: ' ' %}{% if script_path == '' %}{% assign tl = token | downcase | strip %}{% if tl != '' and tl != 'wscript.exe' and tl != 'cscript.exe' and tl != 'mshta.exe' and tl != 'cmd.exe' %}{% if tl contains '.vbs' or tl contains '.js' or tl contains '.jse' or tl contains '.vbe' or tl contains '.wsf' or tl contains '.hta' %}{% if tl contains ':' %}{% assign script_path = token | strip %}{% elsif wd != '' %}{% if wd ends with '\\' %}{% assign script_path = wd | append: token | strip %}{% else %}{% assign script_path = wd | append: '\\' | append: token | strip %}{% endif %}{% else %}{% assign script_path = token | strip %}{% endif %}{% endif %}{% endif %}{% endif %}{% endfor %}{% endif %}{% endif %}{{ script_path }}"
+              - name: set_hit_file_path_key
+                type: data.set
+                with:
+                  file_path_key: "{{ steps.set_hit_context.output.script_path | downcase }}"
+              - name: when_script_path_found
+                type: if
+                condition: 'not steps.set_hit_context.output.script_path: ""'
+                steps:
+                  - name: log_scheduled_hit
+                    type: console
+                    with:
+                      message: Scheduled script remediation — agent {% if foreach.item[0] != '' and foreach.item[0] != null %}{{ foreach.item[0] }}{% else %}{{ foreach.item[1] }}{% endif %}, script {{ steps.set_hit_context.output.script_path }}, command {{ steps.set_hit_context.output.command_line }} (row {{ foreach.index }}).
+                  - name: check_get_file_history
+                    type: kibana.request
+                    with:
+                      method: GET
+                      path: /api/endpoint/action
+                      headers:
+                        kbn-xsrf: "true"
+                      query:
+                        agentIds: "{% if foreach.item[0] != '' and foreach.item[0] != null %}{{ foreach.item[0] }}{% else %}{{ foreach.item[1] }}{% endif %}"
+                        commands: get-file
+                        startDate: "{% if inputs.history_lookback != '' and inputs.history_lookback != null %}{{ inputs.history_lookback }}{% else %}{{ consts.history_lookback }}{% endif %}"
+                        endDate: now
+                        pageSize: 1
+                    on-failure:
+                      continue: true
+                  - name: capture_history
+                    type: data.set
+                    with:
+                      should_skip: "{% if steps.check_get_file_history.output.total == 0 %}false{% else %}{% for action in steps.check_get_file_history.output.data limit:1 %}{% assign fp = steps.set_hit_file_path_key.output.file_path_key %}{% assign hp = action.parameters.path | downcase %}{% assign hc = action.comment | downcase %}{% if hp == fp %}true{% elsif hc contains fp %}true{% else %}false{% endif %}{% endfor %}{% endif %}"
+                  - name: already_archived
+                    type: if
+                    condition: 'steps.capture_history.output.should_skip: "true"'
+                    steps:
+                      - name: log_already_in_history
+                        type: console
+                        with:
+                          message: Skipping {{ steps.set_hit_context.output.script_path }} on agent {% if foreach.item[0] != '' and foreach.item[0] != null %}{{ foreach.item[0] }}{% else %}{{ foreach.item[1] }}{% endif %} — get-file already in response actions history.
+                    else:
+                      - name: download_script
+                        type: kibana.request
+                        with:
+                          method: POST
+                          path: /api/endpoint/action/get_file
+                          body:
+                            endpoint_ids:
+                              - "{% if foreach.item[0] != '' and foreach.item[0] != null %}{{ foreach.item[0] }}{% else %}{{ foreach.item[1] }}{% endif %}"
+                            comment: Workflow Remediate Behavior — Windows Script File — download {{ steps.set_hit_context.output.script_path }}.
+                            parameters:
+                              path: "{{ steps.set_hit_context.output.script_path }}"
+                          headers:
+                            kbn-xsrf: "true"
+                        on-failure:
+                          continue: true
+                      - name: wait_for_download
+                        type: wait
+                        with:
+                          duration: 20s
+                      - name: delete_script
+                        type: kibana.request
+                        with:
+                          method: POST
+                          path: /api/endpoint/action/execute
+                          body:
+                            endpoint_ids:
+                              - "{% if foreach.item[0] != '' and foreach.item[0] != null %}{{ foreach.item[0] }}{% else %}{{ foreach.item[1] }}{% endif %}"
+                            comment: Workflow Remediate Behavior — Windows Script File — delete {{ steps.set_hit_context.output.script_path }}.
+                            parameters:
+                              command: cmd.exe /c if exist "{{ steps.set_hit_context.output.script_path }}" del /f /q "{{ steps.set_hit_context.output.script_path }}"
+                              timeout: 120
+                          headers:
+                            kbn-xsrf: "true"
+                        on-failure:
+                          continue: true
+                      - name: log_scheduled_remediation
+                        type: console
+                        with:
+                          message: "{% if steps.download_script.error %}Download warning for {{ steps.set_hit_context.output.script_path }}: {{ steps.download_script.error }}{% else %}get-file submitted for {{ steps.set_hit_context.output.script_path }}.{% endif %} {% if steps.delete_script.error %}Delete warning: {{ steps.delete_script.error }}{% else %}Delete command submitted for {{ steps.set_hit_context.output.script_path }}.{% endif %}"
+        else:
+          - name: log_no_scheduled_hits
+            type: console
+            with:
+              message: No matching script behavior alerts found in the configured ES|QL window (subtechniques {{ consts.script_subtechnique_names }}).
+  - name: log_summary
+    type: console
+    with:
+      message: |
+        Script file remediation workflow finished. Check Security → Endpoints → Response actions history for get-file and delete actions.
