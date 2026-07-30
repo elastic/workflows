@@ -2,10 +2,13 @@
 
 Threat detection, alerting, and rule management workflows
 
-## Workflows (9)
+## Workflows (10)
 
 | Workflow | Description |
 |----------|-------------|
+| [SIEM Rule Tuning](./siem-rule-tuning.yaml) | Tunes noisy SIEM detection rules via ES\|QL alert history and Agent Builder; suggests query changes or rule exceptions |
+| [Browser Extension Daily Reputation Check](./browser-extension-daily-reputation.yaml) | Daily ES\|QL hunt for singleton .crx extensions; Chrome search-by-ID + Edge fallback; rule-based reputation (no AI) |=======
+| [Sync Rule Exceptions Across Spaces](./sync-rule-exceptions-across-spaces.yaml) | One-way sync of rule exceptions between Kibana spaces: exceptions added to any rule's default exception list in a source space (e.g. a "subset" space) are pushed to the matching rules (same rule_id) in a target space (e.g. the "main" space), skipping items already synced, with opt-in consts to overwrite items when the source copy is newer and to delete workflow-pushed copies whose source exception was removed. It is self-contained in Kibana, no external services |
 | [Disable Noisy Elastic Defend Behavior Rules](./disable-noisy-endpoint-rules-from-esql.yaml) | Detects noisy Elastic Defend behavior rules via ES\|QL (FP bursts) and auto-creates scoped Endpoint Security exceptions by rule version; new artifact versions are unaffected |
 | [␆ Mark Alert as Acknowledged](./mark-alert-as-acknowledged.yaml) | This workflow YAML defines a manual trigger for acknowledging security alerts |
 | [🏷️ Add Alert Tag - FP](./add-alert-tag-fp.yaml) | This workflow YAML defines a manual trigger for adding a tag to a security alert |

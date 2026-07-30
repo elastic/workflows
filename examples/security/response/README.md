@@ -9,7 +9,17 @@ Incident response, case management, and remediation workflows
 | [Remediate Startup Folder Persistence](./remediate-persistence-windows-startup-folder.yaml) | ES\|QL correlates user/ProgramData Startup persistence with endpoint alerts in 5m windows; skips if get-file exists in history, then downloads, waits 20s, and deletes |
 | [Remediate Run Key Persistence](./remediate-persistence-windows-run-key.yaml) | ES\|QL correlates Run-key registry persistence with endpoint alerts in 5m windows; skips if delete exists in history, then removes the Run value via PowerShell |
 | [Remediate Scheduled Task Persistence](./remediate-persistence-windows-scheduled-task.yaml) | ES\|QL correlates scheduled task creation with endpoint alerts in 5m windows; skips if schtasks delete exists in history, then removes the task |
+| [Block User Credentials — Ransomware SMB](./remediate-ransomware-smb-block-user.yaml) | Alert-triggered; reads user.id and agent.id from the alert, closes SMB sessions, then denies network logon on the victim host |
+| [Remediate Behavior — Windows Script File](./remediate-behavior-windows-script-file.yaml) | Alert or daily ES|QL; extracts .js/.vbs paths from behavior alerts and deletes script files via get-file + execute |
+| [Windows ClickFix Investigation](./windows-clickfix-investigation.yaml) | Uses the ClickFix Investigation Agent to analyze Windows ClickFix activity and deliver the result to an Elastic Security Case |
 | [📁 Case workflow - Prod](./case-workflow-prod.yaml) | The YAML workflow outlines a security operations process that triggers on alerts |
 | [📁 Traditional Triage](./traditional-triage.yaml) | The "Traditional Triage" workflow automates the response to security alerts, par |
 | [🔒 AD - Automated Triaging](./ad-automated-triaging.yaml) | The YAML workflow outlines an automated triaging process for security operations |
 | [createCaseTool](./createcasetool.yaml) | The `createCaseTool` workflow allows an agent to manually create a case with a s |
+| [🛡️ Remediate Identity - Suspected Phishing Kit or AiTM Compromise](./remediate-identity-suspected-phishing-kit-or-aitm-compromise.yaml) | Correlate open Entra AiTM / phishing-kit alerts, corroborate post-auth persistence, and contain (revoke sessions, disable, delete devices, revoke OAuth) with analyst approval. |
+
+### Windows ClickFix Investigation setup
+
+The workflow is powered by Elastic Agent Builder. Create its read-only tool and then the `clickfix-investigation-agent` agent using [windows-clickfix-agent.md](./windows-clickfix-agent.md).
+
+Before importing the workflow, replace each `REPLACE_WITH_CONNECTOR_ID` value with the ID of a configured VirusTotal connector.

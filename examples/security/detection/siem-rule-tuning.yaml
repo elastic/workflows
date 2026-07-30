@@ -1,0 +1,603 @@
+# =============================================================================
+# Workflow: SIEM Rule Tuning
+# Category: security/detection
+#
+# Tunes a noisy Elastic Security SIEM detection rule using seven days of alert
+# history on .alerts-security.alerts-*. Loads the rule from the Detection
+# Engine API, summarizes false-positive patterns, and invokes the siem-rule-tuning
+# Agent Builder agent for structured recommendations.
+#
+# 1. Resolves rule_id from manual input or the triggering alert.
+# 2. Runs ES|QL for alert volume, noise gate (thresholds), and FP pattern aggregates.
+# 3. Invokes the agent only when the noise gate passes (never asks the agent if noisy).
+# 4. Agent picks mechanism when tuning_preference=auto; recommends query or exception details.
+# 5. When apply_changes=true, applies only the selected mechanism:
+#    PATCH /api/detection_engine/rules (query) or POST .../exceptions (exception).
+#
+# Documented example rule:
+# - RDP (Remote Desktop Protocol) from the Internet
+#   https://www.elastic.co/guide/en/security/current/rdp-remote-desktop-protocol-from-the-internet.html
+#
+# Prerequisites:
+# - Elastic Stack 9.5+ with Workflows and Agent Builder
+# - Agent siem-rule-tuning (see siem-rule-tuning-agent.md)
+# - Alert history in .alerts-security.alerts-* for the target rule
+#
+# References:
+# - Customize prebuilt rules:
+#   https://www.elastic.co/docs/solutions/security/detect-and-alert/customize-prebuilt-rules
+# - Add and manage exceptions:
+#   https://www.elastic.co/docs/solutions/security/detect-and-alert/add-manage-exceptions
+# =============================================================================
+version: "1"
+name: SIEM Rule Tuning
+description: >-
+  Tune a noisy Elastic Security detection rule using seven days of alert history.
+  ES|QL noise gate (thresholds) decides if noisy; agent recommends query change or exception.
+  Applies one mechanism when apply_changes is true.
+enabled: true
+settings:
+  timeout: "20m"
+tags:
+  - security
+  - detection
+  - rule-tuning
+
+consts:
+  alerts_index: ".alerts-security.alerts-*"
+  agent_id: "siem-rule-tuning"
+  lookback_days: "7"
+
+inputs:
+  - name: rule_id
+    type: string
+    description: "Detection rule UUID (optional when triggered by alert; resolved from event.alerts[0] if omitted)."
+    required: false
+  - name: apply_changes
+    type: string
+    description: "When true, apply the agent's chosen mechanism (query PATCH or exception POST, never both)."
+    required: false
+    default: "true"
+  - name: tuning_preference
+    type: string
+    description: "auto (agent picks mechanism), query_change, or exception (fixed mechanism)."
+    required: false
+    default: "auto"
+
+triggers:
+  - type: manual
+    inputs:
+      - name: rule_id
+        type: string
+        description: "Detection rule UUID to tune (required for manual runs)."
+        required: true
+        default: "8c1bdde8-4204-45c0-9e0c-c85ca3902488"
+      - name: apply_changes
+        type: string
+        description: "When true, apply the agent's chosen mechanism (query PATCH or exception POST)."
+        default: "true"
+      - name: tuning_preference
+        type: string
+        description: "auto, query_change, or exception"
+        default: "auto"
+  - type: alert
+
+steps:
+  - name: log_start
+    type: console
+    with:
+      message: |
+        SIEM Rule Tuning: start
+        execution.id={{ execution.id }}
+        rule_id={{ inputs.rule_id | strip }}
+        apply_changes={{ inputs.apply_changes | default: "true" }}
+        tuning_preference={{ inputs.tuning_preference | default: "auto" }}
+        trigger={{ event.rule.name | default: "manual" }}
+
+  - name: resolve_target_rule_id
+    type: data.set
+    with:
+      tune_rule_id: >-
+        {%- assign manual_rid = inputs.rule_id | default: "" | strip -%}
+        {%- if manual_rid != "" -%}
+        {{ manual_rid }}
+        {%- elsif event.alerts and event.alerts[0]["kibana.alert.rule.rule_id"] -%}
+        {{ event.alerts[0]["kibana.alert.rule.rule_id"] | strip }}
+        {%- elsif event.alerts and event.alerts[0].kibana.alert.rule.rule_id -%}
+        {{ event.alerts[0].kibana.alert.rule.rule_id | strip }}
+        {%- elsif event.alerts and event.alerts[0].rule.rule_id -%}
+        {{ event.alerts[0].rule.rule_id | strip }}
+        {%- endif -%}
+
+  - name: set_has_rule_id
+    type: data.set
+    with:
+      has_rule_id: >-
+        {%- assign rid = steps.resolve_target_rule_id.output.tune_rule_id | strip -%}
+        {%- if rid != "" -%}yes{%- endif -%}
+
+  - name: if_has_rule_id
+    type: if
+    condition: "steps.set_has_rule_id.output.has_rule_id: yes"
+    steps:
+      - name: query_rule_stats
+        type: elasticsearch.esql.query
+        on-failure:
+          continue: true
+        with:
+          format: json
+          query: >-
+            FROM {{ consts.alerts_index }}
+            | WHERE @timestamp >= NOW() - {{ consts.lookback_days }} days
+            | WHERE kibana.alert.rule.rule_id == "{{ steps.resolve_target_rule_id.output.tune_rule_id | strip }}"
+            | STATS
+                alerts_count = COUNT(*),
+                n_hosts = COUNT_DISTINCT(host.name),
+                n_users = COUNT_DISTINCT(user.name),
+                n_agents = COUNT_DISTINCT(agent.id),
+                n_procs = COUNT_DISTINCT(process.name)
+              BY kibana.alert.rule.rule_id, kibana.alert.rule.name, kibana.alert.rule.type
+            | LIMIT 1
+
+      - name: log_rule_stats
+        type: console
+        with:
+          message: >-
+            stats rows={{ steps.query_rule_stats.output.values | size | default: 0 }}
+            {% if steps.query_rule_stats.output.values and steps.query_rule_stats.output.values[0] -%}
+            alerts={{ steps.query_rule_stats.output.values[0][0] }}
+            hosts={{ steps.query_rule_stats.output.values[0][1] }}
+            users={{ steps.query_rule_stats.output.values[0][2] }}
+            agents={{ steps.query_rule_stats.output.values[0][3] }}
+            procs={{ steps.query_rule_stats.output.values[0][4] }}
+            name={{ steps.query_rule_stats.output.values[0][6] }}
+            type={{ steps.query_rule_stats.output.values[0][7] }}
+            {% endif %}
+
+      - name: query_fp_patterns
+        type: elasticsearch.esql.query
+        on-failure:
+          continue: true
+        with:
+          format: json
+          query: >-
+            FROM {{ consts.alerts_index }}
+            | WHERE @timestamp >= NOW() - {{ consts.lookback_days }} days
+            | WHERE kibana.alert.rule.rule_id == "{{ steps.resolve_target_rule_id.output.tune_rule_id | strip }}"
+            | STATS n = COUNT(*) BY
+                host.name, user.name, process.name,
+                source.ip, destination.ip,
+                cloud.account.id, cloud.service.name, event.provider
+            | SORT n DESC
+            | LIMIT 15
+
+      - name: log_fp_patterns
+        type: console
+        with:
+          message: >-
+            pattern_rows={{ steps.query_fp_patterns.output.values | size | default: 0 }}
+
+      - name: find_rule
+        type: kibana.request
+        on-failure:
+          continue: true
+        with:
+          method: GET
+          path: "/api/detection_engine/rules/_find"
+          query:
+            filter: 'alert.attributes.params.ruleId: "{{ steps.resolve_target_rule_id.output.tune_rule_id | strip }}"'
+            per_page: 1
+
+      - name: set_rule_context
+        type: data.set
+        with:
+          rule_saved_object_id: >-
+            {%- if steps.find_rule.output.data and steps.find_rule.output.data[0].id -%}
+            {{ steps.find_rule.output.data[0].id | strip }}
+            {%- endif -%}
+          rule_name: >-
+            {%- if steps.find_rule.output.data and steps.find_rule.output.data[0].name -%}
+            {{ steps.find_rule.output.data[0].name | strip }}
+            {%- endif -%}
+          rule_found: >-
+            {%- if steps.find_rule.output.data and steps.find_rule.output.data[0].id -%}
+            yes
+            {%- endif -%}
+
+      - name: if_found_rule
+        type: if
+        condition: "steps.set_rule_context.output.rule_found: yes"
+        steps:
+          - name: fetch_rule
+            type: kibana.request
+            on-failure:
+              continue: true
+            with:
+              method: GET
+              path: "/api/detection_engine/rules"
+              query:
+                id: "{{ steps.set_rule_context.output.rule_saved_object_id | strip }}"
+
+          - name: set_noise_verdict
+            type: data.set
+            with:
+              noise_verdict: >-
+                {%- assign alerts = 0 -%}
+                {%- assign n_hosts = 0 -%}
+                {%- assign n_agents = 0 -%}
+                {%- assign n_procs = 0 -%}
+                {%- assign top_n = 0 -%}
+                {%- if steps.query_rule_stats.output.values and steps.query_rule_stats.output.values[0] -%}
+                {%- assign alerts = steps.query_rule_stats.output.values[0][0] | plus: 0 -%}
+                {%- assign n_hosts = steps.query_rule_stats.output.values[0][1] | plus: 0 -%}
+                {%- assign n_agents = steps.query_rule_stats.output.values[0][3] | plus: 0 -%}
+                {%- assign n_procs = steps.query_rule_stats.output.values[0][4] | plus: 0 -%}
+                {%- endif -%}
+                {%- if steps.query_fp_patterns.output.values and steps.query_fp_patterns.output.values[0] -%}
+                {%- assign top_n = steps.query_fp_patterns.output.values[0][8] | plus: 0 -%}
+                {%- endif -%}
+                {%- assign rule_type = steps.fetch_rule.output.type | default: "" | downcase -%}
+                {%- assign tag_blob = steps.fetch_rule.output.tags | default: [] | join: "," | downcase -%}
+                {%- if rule_type contains "ml" or rule_type contains "machine_learning" or rule_type contains "threat_match" -%}
+                untunable_rule_type
+                {%- elsif tag_blob contains "building block" or tag_blob contains "building_block" -%}
+                untunable_rule_type
+                {%- elsif alerts < 10 -%}
+                skip_low_volume
+                {%- elsif n_agents >= 25 -%}
+                broad_noise
+                {%- elsif alerts >= 100 and n_agents <= 3 and n_agents > 0 -%}
+                concentrated_fp
+                {%- elsif alerts >= 100 and n_hosts <= 3 and n_hosts > 0 -%}
+                concentrated_fp
+                {%- elsif n_hosts >= 5 and n_procs >= 3 -%}
+                spread_noise
+                {%- elsif n_hosts >= 20 -%}
+                spread_noise
+                {%- elsif alerts >= 50 and top_n > 0 -%}
+                {%- assign top_pct = top_n | times: 100 | divided_by: alerts -%}
+                {%- if top_pct >= 80 -%}
+                concentrated_top_field
+                {%- else -%}
+                skip_not_noisy
+                {%- endif -%}
+                {%- else -%}
+                skip_not_noisy
+                {%- endif -%}
+
+          - name: set_noise_gate_passed
+            type: data.set
+            with:
+              noise_gate_passed: >-
+                {%- assign v = steps.set_noise_verdict.output.noise_verdict | strip -%}
+                {%- if v == "concentrated_fp" or v == "broad_noise" or v == "spread_noise" or v == "concentrated_top_field" -%}yes{%- endif -%}
+
+          - name: log_noise_gate
+            type: console
+            with:
+              message: >-
+                noise_verdict={{ steps.set_noise_verdict.output.noise_verdict | default: "unknown" }}
+                noise_gate_passed={{ steps.set_noise_gate_passed.output.noise_gate_passed | default: "no" }}
+                {% if steps.query_rule_stats.output.values and steps.query_rule_stats.output.values[0] -%}
+                alerts={{ steps.query_rule_stats.output.values[0][0] }}
+                hosts={{ steps.query_rule_stats.output.values[0][1] }}
+                agents={{ steps.query_rule_stats.output.values[0][3] }}
+                procs={{ steps.query_rule_stats.output.values[0][4] }}
+                {% endif %}
+
+          - name: if_noise_gate_passed
+            type: if
+            condition: "steps.set_noise_gate_passed.output.noise_gate_passed: yes"
+            steps:
+              - name: set_domain_hint
+                type: data.set
+                with:
+                  domain_hint: >-
+                    {%- assign tag_blob = steps.fetch_rule.output.tags | default: [] | join: "," -%}
+                    {%- assign idx_blob = steps.fetch_rule.output.index | default: [] | join: "," -%}
+                    {%- if tag_blob contains "Domain: Endpoint" -%}Endpoint
+                    {%- elsif tag_blob contains "Domain: Network" -%}Network
+                    {%- elsif tag_blob contains "Domain: Cloud" -%}Cloud
+                    {%- elsif tag_blob contains "Domain: Identity" -%}Identity
+                    {%- elsif tag_blob contains "Domain: SaaS" -%}SaaS
+                    {%- elsif tag_blob contains "Domain: GenAI" -%}GenAI
+                    {%- elsif idx_blob contains "logs-endpoint" or idx_blob contains "endgame" -%}Endpoint
+                    {%- elsif idx_blob contains "logs-network" or idx_blob contains "packetbeat" -%}Network
+                    {%- elsif idx_blob contains "logs-aws" or idx_blob contains "logs-azure" or idx_blob contains "logs-gcp" -%}Cloud
+                    {%- elsif idx_blob contains "logs-o365" or idx_blob contains "logs-google_workspace" or idx_blob contains "logs-okta" -%}SaaS
+                    {%- else -%}Unknown{%- endif -%}
+
+              - name: set_exception_list_id
+                type: data.set
+                with:
+                  exception_list_id: >-
+                    {%- assign lists = steps.fetch_rule.output.exceptions_list | default: [] -%}
+                    {%- for lst in lists -%}
+                    {%- if lst.type == "rule_default" and lst.list_id -%}
+                    {{ lst.list_id | strip }}
+                    {%- break -%}
+                    {%- endif -%}
+                    {%- endfor -%}
+
+              - name: fetch_rule_exceptions
+                type: kibana.request
+                on-failure:
+                  continue: true
+                with:
+                  method: GET
+                  path: "/api/exception_lists/items/_find"
+                  query:
+                    list_id: "{{ steps.set_exception_list_id.output.exception_list_id | strip }}"
+                    namespace_type: single
+                    page: 1
+                    per_page: 100
+
+              - name: log_existing_exceptions
+                type: console
+                with:
+                  message: >-
+                    existing_exceptions={{ steps.fetch_rule_exceptions.output.total | default: 0 }}
+                    list_id={{ steps.set_exception_list_id.output.exception_list_id | default: "none" }}
+
+              - name: invoke_tuning_agent
+                type: ai.agent
+                agent-id: "{{ consts.agent_id }}"
+                create-conversation: false
+                timeout: 900s
+                on-failure:
+                  continue: true
+                with:
+                  message: >-
+                    SIEM rule tuning: return structured JSON only (no markdown wrapper).
+                    The workflow noise gate already passed (verdict: {{ steps.set_noise_verdict.output.noise_verdict | default: "unknown" }}).
+                    Do not re-decide whether the rule is noisy.
+
+                    | Field | Value |
+                    |---|---|
+                    | rule_id | `{{ steps.resolve_target_rule_id.output.tune_rule_id | strip }}` |
+                    | apply_changes | {{ inputs.apply_changes | default: "true" }} |
+                    | tuning_preference | {{ inputs.tuning_preference | default: "auto" }} |
+                    | noise_verdict | {{ steps.set_noise_verdict.output.noise_verdict | default: "unknown" }} |
+                    | domain_hint | {{ steps.set_domain_hint.output.domain_hint | default: "Unknown" }} |
+                    | alerts_index | `{{ consts.alerts_index }}` |
+                    | lookback | {{ consts.lookback_days }} days |
+
+                    **Seven-day alert stats (ES|QL):**
+                    {% if steps.query_rule_stats.output.values and steps.query_rule_stats.output.values[0] -%}
+                    - alerts_count: {{ steps.query_rule_stats.output.values[0][0] }}
+                    - n_hosts: {{ steps.query_rule_stats.output.values[0][1] }}
+                    - n_users: {{ steps.query_rule_stats.output.values[0][2] }}
+                    - n_agents: {{ steps.query_rule_stats.output.values[0][3] }}
+                    - n_procs: {{ steps.query_rule_stats.output.values[0][4] }}
+                    - rule.name: {{ steps.query_rule_stats.output.values[0][6] }}
+                    - rule.type: {{ steps.query_rule_stats.output.values[0][7] }}
+                    {% else -%}
+                    - no stats rows
+                    {% endif %}
+
+                    **Top false-positive pattern aggregates (target #1 row):**
+                    {{ steps.query_fp_patterns.output.values | json }}
+
+                    **Existing rule exceptions (do not duplicate):**
+                    {{ steps.fetch_rule_exceptions.output.data | default: [] | json }}
+
+                    **Rule definition (Detection Engine API):**
+                    ```json
+                    {{ steps.fetch_rule.output | json }}
+                    ```
+
+                    Recommend how to tune (not whether). Use one mechanism.
+
+                    When `tuning_preference` is set:
+                    - `query_change`: `tuning_mode=query_change`, `proceed=true`, `query_changed=true`, full `proposed_query` with exclusion for the top FP row
+                    - `exception`: `tuning_mode=exception`, `proceed=true`, `proposed_exception_entries` for the top FP row
+                    - `auto`: pick query change or exception and explain in `tuning_recommendation_markdown`
+
+                    Set `proceed=false` only if existing query or exceptions already cover the top FP tuple.
+                  schema:
+                    type: "object"
+                    required:
+                      - proceed
+                      - skip_reason
+                      - rule_id
+                      - rule_name
+                      - tuning_mode
+                      - tuning_recommendation_markdown
+                      - detection_gap_risk
+                    properties:
+                      proceed:
+                        type: "boolean"
+                      skip_reason:
+                        type: "string"
+                      rule_id:
+                        type: "string"
+                      rule_name:
+                        type: "string"
+                      rule_type:
+                        type: "string"
+                      domain_label:
+                        type: "string"
+                      tuning_mode:
+                        type: "string"
+                      tuning_recommendation_markdown:
+                        type: "string"
+                      proposed_query:
+                        type: "string"
+                      query_changed:
+                        type: "boolean"
+                      proposed_exception_entries:
+                        type: "array"
+                      exception_item_id:
+                        type: "string"
+                      exception_item_name:
+                        type: "string"
+                      exception_item_description:
+                        type: "string"
+                      baseline_alert_count:
+                        type: "integer"
+                      after_alert_count:
+                        type: "integer"
+                      detection_gap_risk:
+                        type: "string"
+                      kql_baseline:
+                        type: "string"
+                      kql_excluded:
+                        type: "string"
+                      kql_remaining:
+                        type: "string"
+
+              - name: if_agent_output
+                type: if
+                condition: "steps.invoke_tuning_agent.output.message: * OR steps.invoke_tuning_agent.output.structured_output: *"
+                steps:
+                  - name: capture_agent_json
+                    type: data.set
+                    with:
+                      agent_json: >-
+                        {% if steps.invoke_tuning_agent.output.structured_output -%}
+                        {{ steps.invoke_tuning_agent.output.structured_output | json }}
+                        {% else -%}
+                        {{ steps.invoke_tuning_agent.output.message }}
+                        {% endif %}
+
+                  - name: parse_agent
+                    type: data.parseJson
+                    source: "${{ steps.capture_agent_json.output.agent_json }}"
+                    with: {}
+
+                  - name: log_agent_verdict
+                    type: console
+                    with:
+                      message: >-
+                        rule_id={{ steps.parse_agent.output.rule_id | default: "n/a" }}
+                        tuning_preference={{ inputs.tuning_preference | default: "auto" }}
+                        noise_verdict={{ steps.set_noise_verdict.output.noise_verdict | default: "n/a" }}
+                        proceed={{ steps.parse_agent.output.proceed | default: false }}
+                        tuning_mode={{ steps.parse_agent.output.tuning_mode | default: "n/a" }}
+                        query_changed={{ steps.parse_agent.output.query_changed | default: false }}
+                        detection_gap_risk={{ steps.parse_agent.output.detection_gap_risk | default: "n/a" }}
+                        skip={{ steps.parse_agent.output.skip_reason | default: "n/a" }}
+
+                  - name: if_preference_mismatch
+                    type: if
+                    condition: >-
+                      inputs.tuning_preference: query_change AND steps.parse_agent.output.proceed: true AND NOT steps.parse_agent.output.tuning_mode: query_change
+                    steps:
+                      - name: log_preference_mismatch
+                        type: console
+                        with:
+                          message: >-
+                            ERROR tuning_preference=query_change but agent returned tuning_mode={{ steps.parse_agent.output.tuning_mode | default: "n/a" }}; query PATCH skipped.
+
+                  - name: if_preference_exception_mismatch
+                    type: if
+                    condition: >-
+                      inputs.tuning_preference: exception AND steps.parse_agent.output.proceed: true AND NOT steps.parse_agent.output.tuning_mode: exception
+                    steps:
+                      - name: log_preference_exception_mismatch
+                        type: console
+                        with:
+                          message: >-
+                            ERROR tuning_preference=exception but agent returned tuning_mode={{ steps.parse_agent.output.tuning_mode | default: "n/a" }}; exception POST skipped.
+
+                  - name: log_recommendation
+                    type: console
+                    with:
+                      message: |
+                        {{ steps.parse_agent.output.tuning_recommendation_markdown | default: "No recommendation." }}
+
+                  - name: set_apply_on
+                    type: data.set
+                    with:
+                      apply_on: >-
+                        {%- assign v = inputs.apply_changes | default: "true" | downcase | strip -%}
+                        {%- if v == "true" or v == "1" or v == "yes" -%}yes{%- endif -%}
+
+                  - name: if_apply_exception
+                    type: if
+                    condition: "steps.set_apply_on.output.apply_on: yes AND steps.parse_agent.output.proceed: true AND steps.parse_agent.output.tuning_mode: exception"
+                    steps:
+                      - name: post_rule_exception
+                        type: kibana.request
+                        on-failure:
+                          continue: true
+                        with:
+                          method: POST
+                          path: "/api/detection_engine/rules/{{ steps.set_rule_context.output.rule_saved_object_id | strip }}/exceptions"
+                          body:
+                            items:
+                              - name: "{{ steps.parse_agent.output.exception_item_name | default: 'SIEM rule tuning exception' }}"
+                                description: "{{ steps.parse_agent.output.exception_item_description | default: 'Added by SIEM Rule Tuning workflow' }}"
+                                type: "simple"
+                                item_id: "{{ steps.parse_agent.output.exception_item_id | default: steps.parse_agent.output.rule_id }}"
+                                entries: ${{ steps.parse_agent.output.proposed_exception_entries }}
+                      - name: log_apply_exception
+                        type: console
+                        with:
+                          message: >-
+                            Exception applied for rule={{ steps.set_rule_context.output.rule_name | default: "n/a" }}
+                            item_id={{ steps.parse_agent.output.exception_item_id | default: "n/a" }}
+                            status={{ steps.post_rule_exception.output.statusCode | default: steps.post_rule_exception.error.statusCode | default: "ok" }}
+
+                  - name: if_apply_query_change
+                    type: if
+                    condition: "steps.set_apply_on.output.apply_on: yes AND steps.parse_agent.output.proceed: true AND steps.parse_agent.output.tuning_mode: query_change AND steps.parse_agent.output.query_changed: true"
+                    steps:
+                      - name: patch_rule_query
+                        type: kibana.request
+                        on-failure:
+                          continue: true
+                        with:
+                          method: PATCH
+                          path: "/api/detection_engine/rules"
+                          headers:
+                            elastic-api-version: "2023-10-31"
+                          body:
+                            rule_id: "{{ steps.resolve_target_rule_id.output.tune_rule_id | strip }}"
+                            query: "${{ steps.parse_agent.output.proposed_query }}"
+                      - name: log_apply_query
+                        type: console
+                        with:
+                          message: >-
+                            Query updated for rule={{ steps.set_rule_context.output.rule_name | default: "n/a" }}
+                            status={{ steps.patch_rule_query.output.statusCode | default: steps.patch_rule_query.error.statusCode | default: "ok" }}
+
+                  - name: if_skip_query_apply
+                    type: if
+                    condition: "steps.set_apply_on.output.apply_on: yes AND steps.parse_agent.output.proceed: true AND steps.parse_agent.output.tuning_mode: query_change AND steps.parse_agent.output.query_changed: false"
+                    steps:
+                      - name: log_query_unchanged
+                        type: console
+                        with:
+                          message: >-
+                            Query unchanged for rule={{ steps.set_rule_context.output.rule_name | default: "n/a" }}.
+                            skip={{ steps.parse_agent.output.skip_reason | default: "Already covered." }}
+            else:
+              - name: log_noise_gate_skip
+                type: console
+                with:
+                  message: >-
+                    Noise gate did not pass; agent skipped.
+                    verdict={{ steps.set_noise_verdict.output.noise_verdict | default: "unknown" }}
+                    rule={{ steps.set_rule_context.output.rule_name | default: "n/a" }}
+                    rule_id={{ steps.resolve_target_rule_id.output.tune_rule_id | strip }}
+        else:
+          - name: log_missing_rule
+            type: console
+            with:
+              message: >-
+                Rule not found for rule_id={{ steps.resolve_target_rule_id.output.tune_rule_id | strip }}
+
+    else:
+      - name: log_no_rule_id
+        type: console
+        with:
+          message: >-
+            No rule_id resolved. Provide inputs.rule_id or an alert with kibana.alert.rule.rule_id.
+            resolved={{ steps.resolve_target_rule_id.output.tune_rule_id | default: "empty" }}
+            trigger={{ event.rule.name | default: "manual" }}
+
+  - name: log_done
+    type: console
+    with:
+      message: "SIEM Rule Tuning finished. execution.id={{ execution.id }}"
