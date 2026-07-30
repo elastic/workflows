@@ -6,6 +6,7 @@ Incident response, case management, and remediation workflows
 
 | Workflow | Description |
 |----------|-------------|
+| [Block User Credentials — Ransomware SMB](./remediate-ransomware-smb-block-user.yaml) | Alert-triggered; reads user.id and agent.id from the alert, closes SMB sessions, then denies network logon on the victim host |
 | [Remediate Behavior — Windows Script File](./remediate-behavior-windows-script-file.yaml) | Alert or daily ES|QL; extracts .js/.vbs paths from behavior alerts and deletes script files via get-file + execute |
 | [Windows ClickFix Investigation](./windows-clickfix-investigation.yaml) | Uses the ClickFix Investigation Agent to analyze Windows ClickFix activity and deliver the result to an Elastic Security Case |
 | [📁 Case workflow - Prod](./case-workflow-prod.yaml) | The YAML workflow outlines a security operations process that triggers on alerts |
