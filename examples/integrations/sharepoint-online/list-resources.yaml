@@ -98,38 +98,59 @@ steps:
     if: "${{ inputs.list_action == 'getAllSites' }}"
     with:
       result: "${{ steps.get-all-sites.output }}"
-  - name: set-result-site-by-id
-    type: data.set
-    if: "${{ inputs.list_action == 'getSite' and inputs.site_id }}"
-    with:
-      result: "${{ steps.get-site-by-id.output }}"
-  - name: set-result-site-by-url
-    type: data.set
-    if: "${{ inputs.list_action == 'getSite' and inputs.relative_url }}"
-    with:
-      result: "${{ steps.get-site-by-relative-url.output }}"
-  - name: set-result-site-pages
-    type: data.set
-    if: "${{ inputs.list_action == 'getSitePages' }}"
-    with:
-      result: "${{ steps.get-site-pages.output }}"
-  - name: set-result-site-drives
-    type: data.set
-    if: "${{ inputs.list_action == 'getSiteDrives' }}"
-    with:
-      result: "${{ steps.get-site-drives.output }}"
-  - name: set-result-site-lists
-    type: data.set
-    if: "${{ inputs.list_action == 'getSiteLists' }}"
-    with:
-      result: "${{ steps.get-site-lists.output }}"
-  - name: set-result-list-items
-    type: data.set
-    if: "${{ inputs.list_action == 'getSiteListItems' }}"
-    with:
-      result: "${{ steps.get-site-list-items.output }}"
-  - name: set-result-drive-items
-    type: data.set
-    if: "${{ inputs.list_action == 'getDriveItems' }}"
-    with:
-      result: "${{ steps.get-drive-items.output }}"
+  - name: set-result-site-by-id-if-requested
+    type: if
+    condition: "${{ inputs.list_action == 'getSite' and inputs.site_id }}"
+    steps:
+      - name: set-result-site-by-id
+        type: data.set
+        with:
+          result: "${{ steps.get-site-by-id.output }}"
+  - name: set-result-site-by-relative-url-if-requested
+    type: if
+    condition: "${{ inputs.list_action == 'getSite' and inputs.relative_url }}"
+    steps:
+      - name: set-result-site-by-url
+        type: data.set
+        with:
+          result: "${{ steps.get-site-by-relative-url.output }}"
+  - name: set-result-site-pages-if-requested
+    type: if
+    condition: "${{ inputs.list_action == 'getSitePages' }}"
+    steps:
+      - name: set-result-site-pages
+        type: data.set
+        with:
+          result: "${{ steps.get-site-pages.output }}"
+  - name: set-result-site-drives-if-requested
+    type: if
+    condition: "${{ inputs.list_action == 'getSiteDrives' }}"
+    steps:
+      - name: set-result-site-drives
+        type: data.set
+        with:
+          result: "${{ steps.get-site-drives.output }}"
+  - name: set-result-site-lists-if-requested
+    type: if
+    condition: "${{ inputs.list_action == 'getSiteLists' }}"
+    steps:
+      - name: set-result-site-lists
+        type: data.set
+        with:
+          result: "${{ steps.get-site-lists.output }}"
+  - name: set-result-site-list-items-if-requested
+    type: if
+    condition: "${{ inputs.list_action == 'getSiteListItems' }}"
+    steps:
+      - name: set-result-list-items
+        type: data.set
+        with:
+          result: "${{ steps.get-site-list-items.output }}"
+  - name: set-result-drive-items-if-requested
+    type: if
+    condition: "${{ inputs.list_action == 'getDriveItems' }}"
+    steps:
+      - name: set-result-drive-items
+        type: data.set
+        with:
+          result: "${{ steps.get-drive-items.output }}"
