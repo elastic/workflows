@@ -504,8 +504,6 @@ steps:
       - name: when_endpoint_remediation
         type: if
         condition: 'consts.enable_endpoint_remediation: true'
-        on-failure:
-          continue: true
         steps:
           - name: remediate_suspicious_extensions
             type: foreach
@@ -518,8 +516,6 @@ steps:
               - name: when_can_remediate
                 type: if
                 condition: 'foreach.item.agent_id: *'
-                on-failure:
-                  continue: true
                 steps:
                   - name: set_remediation_paths
                     type: data.set
@@ -614,8 +610,6 @@ steps:
                       - name: when_windows_remediate
                         type: if
                         condition: 'foreach.item.file_path: *Users* and foreach.item.file_path: *AppData*'
-                        on-failure:
-                          continue: true
                         steps:
                           - name: zip_extension_folder_windows
                             type: kibana.request
