@@ -66,7 +66,7 @@ steps:
             "id": 
               "type": "string"
               "description": "Unique identifier of the alert"
-              "examples": ["cpu_high_usage", "service_down"]
+              # "examples": ["cpu_high_usage", "service_down"]
             "severity": 
               "type": "string"
               "description": "Alert severity level"
@@ -75,20 +75,20 @@ steps:
               "type": "string"
               "description": "Human-readable alert description"
               "minLength": 1
-              "examples": ["CPU usage exceeded 90% for 5 minutes"]
+              # "examples": ["CPU usage exceeded 90% for 5 minutes"]
             "timestamp": 
               "type": "string"
               "description": "Alert creation time in ISO 8601 format"
               "format": "date-time"
-              "examples": ["2026-01-13T09:45:00Z"]
+              # "examples": ["2026-01-13T09:45:00Z"]
             "description": 
               "type": "string"
               "description": "Human-readable explanation of the security alert"
               "minLength": 1
-              "examples": [
-                "Multiple failed login attempts detected from a single IP address",
-                "Malware signature matched during endpoint scan"
-              ]
+              # "examples": [
+              #   "Multiple failed login attempts detected from a single IP address",
+              #   "Malware signature matched during endpoint scan"
+              # ]
 
 
   # -------------------------------------------------------------------------
@@ -121,9 +121,9 @@ steps:
             id:
               type: string
               description: Unique identifier of the security alert or detection rule
-              examples:
-                - bruteforce_login
-                - malware_detected
+              # examples:
+              #   - bruteforce_login
+              #   - malware_detected
 
             severity:
               type: string
@@ -151,16 +151,16 @@ steps:
               type: string
               description: Time when the security event was detected (ISO 8601)
               format: date-time
-              examples:
-                - "2026-01-13T10:02:00Z"
+              # examples:
+              #   - "2026-01-13T10:02:00Z"
 
             description:
               type: string
               description: Human-readable explanation of the security alert
               minLength: 1
-              examples:
-                - Multiple failed login attempts detected from a single IP address
-                - Malicious file execution detected on endpoint
+              # examples:
+              #   - Multiple failed login attempts detected from a single IP address
+              #   - Malicious file execution detected on endpoint
 
 
   # -------------------------------------------------------------------------
