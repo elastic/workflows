@@ -1315,8 +1315,6 @@ steps:
                   hash: "{{ foreach.item }}"
               - name: normalize_global_hash_lookup
                 type: data.set
-                on-failure:
-                  continue: true
                 with:
                   sha256: "{{ foreach.item }}"
                   lookup_status: >-
