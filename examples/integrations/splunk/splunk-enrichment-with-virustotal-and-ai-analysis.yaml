@@ -141,7 +141,7 @@ steps:
       | rex field=_raw "command_line=\"(?<command_line>[^\"]+)\""
       | table _time host sourcetype src_ip dest_ip dest_port action threat_id email_subject email_sender attachment process parent_process command_line
       &output_mode=json&exec_mode=oneshot
-    timeout: 60s
+  timeout: 60s
 
 
 # -------------------------------------------------------------------------

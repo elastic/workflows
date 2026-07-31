@@ -64,6 +64,7 @@ steps:
   # -------------------------------------------------------------------------
   - name: list_splunk_indices
     type: http
+    timeout: 30s
     with:
       url: '{{consts.splunk_url}}/services/search/jobs'
       method: POST
@@ -72,7 +73,6 @@ steps:
         Authorization: '{{consts.splunk_auth}}'
       body: >-
         search=%7Crest%20%2Fservices%2Fdata%2Findexes%20count%3D0%20datatype%3Dall%20%7C%20search%20totalEventCount%20%3E%200%20title%20!%3D%20_*%20%7C%20table%20title%20totalEventCount&count=0&output_mode=json
-      timeout: 30s
       fetcher:
         skip_ssl_verification: true
 
@@ -98,12 +98,12 @@ steps:
   # -------------------------------------------------------------------------
   - name: get_splunk_results
     type: http
+    timeout: 30s
     with:
       url: >-
         {{consts.splunk_url}}/services/search/jobs/{{steps.list_splunk_indices.output.data.sid}}/results?output_mode=json&count=0
       method: GET
       headers:
         Authorization: '{{consts.splunk_auth}}'
-      timeout: 30s
       fetcher:
         skip_ssl_verification: true
