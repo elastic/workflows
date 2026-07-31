@@ -43,7 +43,7 @@ triggers:
         freq: WEEKLY
         interval: 1
         tzid: UTC
-        byday:
+        byweekday:
           - MO
         byhour:
           - 7

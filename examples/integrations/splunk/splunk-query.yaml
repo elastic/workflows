@@ -82,7 +82,7 @@ steps:
     headers:
       Content-Type: application/x-www-form-urlencoded
     body: search=search index=main {{ inputs.search_term }} | head 10&output_mode=json&exec_mode=oneshot
-    timeout: 60s
+  timeout: 60s
 
 
 # -------------------------------------------------------------------------

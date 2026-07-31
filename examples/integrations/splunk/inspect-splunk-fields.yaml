@@ -83,6 +83,7 @@ steps:
   # -------------------------------------------------------------------------
   - name: check_field_list
     type: http
+    timeout: 30s
     with:
       url: '{{consts.splunk_url}}/services/search/jobs'
       method: POST
@@ -92,7 +93,6 @@ steps:
       body: >-
         search={{ 'search index=' | append: inputs.index_name | append: ' | fieldsummary maxvals=0 | table field count'
         | url_encode }}&count=0&output_mode=json
-      timeout: 30s
       fetcher:
         skip_ssl_verification: true
 
@@ -118,12 +118,12 @@ steps:
   # -------------------------------------------------------------------------
   - name: get-splunk-results
     type: http
+    timeout: 30s
     with:
       url: >-
         {{consts.splunk_url}}/services/search/jobs/{{steps.check_field_list.output.data.sid}}/results?output_mode=json&count=0
       method: GET
       headers:
         Authorization: '{{consts.splunk_auth}}'
-      timeout: 30s
       fetcher:
         skip_ssl_verification: true

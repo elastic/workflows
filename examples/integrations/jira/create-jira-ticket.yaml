@@ -74,11 +74,11 @@ steps:
   # replace the placeholder below so the credential never appears in this YAML.
   - name: open ticket
     type: http
+    timeout: 30s
     connector-id: REPLACE_WITH_CONNECTOR_ID
     with:
       url: '{{consts.url}}'
       method: POST
-      timeout: 30s
       headers:
         Accept: application/json
         Content-Type: application/json

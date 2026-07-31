@@ -26,7 +26,6 @@ enabled: true
 # ---------------------------------------------------------------------------
 triggers:
   - type: manual
-    enabled: true
     # ---------------------------------------------------------------------------
     # INPUTS
     # ---------------------------------------------------------------------------
@@ -85,13 +84,13 @@ steps:
   - name: send_search_to_splunk
     type: http
     connector-id: REPLACE_WITH_CONNECTOR_ID
+    timeout: 30s
     with:
       url: '{{consts.splunk_url}}/services/search/jobs'
       method: POST
       headers:
         Content-Type: application/x-www-form-urlencoded
       body: 'search={{ ''search '' | append: inputs.splunk_query | url_encode }}&count=0&output_mode=json'
-      timeout: 30s
       fetcher:
         skip_ssl_verification: true
 
@@ -121,10 +120,10 @@ steps:
   - name: get-splunk-results
     type: http
     connector-id: REPLACE_WITH_CONNECTOR_ID
+    timeout: 30s
     with:
       url: >-
         {{consts.splunk_url}}/services/search/jobs/{{steps.send_search_to_splunk.output.data.sid}}/results?output_mode=json&count=0
       method: GET
-      timeout: 30s
       fetcher:
         skip_ssl_verification: true
