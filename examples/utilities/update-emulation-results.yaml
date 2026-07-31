@@ -126,7 +126,6 @@ steps:
   # stored in this YAML (the hardcoded Authorization header has been removed).
   - name: elasticsearch_request_step
     type: elasticsearch.update
-    connector-id: REPLACE_WITH_CONNECTOR_ID
     with:
       index: smeagol-emulation-history
       id: '{{inputs.doc_id}}'
