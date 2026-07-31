@@ -211,7 +211,6 @@ steps:
                       {{ event | json: 2 }}
 
                   </detected attack>
-          timeout: 10m
           headers:
             kbn-xsrf: string
 
