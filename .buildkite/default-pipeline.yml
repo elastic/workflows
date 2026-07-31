@@ -4,8 +4,29 @@ steps:
   - label: "Build"
     command: "true"
 
-  - label: "Test"
-    command: "true"
+  # Validates workflow YAML against the workflow step JSON Schema (step-name
+  # uniqueness + LiquidJS syntax layered on top). Library templates are forced to
+  # the `template` variant and examples to the `strict` variant, so each tree is
+  # held to the schema it is meant to satisfy. The schema source is parameterized:
+  # set WORKFLOWS_SCHEMA_CDN_URL (a CDN base URL) or WORKFLOWS_SCHEMA (a local
+  # bundle directory) as a pipeline env var. Until a schema source is configured
+  # the step skips gracefully so CI stays green.
+  - label: "Validate workflows"
+    command: |
+      if [ -z "${WORKFLOWS_SCHEMA_CDN_URL:-}" ] && [ -z "${WORKFLOWS_SCHEMA:-}" ]; then
+        echo "Neither WORKFLOWS_SCHEMA_CDN_URL nor WORKFLOWS_SCHEMA is set; skipping workflow validation until the schema source is configured."
+        exit 0
+      fi
+      npm ci
+      # A local bundle path takes precedence; otherwise the CLI reads
+      # WORKFLOWS_SCHEMA_CDN_URL from the environment automatically.
+      if [ -n "${WORKFLOWS_SCHEMA:-}" ]; then
+        npm run validate -- library/workflows --recursive --variant template --schema "${WORKFLOWS_SCHEMA}"
+        npm run validate -- examples --recursive --variant strict --schema "${WORKFLOWS_SCHEMA}"
+      else
+        npm run validate -- library/workflows --recursive --variant template
+        npm run validate -- examples --recursive --variant strict
+      fi
 
   - label: "Deploy"
     command: "true"
