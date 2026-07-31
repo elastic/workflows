@@ -70,22 +70,6 @@ consts:
   agent_id: __install__.tuning-agent-id
   lookback_days: "7"
 
-inputs:
-  - name: rule_id
-    type: string
-    description: "Detection rule UUID (optional when triggered by alert; resolved from event.alerts[0] if omitted)."
-    required: false
-  - name: apply_changes
-    type: string
-    description: "When true, apply the agent's chosen mechanism (query PATCH or exception POST, never both)."
-    required: false
-    default: "true"
-  - name: tuning_preference
-    type: string
-    description: "auto (agent picks mechanism), query_change, or exception (fixed mechanism)."
-    required: false
-    default: "auto"
-
 triggers:
   - type: manual
     inputs:
