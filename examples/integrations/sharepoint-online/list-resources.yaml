@@ -93,7 +93,7 @@ steps:
     with:
       driveId: "${{ inputs.drive_id }}"
       path: "${{ inputs.path }}"
-  - name: set-result-site-by-id-if-requested
+  - name: set-all-sites-if-requested
     type: if
     condition: "${{ inputs.list_action == 'getAllSites' }}"
     steps:
