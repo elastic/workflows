@@ -51,7 +51,7 @@ categories:
     name: "Search"
     description: "ES|QL, semantic search, knowledge retrieval workflows."
   - id: ai-agent
-    name: "AI agent"
+    name: "Agent Builder"
     description: "Agentic workflows, LLM-driven automation, tool calling."
   - id: integration
     name: "Integration"
