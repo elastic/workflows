@@ -7,14 +7,14 @@ description: >-
   "service" rescans a host service (ip+port+protocol+transport_protocol) and
   refetches via getHost; "webproperty" rescans a web property
   (hostname-or-IP + port) and refetches via getWebProperty. The refreshed
-  record is written back under the matching enrichment namespace -
-  censys.rescanned_host.* for service rescans and
-  censys.rescanned_webproperty.* for web property rescans - the dedicated
+  full Censys resource (result.resource) is written back under the matching
+  enrichment namespace - censys.rescanned_host for service rescans and
+  censys.rescanned_webproperty for web property rescans - the dedicated
   rescanned_* namespaces keep this workflow's output separate from the
   Host / Web Property Enrichment workflows so the refreshed record never
   overwrites a prior enrichment in place.
   Requires both inputs.alert_index and inputs.alert_id for the write-back;
-  otherwise the refreshed record is logged to the workflow console.
+  otherwise the full refreshed resource is logged to the workflow console.
 tags:
   - censys
   - rescan
@@ -26,6 +26,7 @@ enabled: true
 # Censys response leaves out an optional array such as services, endpoints,
 # software, or labels. Keeps later steps from failing on missing data.
 consts:
+  connector_id: "<connector-id>"
   empty_arr: []
 
 triggers:
@@ -104,7 +105,7 @@ steps:
         steps:
           - name: submit_rescan_service
             type: censys.rescan
-            connector-id: <connector-id>
+            connector-id: "{{ consts.connector_id }}"
             with:
               type: "service"
               ip: "{{ inputs.ip }}"
@@ -115,7 +116,7 @@ steps:
         steps:
           - name: submit_rescan_webproperty
             type: censys.rescan
-            connector-id: <connector-id>
+            connector-id: "{{ consts.connector_id }}"
             with:
               type: "webproperty"
               hostname: "{{ inputs.hostname }}"
@@ -164,7 +165,7 @@ steps:
 
           - name: get_scan_status
             type: censys.scanStatus
-            connector-id: <connector-id>
+            connector-id: "{{ consts.connector_id }}"
             with:
               scanId: "{{ variables.tracked_scan_id }}"
             on-failure:
@@ -203,7 +204,7 @@ steps:
             steps:
               - name: get_host
                 type: censys.getHost
-                connector-id: <connector-id>
+                connector-id: "{{ consts.connector_id }}"
                 with:
                   host: "{{ inputs.ip }}"
 
@@ -241,43 +242,11 @@ steps:
                 on-failure:
                   continue: true
 
-              - name: build_host_subobj
-                type: data.set
-                with:
-                  censys_subobj:
-                    ip: "${{ variables.host.ip }}"
-                    service_count: "${{ variables.host.service_count }}"
-                    services: "${{ steps.normalize_host_services.output }}"
-                    labels: "${{ steps.normalize_host_labels.output }}"
-                    dns:
-                      names: "${{ variables.host.dns.names }}"
-                      forward_dns:
-                        names: "${{ variables.host.dns.forward_dns.names }}"
-                      reverse_dns:
-                        names: "${{ variables.host.dns.reverse_dns.names }}"
-                    whois:
-                      network:
-                        name: "${{ variables.host.whois.network.name }}"
-                        cidrs: "${{ variables.host.whois.network.cidrs }}"
-                    autonomous_system:
-                      name: "${{ variables.host.autonomous_system.name }}"
-                      asn: "${{ variables.host.autonomous_system.asn }}"
-                    location:
-                      city: "${{ variables.host.location.city }}"
-                      province: "${{ variables.host.location.province }}"
-                      postal_code: "${{ variables.host.location.postal_code }}"
-                      country: "${{ variables.host.location.country }}"
-                      country_code: "${{ variables.host.location.country_code }}"
-                      continent: "${{ variables.host.location.continent }}"
-                      coordinates:
-                        latitude: "${{ variables.host.location.coordinates.latitude }}"
-                        longitude: "${{ variables.host.location.coordinates.longitude }}"
-
           - match: "webproperty"
             steps:
               - name: get_web_property
                 type: censys.getWebProperty
-                connector-id: <connector-id>
+                connector-id: "{{ consts.connector_id }}"
                 with:
                   hostname: "{{ inputs.hostname }}"
                   port: "${{ inputs.port }}"
@@ -318,36 +287,12 @@ steps:
                 on-failure:
                   continue: true
 
-              - name: build_web_subobj
-                type: data.set
-                with:
-                  censys_subobj:
-                    hostname: "${{ variables.web.hostname }}"
-                    port: "${{ variables.web.port }}"
-                    scan_time: "${{ variables.web.scan_time }}"
-                    endpoints: "${{ steps.normalize_web_endpoints.output }}"
-                    software: "${{ steps.normalize_web_software.output }}"
-                    labels: "${{ steps.normalize_web_labels.output }}"
-                    threats: "${{ variables.web.threats }}"
-                    vulns: "${{ variables.web.vulns }}"
-                    cert:
-                      fingerprint_sha256: "${{ variables.web.cert.fingerprint_sha256 }}"
-                      parsed:
-                        subject_dn: "${{ variables.web.cert.parsed.subject_dn }}"
-                        issuer_dn: "${{ variables.web.cert.parsed.issuer_dn }}"
-                        subject:
-                          common_name: "${{ variables.web.cert.parsed.subject.common_name }}"
-                        validity_period:
-                          not_before: "${{ variables.web.cert.parsed.validity_period.not_before }}"
-                          not_after: "${{ variables.web.cert.parsed.validity_period.not_after }}"
-                        signature:
-                          self_signed: "${{ variables.web.cert.parsed.signature.self_signed }}"
-
-  # Write the refreshed record onto the alert. The outer `if` only
-  # runs when a target document exists; the `switch` on inputs.type picks the
-  # slot - service rescans go to censys.rescanned_host, web property rescans go
-  # to censys.rescanned_webproperty. These rescanned_* slots are separate from
-  # the enrichment workflows' slots, so a rescan never overwrites an enrichment.
+  # Write the full refreshed Censys resource (result.resource) onto the alert.
+  # The outer `if` only runs when a target document exists; the `switch` on
+  # inputs.type picks the slot - service rescans go to censys.rescanned_host,
+  # web property rescans go to censys.rescanned_webproperty. These rescanned_*
+  # slots are separate from the enrichment workflows' slots, so a rescan never
+  # overwrites an enrichment.
   - name: dispatch_writes
     type: if
     condition: "${{ variables.tracked_scan_id != blank and variables.target_index != blank and variables.target_id != blank }}"
@@ -365,7 +310,7 @@ steps:
                   id: "{{ variables.target_id }}"
                   doc:
                     censys:
-                      rescanned_host: "${{ variables.censys_subobj }}"
+                      rescanned_host: "${{ variables.host }}"
                 on-failure:
                   continue: true
           - match: "webproperty"
@@ -377,7 +322,7 @@ steps:
                   id: "{{ variables.target_id }}"
                   doc:
                     censys:
-                      rescanned_webproperty: "${{ variables.censys_subobj }}"
+                      rescanned_webproperty: "${{ variables.web }}"
                 on-failure:
                   continue: true
         default:
@@ -510,4 +455,8 @@ steps:
             View on Censys: https://platform.censys.io/web/{{ variables.web.hostname | url_encode }}:{{ variables.web.port }}
             {%- endif %}
             Refreshed record:
-            {{ variables.censys_subobj | json }}
+            {%- if inputs.type == 'service' %}
+            {{ variables.host | json }}
+            {%- elsif inputs.type == 'webproperty' %}
+            {{ variables.web | json }}
+            {%- endif %}

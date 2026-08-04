@@ -11,10 +11,10 @@ description: >-
   property (url.domain + url.port); manual path -> inputs.host ->
   inputs.certificate -> inputs.hostname (+ inputs.port). When no target
   resolves the run logs a console error and stops.
-  The normalized pivots are written back under
-  censys.related_infrastructure.* on the alert document (results[] plus job
-  metadata) when inputs.alert_index/alert_id (or the alert's own _index/_id)
-  are present; otherwise the result is logged to the workflow console.
+  The full Censeye job result is written back under
+  censys.related_infrastructure on the alert document when
+  inputs.alert_index/alert_id (or the alert's own _index/_id) are present;
+  otherwise the full result is logged to the workflow console.
   Requires Threat Hunting access on the configured Censys organization.
 tags:
   - censys
@@ -28,6 +28,7 @@ enabled: true
 # Censys response leaves out an optional array such as the pivot results or
 # their field/value pairs. Keeps later steps from failing on missing data.
 consts:
+  connector_id: "<connector-id>"
   empty_arr: []
 
 triggers:
@@ -141,7 +142,7 @@ steps:
         steps:
           - name: submit_host
             type: censys.censEyeCreateAnalysisJob
-            connector-id: <connector-id>
+            connector-id: "{{ consts.connector_id }}"
             with:
               type: "host"
               host: "{{ variables.target_host }}"
@@ -151,7 +152,7 @@ steps:
         steps:
           - name: submit_certificate
             type: censys.censEyeCreateAnalysisJob
-            connector-id: <connector-id>
+            connector-id: "{{ consts.connector_id }}"
             with:
               type: "certificate"
               certificate: "{{ variables.target_certificate }}"
@@ -161,7 +162,7 @@ steps:
         steps:
           - name: submit_webproperty
             type: censys.censEyeCreateAnalysisJob
-            connector-id: <connector-id>
+            connector-id: "{{ consts.connector_id }}"
             with:
               type: "webproperty"
               hostname: "{{ variables.target_hostname }}"
@@ -211,7 +212,7 @@ steps:
 
           - name: get_job_status
             type: censys.censEyeJobStatus
-            connector-id: <connector-id>
+            connector-id: "{{ consts.connector_id }}"
             with:
               jobId: "{{ variables.job_id }}"
             on-failure:
@@ -236,15 +237,15 @@ steps:
                   duration: 10s
 
   # Once the job has completed, fetch the related-infrastructure
-  # pivots, keep the fields we display (each pivot's count and its
-  # field/value pairs), and assemble the censys.related_infrastructure payload.
+  # pivots and keep the fields we display (each pivot's count and its
+  # field/value pairs) for the alert note.
   - name: fetch_results_gate
     type: if
     condition: "${{ variables.job_id != blank and variables.job_state == 'completed' }}"
     steps:
       - name: fetch_results
         type: censys.censEyeJobResult
-        connector-id: <connector-id>
+        connector-id: "{{ consts.connector_id }}"
         with:
           jobId: "{{ variables.job_id }}"
         on-failure:
@@ -260,20 +261,10 @@ steps:
         on-failure:
           continue: true
 
-      - name: build_subobj
-        type: data.set
-        with:
-          censys_subobj:
-            job_id: "${{ variables.job_id }}"
-            state: "${{ variables.job_state }}"
-            result_count: "${{ variables.job_result_count }}"
-            target_type: "${{ variables.target_type }}"
-            results: "${{ steps.normalize_results.output }}"
-
-  # Write the pivots onto the alert under censys.related_infrastructure.
-  # Runs only when the job completed and a target document exists. This
-  # namespace is separate from the enrichment and rescan workflows, so their
-  # results never overwrite each other.
+  # Write the full Censeye job result onto the alert under
+  # censys.related_infrastructure. Runs only when the job completed and a
+  # target document exists. This namespace is separate from the enrichment
+  # and rescan workflows, so their results never overwrite each other.
   - name: dispatch_writes
     type: if
     condition: "${{ variables.job_id != blank and variables.job_state == 'completed' and variables.target_index != blank and variables.target_id != blank }}"
@@ -285,7 +276,7 @@ steps:
           id: "{{ variables.target_id }}"
           doc:
             censys:
-              related_infrastructure: "${{ variables.censys_subobj }}"
+              related_infrastructure: "${{ steps.fetch_results.output.result }}"
         on-failure:
           continue: true
 
@@ -401,7 +392,7 @@ steps:
             {%- elsif variables.target_type == 'webproperty' %}
             View on Censys: https://platform.censys.io/web/{{ variables.target_hostname | url_encode }}:{{ variables.target_port }}
             {%- endif %}
-            {{ variables.censys_subobj | json }}
+            {{ steps.fetch_results.output.result | json }}
 
   # When the job never completed (failed, unknown, or the poll cap was hit),
   # log the last state so the run doesn't end silently.

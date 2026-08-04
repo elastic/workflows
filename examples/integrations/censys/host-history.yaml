@@ -23,6 +23,7 @@ tags:
 enabled: true
 
 consts:
+  connector_id: "<connector-id>"
   empty_arr: []
 
 triggers:
@@ -88,12 +89,11 @@ steps:
       default_end_time: "{{ 'now' | date: '%Y-%m-%dT%H:%M:%SZ' }}"
       default_start_time: "{{ 'now' | date: '%s' | minus: 604800 | date: '%Y-%m-%dT%H:%M:%SZ' }}"
 
-  # Human-in-the-loop pause - alert runs only. The analyst reviews the
-  # auto-picked host IP and the default 7-day window (both shown in the message
-  # text) and can confirm by submitting the form blank, or override any field.
-  # Blank fields fall back to the auto-picked values in resolve_request below.
-  # Note: the values can only be shown in the message text, not as form-field
-  # defaults, so the form starts empty.
+  # Human-in-the-loop pause - alert runs only. The form is pre-filled with the
+  # auto-picked host IP and the default 7-day window via the schema `default`
+  # values below. The analyst reviews them, adjusts any field if needed, and
+  # submits. resolve_request below reads the submitted values and still falls
+  # back to the auto-picked values if a field is cleared.
   - name: gate_hitl
     type: if
     condition: "${{ event.alerts[0] != blank }}"
@@ -107,33 +107,28 @@ steps:
             Alert Index: {{ event.alerts[0]._index }}
             Alert ID: {{ event.alerts[0]._id }}
 
-            ----------
-            Auto-picked values (leave the form fields blank to use them)
-            ----------
-            host       : {{ variables.alert_host_ip }}
-                       (first non-blank of host.ip, source.ip, destination.ip)
-            start_time : {{ variables.default_start_time }}
-                       (now - 7 days, UTC)
-            end_time   : {{ variables.default_end_time }}
-                       (now, UTC)
-            ----------
+            The host IP and time window below are pre-filled - the host IP is
+            taken from the alert (first non-blank of host.ip, source.ip,
+            destination.ip) and the window defaults to the last 7 days
+            (start = now - 7 days, end = now, both UTC).
 
-            Confirm by submitting an empty form, or override any field
-            below. The connector swaps start/end internally - submit
-            the window in normal chronological order
-            (start_time <= end_time).
+            Review the values, adjust any field if needed, then submit.
+            Enter the window in chronological order (start_time <= end_time).
           schema:
             type: object
             properties:
               host:
                 type: string
-                title: "Host IP (IPv4 or IPv6) - leave blank to use the auto-picked value above"
+                title: "Host IP (IPv4 or IPv6)"
+                default: "{{ variables.alert_host_ip }}"
               start_time:
                 type: string
-                title: "Start time (RFC3339) - leave blank to use now - 7 days (UTC)"
+                title: "Start time (RFC3339)"
+                default: "{{ variables.default_start_time }}"
               end_time:
                 type: string
-                title: "End time (RFC3339) - leave blank to use now (UTC)"
+                title: "End time (RFC3339)"
+                default: "{{ variables.default_end_time }}"
 
   # Settle the final host IP and time window used by the rest of the workflow,
   # along with the alert document to attach the note to.
@@ -190,7 +185,7 @@ steps:
 
           - name: get_host_history
             type: censys.getHostHistory
-            connector-id: <connector-id>
+            connector-id: "{{ consts.connector_id }}"
             with:
               host: "{{ variables.request_host }}"
               startTime: "{{ variables.request_start }}"

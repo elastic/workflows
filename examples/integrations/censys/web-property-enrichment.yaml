@@ -3,16 +3,16 @@ name: Censys Web Property Enrichment
 description: >-
   Enrich an alert with Censys Platform getWebProperty data for every available
   (hostname-or-IP, port) pair derived from ECS fields. Each pair is enriched
-  independently and written back under censys.webproperty_enrichment.<field>.*
-  on the alert document (censys.webproperty_enrichment.url.*,
-  censys.webproperty_enrichment.destination.*,
-  censys.webproperty_enrichment.source.*). The dedicated
-  webproperty_enrichment namespace keeps this workflow's output separate from
-  the host enrichment, which writes to censys.host_enrichment.<field>.*.
-  Manual runs use inputs.hostname and inputs.port; when alert_index and
-  alert_id are also provided the enrichment is written back to that document
-  under censys.webproperty_enrichment.*, otherwise the enriched object is
-  logged to the workflow console.
+  independently and written back under censys.webproperty_enrichment.<field>
+  on the alert document as the full Censys web property resource
+  (result.resource) (censys.webproperty_enrichment.url / .destination /
+  .source). The dedicated webproperty_enrichment namespace keeps this
+  workflow's output separate from the host enrichment, which writes to
+  censys.host_enrichment.<field>. Manual runs use inputs.hostname and
+  inputs.port; when alert_index and alert_id are also provided the
+  enrichment is written back to that document under
+  censys.webproperty_enrichment, otherwise the full web property resource
+  is logged to the workflow console.
 tags:
   - censys
   - enrichment
@@ -21,6 +21,7 @@ tags:
 enabled: true
 
 consts:
+  connector_id: "<connector-id>"
   empty_arr: []
 
 triggers:
@@ -104,7 +105,7 @@ steps:
       # Look up this web property (hostname + port) in Censys.
       - name: get_web_property
         type: censys.getWebProperty
-        connector-id: <connector-id>
+        connector-id: "{{ consts.connector_id }}"
         with:
           hostname: "{{ foreach.item.hostname }}"
           port: "${{ foreach.item.port }}"
@@ -167,38 +168,12 @@ steps:
         on-failure:
           continue: true
 
-      # Assemble the web property details to store/show for this entry.
-      - name: build_subobj
-        type: data.set
-        with:
-          censys_subobj:
-            hostname: "${{ variables.web.hostname }}"
-            port: "${{ variables.web.port }}"
-            scan_time: "${{ variables.web.scan_time }}"
-            endpoints: "${{ steps.normalize_endpoints.output }}"
-            software: "${{ steps.normalize_software.output }}"
-            labels: "${{ steps.normalize_labels.output }}"
-            threats: "${{ variables.web.threats }}"
-            vulns: "${{ variables.web.vulns }}"
-            cert:
-              fingerprint_sha256: "${{ variables.web.cert.fingerprint_sha256 }}"
-              parsed:
-                subject_dn: "${{ variables.web.cert.parsed.subject_dn }}"
-                issuer_dn: "${{ variables.web.cert.parsed.issuer_dn }}"
-                subject:
-                  common_name: "${{ variables.web.cert.parsed.subject.common_name }}"
-                validity_period:
-                  not_before: "${{ variables.web.cert.parsed.validity_period.not_before }}"
-                  not_after: "${{ variables.web.cert.parsed.validity_period.not_after }}"
-                signature:
-                  self_signed: "${{ variables.web.cert.parsed.signature.self_signed }}"
-
-      # Write the web property data onto the alert under the field it came from:
-      # censys.webproperty_enrichment.url / .destination / .source (or directly
-      # under censys.webproperty_enrichment for a manual run). The outer `if`
-      # only runs when a target document exists; the `switch` picks the slot by
-      # field name. To enrich an extra field, add a matching case below.
-      # Manual runs with no alert document skip this and log to the console.
+      # Write the full Censys web property resource (result.resource) onto the
+      # alert under the field it came from: censys.webproperty_enrichment.url /
+      # .destination / .source (or directly under censys.webproperty_enrichment
+      # for a manual run). The outer `if` only runs when a target document
+      # exists; the `switch` picks the slot by field name. Manual runs with no
+      # alert document skip this and log to the console.
       - name: dispatch_writes
         type: if
         condition: "${{ variables.target_index != blank and variables.target_id != blank }}"
@@ -217,7 +192,7 @@ steps:
                       doc:
                         censys:
                           webproperty_enrichment:
-                            url: "${{ variables.censys_subobj }}"
+                            url: "${{ variables.web }}"
                     on-failure:
                       continue: true
               - match: "web_property"
@@ -229,7 +204,7 @@ steps:
                       id: "{{ variables.target_id }}"
                       doc:
                         censys:
-                          webproperty_enrichment: "${{ variables.censys_subobj }}"
+                          webproperty_enrichment: "${{ variables.web }}"
                     on-failure:
                       continue: true
               - match: "destination"
@@ -242,7 +217,7 @@ steps:
                       doc:
                         censys:
                           webproperty_enrichment:
-                            destination: "${{ variables.censys_subobj }}"
+                            destination: "${{ variables.web }}"
                     on-failure:
                       continue: true
               - match: "source"
@@ -255,7 +230,7 @@ steps:
                       doc:
                         censys:
                           webproperty_enrichment:
-                            source: "${{ variables.censys_subobj }}"
+                            source: "${{ variables.web }}"
                     on-failure:
                       continue: true
             default:
@@ -343,4 +318,4 @@ steps:
               message: |-
                 Censys web property enrichment for {{ variables.field_name }} ({{ variables.web.hostname }}:{{ variables.web.port }}):
                 View on Censys: https://platform.censys.io/web/{{ variables.web.hostname | url_encode }}:{{ variables.web.port }}
-                {{ variables.censys_subobj | json }}
+                {{ variables.web | json }}
