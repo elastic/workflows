@@ -1,0 +1,239 @@
+template-metadata:
+  slug: aws-rds-connection-exhaustion-investigation-otel
+  version: "1.0.0"
+  availability: ">=9.5.0"
+  name: "AWS RDS connection exhaustion investigation (OTel)"
+  description: >-
+    Investigate an RDS instance that is refusing new connections. Compares
+    incident vs baseline DatabaseConnections, rules out CPU/memory/IO/storage
+    bottlenecks, correlates with downstream ALB 5xx, and synthesises a
+    root-cause summary. Requires AWS OTel metrics from the EDOT awscloudwatch
+    collector (metrics-aws.*.otel-*).
+  solutions: [observability]
+  categories: [root-cause-analysis, monitoring]
+
+name: AWS RDS Connection Exhaustion Investigation (OTel)
+description: >
+  Automated investigation of an RDS database that is refusing new connections.
+  Confirms whether the database connection count climbed to its ceiling
+  (connection exhaustion) versus an alternative DB bottleneck (CPU, memory, IO,
+  storage), correlates with the downstream ALB 5xx cascade, and synthesises a
+  root-cause summary. Built against OTel-schema AWS CloudWatch metrics shipped by
+  the EDOT awscloudwatch collector (metrics-aws.*.otel-*).
+
+# OTel-schema data streams produced by the EDOT awscloudwatch collector. The metric
+# value field is the CloudWatch name flattened under `metrics`, e.g.
+# `metrics.amazonaws.com/AWS/RDS/DatabaseConnections` — it contains dots and slashes,
+# so every reference is backticked in ES|QL.
+consts:
+  rds_metrics_index: "metrics-aws.rds.otel-*"
+  alb_metrics_index: "metrics-aws.applicationelb.otel-*"
+  # Baseline = the quiet period shortly BEFORE the alert. Kept recent (not -6h) so it
+  # works for short incidents and freshly-onboarded environments without deep history;
+  # widen for production databases with long stable baselines.
+  baseline_lookback: "45 minutes"
+  baseline_lookend: "12 minutes"
+  # Incident window padding around the alert timestamp.
+  incident_lookback: "20 minutes"
+
+triggers:
+  - type: alert
+  - type: manual
+    inputs:
+      - name: db_instance_identifier
+        type: string
+        description: >-
+          RDS DBInstanceIdentifier of the alerting database
+          (e.g. fis-orders-db-...).
+        required: true
+      - name: service_name
+        type: string
+        description: >-
+          Application service that depends on the database (e.g. orders).
+        required: true
+      - name: load_balancer
+        type: string
+        description: >-
+          ApplicationELB dimension of the fronting ALB
+          (e.g. app/fis-demo-fleet-alb/<id>) for the 5xx cascade check.
+        required: true
+      - name: alert_timestamp
+        type: string
+        description: ISO8601 timestamp of the alert firing.
+        required: true
+
+steps:
+  # 1. Connection count during the incident window: how high did it climb and did it plateau?
+  #    A plateau at a steady ceiling is the signature of pool/connection exhaustion.
+  - name: connections_incident
+    type: elasticsearch.esql.query
+    with:
+      query: |
+        FROM {{ consts.rds_metrics_index }}
+        | WHERE attributes.DBInstanceIdentifier == "{{ inputs.db_instance_identifier }}"
+          AND attributes.MetricName == "DatabaseConnections"
+          AND @timestamp >= TO_DATETIME("{{ inputs.alert_timestamp }}") - {{ consts.incident_lookback }}
+          AND @timestamp <= TO_DATETIME("{{ inputs.alert_timestamp }}") + 5 minutes
+        | STATS
+            peak_connections = MAX(`metrics.amazonaws.com/AWS/RDS/DatabaseConnections`),
+            avg_connections  = AVG(`metrics.amazonaws.com/AWS/RDS/DatabaseConnections`),
+            samples          = COUNT(*)
+      format: json
+    on-failure:
+      continue: true
+
+  # 2. Baseline connection count BEFORE the incident — the comparison denominator.
+  - name: connections_baseline
+    type: elasticsearch.esql.query
+    with:
+      query: |
+        FROM {{ consts.rds_metrics_index }}
+        | WHERE attributes.DBInstanceIdentifier == "{{ inputs.db_instance_identifier }}"
+          AND attributes.MetricName == "DatabaseConnections"
+          AND @timestamp >= TO_DATETIME("{{ inputs.alert_timestamp }}") - {{ consts.baseline_lookback }}
+          AND @timestamp <= TO_DATETIME("{{ inputs.alert_timestamp }}") - {{ consts.baseline_lookend }}
+        | STATS baseline_connections = AVG(`metrics.amazonaws.com/AWS/RDS/DatabaseConnections`)
+      format: json
+    on-failure:
+      continue: true
+
+  # 3. Alternative DB bottlenecks — rule connection exhaustion IN by ruling these OUT.
+  #    If CPU/memory/IO are nominal while connections are pinned high, exhaustion is the cause.
+  - name: db_resource_metrics
+    type: elasticsearch.esql.query
+    with:
+      query: |
+        FROM {{ consts.rds_metrics_index }}
+        | WHERE attributes.DBInstanceIdentifier == "{{ inputs.db_instance_identifier }}"
+          AND @timestamp >= TO_DATETIME("{{ inputs.alert_timestamp }}") - {{ consts.incident_lookback }}
+          AND @timestamp <= TO_DATETIME("{{ inputs.alert_timestamp }}") + 5 minutes
+        | STATS
+            max_cpu_pct        = MAX(`metrics.amazonaws.com/AWS/RDS/CPUUtilization`),
+            min_freeable_mem   = MIN(`metrics.amazonaws.com/AWS/RDS/FreeableMemory`),
+            min_free_storage   = MIN(`metrics.amazonaws.com/AWS/RDS/FreeStorageSpace`),
+            max_read_latency   = MAX(`metrics.amazonaws.com/AWS/RDS/ReadLatency`),
+            max_write_latency  = MAX(`metrics.amazonaws.com/AWS/RDS/WriteLatency`),
+            max_disk_queue     = MAX(`metrics.amazonaws.com/AWS/RDS/DiskQueueDepth`)
+      format: json
+    on-failure:
+      continue: true
+
+  # 4. Downstream cascade — causal chain often ends in ALB 5xx as the dependent
+  #    service times out waiting for a DB connection. Confirms blast radius.
+  - name: alb_cascade
+    type: elasticsearch.esql.query
+    with:
+      query: |
+        FROM {{ consts.alb_metrics_index }}
+        | WHERE attributes.LoadBalancer == "{{ inputs.load_balancer }}"
+          AND @timestamp >= TO_DATETIME("{{ inputs.alert_timestamp }}") - {{ consts.incident_lookback }}
+          AND @timestamp <= TO_DATETIME("{{ inputs.alert_timestamp }}") + 5 minutes
+        | STATS
+            elb_5xx             = SUM(`metrics.amazonaws.com/AWS/ApplicationELB/HTTPCode_ELB_5XX_Count`),
+            request_count       = SUM(`metrics.amazonaws.com/AWS/ApplicationELB/RequestCount`),
+            max_target_response = MAX(`metrics.amazonaws.com/AWS/ApplicationELB/TargetResponseTime`)
+      format: json
+    on-failure:
+      continue: true
+
+  # 5. Classify the database signal. The LLM weighs connection magnitude + plateau vs
+  #    the alternative-bottleneck metrics to pick the single dominant DB failure mode.
+  - name: classify_db_pattern
+    type: ai.classify
+    with:
+      input: |
+        DBInstanceIdentifier: {{ inputs.db_instance_identifier }}
+        Connections during incident: {{ steps.connections_incident.output | json }}
+        Baseline connections:        {{ steps.connections_baseline.output | json }}
+        DB resource metrics:         {{ steps.db_resource_metrics.output | json }}
+      categories:
+        - connection_exhaustion
+        - cpu_saturation
+        - memory_pressure
+        - io_latency
+        - storage_full
+        - unrecognized
+      instructions: |
+        You are classifying the dominant failure mode of an AWS RDS instance during an
+        incident. Note: RDS does NOT emit a max_connections metric, so connection
+        exhaustion is inferred from the symptom — DatabaseConnections climbing far above
+        baseline and plateauing at a steady ceiling while CPU, freeable memory, free
+        storage and IO latency remain within normal ranges. Choose:
+          - connection_exhaustion: peak connections >> baseline and plateaued, other resources nominal
+          - cpu_saturation: max_cpu_pct sustained near 100
+          - memory_pressure: min_freeable_mem near zero
+          - io_latency: read/write latency or disk queue depth sharply elevated
+          - storage_full: min_free_storage near zero
+        Pick the single best category. If signals are ambiguous, return "unrecognized".
+      includeRationale: true
+
+  # Optional calibration anchors (graceful if SLOs/alerts aren't deployed).
+  # The raw connection count can't say whether a value is "bad" for THIS instance (RDS
+  # emits no max_connections). Shipped SLOs + alert rules encode that judgement, so
+  # when present they anchor severity. on-failure:continue → missing index / undeployed
+  # object / no signal yields nothing and never breaks the run.
+  - name: slo_context
+    type: elasticsearch.esql.query
+    with:
+      query: |
+        FROM .slo-observability.summary-*
+        | WHERE slo.instanceId LIKE "*{{ inputs.db_instance_identifier }}*"
+        | STATS sliValue = MAX(sliValue), errorBudgetConsumed = MAX(errorBudgetConsumed), status = VALUES(status) BY slo.name
+      format: json
+    on-failure:
+      continue: true
+
+  - name: active_alerts
+    type: elasticsearch.esql.query
+    with:
+      query: |
+        FROM .alerts-*
+        | WHERE kibana.alert.instance.id LIKE "*{{ inputs.db_instance_identifier }}*"
+          AND @timestamp >= TO_DATETIME("{{ inputs.alert_timestamp }}") - {{ consts.incident_lookback }}
+          AND @timestamp <= TO_DATETIME("{{ inputs.alert_timestamp }}") + 5 minutes
+        | KEEP kibana.alert.rule.name, kibana.alert.status, kibana.alert.reason, kibana.alert.start
+        | SORT kibana.alert.start DESC
+        | LIMIT 20
+      format: json
+    on-failure:
+      continue: true
+
+  # 6. Synthesise the root-cause summary.
+  - name: synthesize_findings
+    type: ai.summarize
+    with:
+      input: |
+        ## RDS incident investigation for {{ inputs.db_instance_identifier }}
+        Alert timestamp: {{ inputs.alert_timestamp }}
+        Dependent service: {{ inputs.service_name }}
+
+        Classification: {{ steps.classify_db_pattern.output.category }}
+        Rationale: {{ steps.classify_db_pattern.output.rationale }}
+
+        Connections (incident): {{ steps.connections_incident.output | json }}
+        Connections (baseline): {{ steps.connections_baseline.output | json }}
+        DB resource metrics:    {{ steps.db_resource_metrics.output | json }}
+        ALB cascade:            {{ steps.alb_cascade.output | json }}
+        SLO status:             {{ steps.slo_context.output | json }}
+        Active alerts:          {{ steps.active_alerts.output | json }}
+      instructions: |
+        You are an SRE assistant synthesising an AWS RDS incident investigation.
+        Produce a structured root-cause summary in EXACTLY these sections:
+        ROOT CAUSE HYPOTHESIS — one sentence naming the most likely cause.
+        EVIDENCE — the specific metric values supporting it (peak vs baseline
+          connections; the nominal/abnormal resource metrics; ALB 5xx + latency).
+        SEVERITY & CALIBRATION — if an SLO is VIOLATED/DEGRADING (or its error budget is
+          materially consumed), or an alert is active for this resource, ANCHOR the
+          severity and root cause on that calibrated signal and name the alert/SLO + its
+          reason (e.g. the "Database connections high" alert confirms the count is high
+          for THIS instance — which the raw number alone cannot establish). If no
+          SLO/alert context is present or it shows nothing, state the assessment rests on
+          raw metrics alone with no SLO/alert corroboration — do NOT invent one.
+        CAUSAL CHAIN — connections climb to the ceiling → new connections refused →
+          {{ inputs.service_name }} times out → 5xx at the ALB (adjust to the evidence).
+        RECOMMENDED NEXT STEPS — e.g. drain/recycle leaked connections, raise the
+          connection ceiling (max_connections / pool size) with headroom, restart
+          {{ inputs.service_name }} to reset its pool, fix the leak.
+        DOWNSTREAM IMPACT — services affected and user-facing symptom.
+        CONFIDENCE NOTE — only if the classification was ambiguous.
+      maxLength: 1500

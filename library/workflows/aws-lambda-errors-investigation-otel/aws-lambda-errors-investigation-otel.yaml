@@ -1,0 +1,169 @@
+template-metadata:
+  slug: aws-lambda-errors-investigation-otel
+  version: "1.0.0"
+  availability: ">=9.5.0"
+  name: "AWS Lambda error spike investigation (OTel)"
+  description: >-
+    Investigate a Lambda function with an elevated failure rate. Correlates
+    Errors, Invocations, Throttles, Duration, and ConcurrentExecutions to
+    distinguish failing code, concurrency throttling, or duration degradation.
+    Requires AWS OTel metrics from the EDOT awscloudwatch collector
+    (metrics-aws.*.otel-*).
+  solutions: [observability]
+  categories: [root-cause-analysis, monitoring]
+
+name: AWS Lambda Error Spike Investigation (OTel)
+description: >
+  Automated investigation of a Lambda function with an elevated failure rate. Decides
+  whether the function is FAILING (Errors up vs baseline), being THROTTLED (concurrency
+  exhausted), or DEGRADING (Duration climbing), by correlating Errors/Invocations/
+  Throttles/Duration/ConcurrentExecutions. Built against OTel-schema AWS CloudWatch
+  metrics from the EDOT awscloudwatch collector (metrics-aws.*.otel-*).
+
+consts:
+  lambda_metrics_index: "metrics-aws.lambda.otel-*"
+  baseline_lookback: "45 minutes"
+  baseline_lookend: "12 minutes"
+  incident_lookback: "20 minutes"
+
+triggers:
+  - type: alert
+  - type: manual
+    inputs:
+      - name: function_name
+        type: string
+        description: >-
+          Lambda FunctionName of the alerting function (e.g. fis-worker-fns-0).
+        required: true
+      - name: alert_timestamp
+        type: string
+        description: ISO8601 timestamp of the alert firing.
+        required: true
+
+steps:
+  # 1. Failure signals during the incident: errors, the error RATE (errors/invocations),
+  #    throttles, peak concurrency, and slowest duration.
+  - name: errors_incident
+    type: elasticsearch.esql.query
+    with:
+      query: |
+        FROM {{ consts.lambda_metrics_index }}
+        | WHERE attributes.FunctionName == "{{ inputs.function_name }}"
+          AND @timestamp >= TO_DATETIME("{{ inputs.alert_timestamp }}") - {{ consts.incident_lookback }}
+          AND @timestamp <= TO_DATETIME("{{ inputs.alert_timestamp }}") + 5 minutes
+        | STATS
+            errors       = SUM(`metrics.amazonaws.com/AWS/Lambda/Errors`),
+            invocations  = SUM(`metrics.amazonaws.com/AWS/Lambda/Invocations`),
+            throttles    = SUM(`metrics.amazonaws.com/AWS/Lambda/Throttles`),
+            max_duration = MAX(`metrics.amazonaws.com/AWS/Lambda/Duration`),
+            max_concurrency = MAX(`metrics.amazonaws.com/AWS/Lambda/ConcurrentExecutions`)
+        | EVAL error_rate = TO_DOUBLE(errors) / TO_DOUBLE(invocations + 1)
+      format: json
+    on-failure:
+      continue: true
+
+  # 2. Baseline failure rate BEFORE the incident.
+  - name: errors_baseline
+    type: elasticsearch.esql.query
+    with:
+      query: |
+        FROM {{ consts.lambda_metrics_index }}
+        | WHERE attributes.FunctionName == "{{ inputs.function_name }}"
+          AND @timestamp >= TO_DATETIME("{{ inputs.alert_timestamp }}") - {{ consts.baseline_lookback }}
+          AND @timestamp <= TO_DATETIME("{{ inputs.alert_timestamp }}") - {{ consts.baseline_lookend }}
+        | STATS
+            errors      = SUM(`metrics.amazonaws.com/AWS/Lambda/Errors`),
+            invocations = SUM(`metrics.amazonaws.com/AWS/Lambda/Invocations`),
+            max_duration = MAX(`metrics.amazonaws.com/AWS/Lambda/Duration`)
+        | EVAL baseline_error_rate = TO_DOUBLE(errors) / TO_DOUBLE(invocations + 1)
+      format: json
+    on-failure:
+      continue: true
+
+  # 3. Classify the Lambda failure mode.
+  - name: classify_lambda_pattern
+    type: ai.classify
+    with:
+      input: |
+        FunctionName: {{ inputs.function_name }}
+        Incident: {{ steps.errors_incident.output | json }}
+        Baseline: {{ steps.errors_baseline.output | json }}
+      categories:
+        - elevated_errors
+        - throttling
+        - duration_degradation
+        - healthy
+      instructions: |
+        Classify the dominant Lambda failure mode:
+          - throttling: throttles > 0 and/or max_concurrency pinned at a limit — invocations
+            are being rejected because concurrency is exhausted (scale / reserved-concurrency issue).
+          - elevated_errors: error_rate is well above baseline_error_rate with few/no throttles —
+            the function code/dependency is failing.
+          - duration_degradation: error_rate near baseline but max_duration sharply up — the
+            function is slow (downstream latency / cold starts / resource limits).
+          - healthy: error_rate near baseline, no throttles, duration stable.
+        Pick the single best category; prefer throttling when throttles > 0.
+      includeRationale: true
+
+  # Optional calibration anchors (graceful if SLOs/alerts aren't deployed).
+  - name: slo_context
+    type: elasticsearch.esql.query
+    with:
+      query: |
+        FROM .slo-observability.summary-*
+        | WHERE slo.instanceId LIKE "*{{ inputs.function_name }}*"
+        | STATS sliValue = MAX(sliValue), errorBudgetConsumed = MAX(errorBudgetConsumed), status = VALUES(status) BY slo.name
+      format: json
+    on-failure:
+      continue: true
+
+  - name: active_alerts
+    type: elasticsearch.esql.query
+    with:
+      query: |
+        FROM .alerts-*
+        | WHERE kibana.alert.instance.id LIKE "*{{ inputs.function_name }}*"
+          AND @timestamp >= TO_DATETIME("{{ inputs.alert_timestamp }}") - {{ consts.incident_lookback }}
+          AND @timestamp <= TO_DATETIME("{{ inputs.alert_timestamp }}") + 5 minutes
+        | KEEP kibana.alert.rule.name, kibana.alert.status, kibana.alert.reason, kibana.alert.start
+        | SORT kibana.alert.start DESC
+        | LIMIT 20
+      format: json
+    on-failure:
+      continue: true
+
+  - name: synthesize_findings
+    type: ai.summarize
+    with:
+      input: |
+        ## Lambda incident investigation for {{ inputs.function_name }}
+        Alert timestamp: {{ inputs.alert_timestamp }}
+
+        Classification: {{ steps.classify_lambda_pattern.output.category }}
+        Rationale: {{ steps.classify_lambda_pattern.output.rationale }}
+
+        Incident: {{ steps.errors_incident.output | json }}
+        Baseline: {{ steps.errors_baseline.output | json }}
+        SLO status:    {{ steps.slo_context.output | json }}
+        Active alerts: {{ steps.active_alerts.output | json }}
+      instructions: |
+        You are an SRE assistant synthesising an AWS Lambda incident investigation.
+        Produce a structured root-cause summary in EXACTLY these sections:
+        ROOT CAUSE HYPOTHESIS — one sentence naming the dominant failure mode.
+        EVIDENCE — errors, invocations, error_rate vs baseline_error_rate, throttles,
+          max_concurrency, max_duration.
+        SEVERITY & CALIBRATION — if an SLO is VIOLATED/DEGRADING (or its error budget is
+          materially consumed), or an alert is active for this resource, ANCHOR severity
+          and root cause on that calibrated signal and name the alert/SLO + its reason
+          (the shipped thresholds encode what is "bad" for this resource, which the raw
+          magnitude alone cannot establish). If no SLO/alert context is present or empty,
+          state the assessment rests on raw metrics alone with no SLO/alert corroboration
+          — do NOT invent one.
+        CAUSAL CHAIN — adjust to the evidence (e.g. arrival spike → concurrency exhausted →
+          throttles → dropped/failed invocations; or a failing dependency → error rate up).
+        RECOMMENDED NEXT STEPS — e.g. raise reserved/provisioned concurrency for throttling;
+          inspect function logs / the failing dependency for elevated_errors; profile cold
+          starts / downstream calls for duration_degradation.
+        DOWNSTREAM IMPACT — what the failed/throttled invocations affect.
+        CONFIDENCE NOTE — only if ambiguous.
+      maxLength: 1500
