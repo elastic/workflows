@@ -21,11 +21,11 @@ steps:
       # A local bundle path takes precedence; otherwise the CLI reads
       # WORKFLOWS_SCHEMA_CDN_URL from the environment automatically.
       if [ -n "${WORKFLOWS_SCHEMA:-}" ]; then
-        npm run validate -- library/workflows --recursive --variant template --schema "${WORKFLOWS_SCHEMA}"
-        npm run validate -- examples --recursive --variant strict --schema "${WORKFLOWS_SCHEMA}"
+        npm run validate:templates -- --schema "${WORKFLOWS_SCHEMA}"
+        npm run validate:examples -- --schema "${WORKFLOWS_SCHEMA}"
       else
-        npm run validate -- library/workflows --recursive --variant template
-        npm run validate -- examples --recursive --variant strict
+        npm run validate:templates
+        npm run validate:examples
       fi
 
   - label: "Deploy"

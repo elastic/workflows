@@ -11,7 +11,9 @@
   "scripts": {
     "build:catalog": "node scripts/build-catalog.mjs",
     "validate": "node scripts/validate-workflows.mjs",
-    "validate:all": "node scripts/validate-workflows.mjs examples library/workflows --recursive",
+    "validate:templates": "node scripts/validate-workflows.mjs library/workflows --recursive --variant template",
+    "validate:examples": "node scripts/validate-workflows.mjs examples --recursive --variant strict",
+    "validate:all": "npm run validate:templates && npm run validate:examples",
     "lint": "eslint .",
     "lint:fix": "eslint . --fix",
     "format": "prettier --write .",
