@@ -1,0 +1,124 @@
+name: Publish air-gap bundle
+
+# Builds the catalog and attaches it to a GitHub Release as a tarball, for
+# air-gapped Kibana deployments that cannot reach the CDN.
+#
+# Unlike the catalog publish (Buildkite, credentialed, on every merge to
+# `main`), this needs no secrets beyond the default `GITHUB_TOKEN`: the
+# generator resolves Kibana versions over unauthenticated `git ls-remote`.
+#
+# Three ways in:
+#   - Weekly check — cuts a bundle only when the set of Kibana versions in the
+#     catalog has changed: a new minor branch appeared in `elastic/kibana`, or
+#     the version `main`'s `package.json` declares moved to the next minor
+#     (both happen when a release branches, not on every commit to main). So
+#     every bundle carries an exact catalog for every version current at the
+#     time, and quiet weeks produce nothing.
+#   - Manual run (`workflow_dispatch`) — cut a bundle on demand, e.g. to pick
+#     up template content without waiting for a version change.
+#   - Tag push (`v*`) — cut a bundle for a tag you created yourself.
+
+on:
+  schedule:
+    - cron: '0 6 * * 1'
+  workflow_dispatch:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  bundle:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/setup-node@cdca7365b2dadb8aad0a33bc7601856ffabcc48e # v4.3.0
+        with:
+          node-version: '20'
+          cache: 'npm'
+      - run: npm ci --ignore-scripts
+      - run: npm run build:catalog
+
+      - name: Decide whether to cut a bundle
+        id: decide
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT: ${{ github.event_name }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+
+          # `(id, kibana)` pairs rather than ids alone, so a `main` semver bump
+          # counts as a change and not just the arrival of a new minor.
+          current="$(jq -Sc '[.versions[] | {id, kibana}]' dist/v1/kibana-versions.json)"
+          # Minors the bundle serves, for the release title. Sorted numerically so
+          # 9.10 lands after 9.6 rather than before 9.5.
+          minors="$(jq -r '[.versions[].kibana | split(".") | .[0:2] | map(tonumber)] | unique | map(join(".")) | join(", ")' dist/v1/kibana-versions.json)"
+          echo "versions=${minors}" >> "${GITHUB_OUTPUT}"
+          echo "Catalog covers Kibana ${minors} — ${current}"
+
+          if [ "${EVENT}" = "push" ]; then
+            echo "Tag ${TAG} was pushed; cutting a bundle for it."
+            echo "tag=${TAG}" >> "${GITHUB_OUTPUT}"
+            echo "cut=true" >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
+
+          if ! previous_tag="$(gh release view --json tagName --jq .tagName 2>/dev/null)"; then
+            echo "No previous release; cutting the first bundle."
+          else
+            gh release download "${previous_tag}" --pattern '*.tar.gz' --dir previous
+            tar -xzf previous/*.tar.gz -C previous
+            previous_versions="$(jq -Sc '[.versions[] | {id, kibana}]' previous/v1/kibana-versions.json)"
+            echo "Catalog versions in ${previous_tag}: ${previous_versions}"
+
+            if [ "${current}" = "${previous_versions}" ] && [ "${EVENT}" = "schedule" ]; then
+              echo "Unchanged since ${previous_tag}; nothing to cut."
+              echo "cut=false" >> "${GITHUB_OUTPUT}"
+              exit 0
+            fi
+          fi
+
+          echo "tag=v$(date -u +%Y.%m.%d)" >> "${GITHUB_OUTPUT}"
+          echo "cut=true" >> "${GITHUB_OUTPUT}"
+
+      - name: Package the catalog tree
+        if: steps.decide.outputs.cut == 'true'
+        env:
+          TAG: ${{ steps.decide.outputs.tag }}
+        run: |
+          asset="workflows-library-${TAG}.tar.gz"
+          # Archive `v1` (not its contents): extracting yields a `v1/` directory,
+          # which is one of the two layouts Kibana's `library.bundlePath` accepts.
+          tar -C dist -czf "${asset}" v1
+          sha256sum "${asset}" > "${asset}.sha256"
+          echo "ASSET=${asset}" >> "${GITHUB_ENV}"
+
+      - name: Attach the bundle to the release
+        if: steps.decide.outputs.cut == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.decide.outputs.tag }}
+          VERSIONS: ${{ steps.decide.outputs.versions }}
+        run: |
+          set -euo pipefail
+
+          # Re-runs (and tags released by hand) upload onto the existing release
+          # rather than failing. `--target` creates the tag for scheduled and
+          # manual runs, where it does not exist yet.
+          if gh release view "${TAG}" > /dev/null 2>&1; then
+            gh release upload "${TAG}" "${ASSET}" "${ASSET}.sha256" --clobber
+            exit 0
+          fi
+
+          # One archive serves every listed version — the bundle reader selects the
+          # catalog matching the Kibana it runs in — so the versions belong in the
+          # title, not the tag or the filename.
+          notes="$(printf 'Catalog bundle for air-gapped Kibana deployments.\n\nCovered Kibana versions: **%s**\n\nSee [Air-gapped deployments](https://github.com/elastic/workflows#air-gapped-deployments) for download, checksum verification, and `bundlePath` setup.\n' "${VERSIONS}")"
+
+          gh release create "${TAG}" "${ASSET}" "${ASSET}.sha256" \
+            --target "${GITHUB_SHA}" \
+            --title "Workflow Template Library ${TAG} — Kibana ${VERSIONS}" \
+            --notes "${notes}"
