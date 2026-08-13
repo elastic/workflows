@@ -216,7 +216,23 @@ The generator enforces only:
 - `template-metadata` is present with all required fields (`slug`, `version`, `availability`, `name`, `description`, `categories`).
 - At least one template is discovered.
 
-Deeper authoring invariants — slug ⇄ directory parity, valid `version` semver and `availability` range, `categories[]` membership in the vocab, `install.form` ⇄ `__install__` consistency, and step/connector type validity — are delegated to the separate validation step (planned to run in CI), not the generator.
+Deeper authoring invariants — slug ⇄ directory parity, valid `version` semver and `availability` range, `categories[]` membership in the vocab, `install.form` ⇄ `__install__` consistency — remain the generator's / reviewer's responsibility. Step and connector **type** validity is enforced by the schema validator below.
+
+### Schema validation
+
+`npm run validate` checks workflow YAML (both `examples/` and `library/` templates) against the generated workflow **step JSON Schema**, layering step-name uniqueness and LiquidJS syntax checks on top. It is a plain-JS port of Kibana's `@kbn/workflow-yaml-validate-cli`; see [`scripts/validate/README.md`](./scripts/validate/README.md) for the full flag list and what each layer covers.
+
+The schema artifact is not bundled in this repo, so a source must be provided — a local bundle directory or a CDN base URL:
+
+```bash
+# validate everything against a local schema bundle (a dir containing index.json)
+npm run validate -- examples library/workflows --recursive --schema /path/to/workflow_step_schemas/<version>/release
+
+# or point at a CDN base URL (equivalently, set WORKFLOWS_SCHEMA_CDN_URL)
+npm run validate -- examples library/workflows --recursive --schema-cdn-url https://<cdn-base>/
+```
+
+A non-zero exit means at least one file has an error. JSON-schema constraints on values that hold a LiquidJS expression (e.g. `{{ event.foo }}`) are reported as non-failing warnings, not errors. Execution-graph (DAG) validation is not part of this script yet.
 
 ---
 
