@@ -22,45 +22,68 @@ description: >
 
 consts:
   lambda_metrics_index: "metrics-aws.lambda.otel-*"
-  baseline_lookback: "45 minutes"
-  baseline_lookend: "12 minutes"
+  # Baseline T-50m..T-20m vs incident T-20m..T+5m — windows must NOT overlap or
+  # incident data contaminates the baseline comparison.
+  baseline_lookback: "50 minutes"
+  baseline_lookend: "20 minutes"
   incident_lookback: "20 minutes"
 
+# Inputs are optional: manual runs supply them; alert-triggered runs resolve them
+# from the alert payload in the `resolve` step below.
+inputs:
+  - name: function_name
+    type: string
+    description: >-
+      Lambda FunctionName of the alerting function (e.g. fis-worker-fns-0).
+      Manual runs must supply it; alert-triggered runs derive it from the alert.
+    required: false
+  - name: alert_timestamp
+    type: string
+    description: >-
+      ISO8601 timestamp of the alert firing. Manual runs must supply it;
+      alert-triggered runs derive it from the alert.
+    required: false
+
+# The alert trigger fires only when a rule is connected to this workflow via the
+# "Run Workflow" rule action (.workflows system connector). Configure that action
+# with summaryMode:false so each run carries exactly ONE alert in event.alerts.
 triggers:
-  - type: alert
   - type: manual
-    inputs:
-      - name: function_name
-        type: string
-        description: >-
-          Lambda FunctionName of the alerting function (e.g. fis-worker-fns-0).
-        required: true
-      - name: alert_timestamp
-        type: string
-        description: ISO8601 timestamp of the alert firing.
-        required: true
+  - type: alert
 
 steps:
+  # 0. Resolve the target + timestamp: manual inputs win; otherwise the triggering
+  #    alert's structured group-by fields (kibana.alert.grouping.*) name the resource
+  #    and kibana.alert.start is the firing time. "MISSING" makes the incident query
+  #    match nothing so the evidence gate aborts cleanly.
+  - name: resolve
+    type: data.set
+    with:
+      function_name: "{{ inputs.function_name | default: event.alerts[0].kibana.alert.grouping.FunctionName | default: 'MISSING' }}"
+      alert_timestamp: "{{ inputs.alert_timestamp | default: event.alerts[0].kibana.alert.start | default: 'MISSING' }}"
+      triggering_rule: "{{ event.rule.name | default: 'manual run' }}"
+
   # 1. Failure signals during the incident: errors, the error RATE (errors/invocations),
-  #    throttles, peak concurrency, and slowest duration.
+  #    throttles, peak concurrency, and slowest duration. REQUIRED evidence: a query
+  #    failure fails the run rather than feeding empty output into the classifier.
+  #    Zero invocations yields a null error_rate (not a fake 0%): CASE guards the
+  #    division so low-volume rates are exact (1 error / 1 invocation = 100%).
   - name: errors_incident
     type: elasticsearch.esql.query
     with:
       query: |
         FROM {{ consts.lambda_metrics_index }}
-        | WHERE attributes.FunctionName == "{{ inputs.function_name }}"
-          AND @timestamp >= TO_DATETIME("{{ inputs.alert_timestamp }}") - {{ consts.incident_lookback }}
-          AND @timestamp <= TO_DATETIME("{{ inputs.alert_timestamp }}") + 5 minutes
+        | WHERE attributes.FunctionName == "{{ steps.resolve.output.function_name }}"
+          AND @timestamp >= TO_DATETIME("{{ steps.resolve.output.alert_timestamp }}") - {{ consts.incident_lookback }}
+          AND @timestamp <= TO_DATETIME("{{ steps.resolve.output.alert_timestamp }}") + 5 minutes
         | STATS
-            errors       = SUM(`metrics.amazonaws.com/AWS/Lambda/Errors`),
-            invocations  = SUM(`metrics.amazonaws.com/AWS/Lambda/Invocations`),
-            throttles    = SUM(`metrics.amazonaws.com/AWS/Lambda/Throttles`),
-            max_duration = MAX(`metrics.amazonaws.com/AWS/Lambda/Duration`),
-            max_concurrency = MAX(`metrics.amazonaws.com/AWS/Lambda/ConcurrentExecutions`)
-        | EVAL error_rate = TO_DOUBLE(errors) / TO_DOUBLE(invocations + 1)
+            errors       = SUM(`metrics.amazonaws.com/AWS/Lambda/Errors`)      WHERE attributes.stat == "Sum",
+            invocations  = SUM(`metrics.amazonaws.com/AWS/Lambda/Invocations`) WHERE attributes.stat == "Sum",
+            throttles    = SUM(`metrics.amazonaws.com/AWS/Lambda/Throttles`)   WHERE attributes.stat == "Sum",
+            max_duration = MAX(`metrics.amazonaws.com/AWS/Lambda/Duration`)    WHERE attributes.stat == "Maximum",
+            max_concurrency = MAX(`metrics.amazonaws.com/AWS/Lambda/ConcurrentExecutions`) WHERE attributes.stat == "Maximum"
+        | EVAL error_rate = CASE(invocations > 0, TO_DOUBLE(errors) / TO_DOUBLE(invocations), null)
       format: json
-    on-failure:
-      continue: true
 
   # 2. Baseline failure rate BEFORE the incident.
   - name: errors_baseline
@@ -68,102 +91,141 @@ steps:
     with:
       query: |
         FROM {{ consts.lambda_metrics_index }}
-        | WHERE attributes.FunctionName == "{{ inputs.function_name }}"
-          AND @timestamp >= TO_DATETIME("{{ inputs.alert_timestamp }}") - {{ consts.baseline_lookback }}
-          AND @timestamp <= TO_DATETIME("{{ inputs.alert_timestamp }}") - {{ consts.baseline_lookend }}
+        | WHERE attributes.FunctionName == "{{ steps.resolve.output.function_name }}"
+          AND @timestamp >= TO_DATETIME("{{ steps.resolve.output.alert_timestamp }}") - {{ consts.baseline_lookback }}
+          AND @timestamp <= TO_DATETIME("{{ steps.resolve.output.alert_timestamp }}") - {{ consts.baseline_lookend }}
         | STATS
-            errors      = SUM(`metrics.amazonaws.com/AWS/Lambda/Errors`),
-            invocations = SUM(`metrics.amazonaws.com/AWS/Lambda/Invocations`),
-            max_duration = MAX(`metrics.amazonaws.com/AWS/Lambda/Duration`)
-        | EVAL baseline_error_rate = TO_DOUBLE(errors) / TO_DOUBLE(invocations + 1)
+            errors      = SUM(`metrics.amazonaws.com/AWS/Lambda/Errors`)      WHERE attributes.stat == "Sum",
+            invocations = SUM(`metrics.amazonaws.com/AWS/Lambda/Invocations`) WHERE attributes.stat == "Sum",
+            max_duration = MAX(`metrics.amazonaws.com/AWS/Lambda/Duration`)   WHERE attributes.stat == "Maximum"
+        | EVAL baseline_error_rate = CASE(invocations > 0, TO_DOUBLE(errors) / TO_DOUBLE(invocations), null)
       format: json
-    on-failure:
-      continue: true
 
-  # 3. Classify the Lambda failure mode.
-  - name: classify_lambda_pattern
-    type: ai.classify
-    with:
-      input: |
-        FunctionName: {{ inputs.function_name }}
-        Incident: {{ steps.errors_incident.output | json }}
-        Baseline: {{ steps.errors_baseline.output | json }}
-      categories:
-        - elevated_errors
-        - throttling
-        - duration_degradation
-        - healthy
-      instructions: |
-        Classify the dominant Lambda failure mode:
-          - throttling: throttles > 0 and/or max_concurrency pinned at a limit — invocations
-            are being rejected because concurrency is exhausted (scale / reserved-concurrency issue).
-          - elevated_errors: error_rate is well above baseline_error_rate with few/no throttles —
-            the function code/dependency is failing.
-          - duration_degradation: error_rate near baseline but max_duration sharply up — the
-            function is slow (downstream latency / cold starts / resource limits).
-          - healthy: error_rate near baseline, no throttles, duration stable.
-        Pick the single best category; prefer throttling when throttles > 0.
-      includeRationale: true
+  # 3. Evidence gate — deterministic, BEFORE any AI step. Zero datapoints for the
+  #    resolved function (wrong/missing name, data not yet ingested, degenerate alert
+  #    group) → refuse to diagnose instead of classifying a row of nulls.
+  - name: evidence_gate
+    type: if
+    condition: "steps.errors_incident.output.documents_found > 0"
+    steps:
+      # 4. Classify the Lambda failure mode.
+      - name: classify_lambda_pattern
+        type: ai.classify
+        with:
+          input: |
+            FunctionName: {{ steps.resolve.output.function_name }}
+            Incident: {{ steps.errors_incident.output | json }}
+            Baseline: {{ steps.errors_baseline.output | json }}
+          categories:
+            - elevated_errors
+            - throttling
+            - duration_degradation
+            - healthy
+          instructions: |
+            Classify the dominant Lambda failure mode:
+              - throttling: throttles > 0 and/or max_concurrency pinned at a limit — invocations
+                are being rejected because concurrency is exhausted (scale / reserved-concurrency issue).
+              - elevated_errors: error_rate is MATERIALLY above baseline_error_rate (roughly
+                2x or more, or a jump of many percentage points) with few/no throttles —
+                the function code/dependency is failing.
+              - duration_degradation: error_rate near baseline but max_duration sharply up — the
+                function is slow (downstream latency / cold starts / resource limits).
+              - healthy: error_rate within normal fluctuation of baseline (small drifts of a
+                couple of percentage points are ambient noise, NOT an incident), no throttles,
+                duration stable.
+            Pick the single best category; prefer throttling when throttles > 0.
+            A null error_rate means zero invocations in the window — do not read it as 0%;
+            if invocations are zero while throttles are high, that IS the throttling pattern.
+            If the baseline returned no rows or nulls, note the comparison is unavailable —
+            do not treat a missing baseline as a zero baseline.
+          includeRationale: true
 
-  # Optional calibration anchors (graceful if SLOs/alerts aren't deployed).
-  - name: slo_context
-    type: elasticsearch.esql.query
-    with:
-      query: |
-        FROM .slo-observability.summary-*
-        | WHERE slo.instanceId LIKE "*{{ inputs.function_name }}*"
-        | STATS sliValue = MAX(sliValue), errorBudgetConsumed = MAX(errorBudgetConsumed), status = VALUES(status) BY slo.name
-      format: json
-    on-failure:
-      continue: true
+      # Optional calibration anchors (graceful if SLOs/alerts aren't deployed).
+      - name: slo_context
+        type: elasticsearch.esql.query
+        with:
+          query: |
+            FROM .slo-observability.summary-*
+            | WHERE slo.instanceId LIKE "*{{ steps.resolve.output.function_name }}*"
+            | STATS sliValue = MAX(sliValue), errorBudgetConsumed = MAX(errorBudgetConsumed), status = VALUES(status) BY slo.name
+          format: json
+        on-failure:
+          continue: true
 
-  - name: active_alerts
-    type: elasticsearch.esql.query
-    with:
-      query: |
-        FROM .alerts-*
-        | WHERE kibana.alert.instance.id LIKE "*{{ inputs.function_name }}*"
-          AND @timestamp >= TO_DATETIME("{{ inputs.alert_timestamp }}") - {{ consts.incident_lookback }}
-          AND @timestamp <= TO_DATETIME("{{ inputs.alert_timestamp }}") + 5 minutes
-        | KEEP kibana.alert.rule.name, kibana.alert.status, kibana.alert.reason, kibana.alert.start
-        | SORT kibana.alert.start DESC
-        | LIMIT 20
-      format: json
-    on-failure:
-      continue: true
+      - name: active_alerts
+        type: elasticsearch.esql.query
+        with:
+          query: |
+            FROM .alerts-*
+            | WHERE kibana.alert.instance.id LIKE "*{{ steps.resolve.output.function_name }}*"
+              AND @timestamp >= TO_DATETIME("{{ steps.resolve.output.alert_timestamp }}") - {{ consts.incident_lookback }}
+              AND @timestamp <= TO_DATETIME("{{ steps.resolve.output.alert_timestamp }}") + 5 minutes
+            | KEEP kibana.alert.rule.name, kibana.alert.status, kibana.alert.reason, kibana.alert.start
+            | SORT kibana.alert.start DESC
+            | LIMIT 20
+          format: json
+        on-failure:
+          continue: true
 
-  - name: synthesize_findings
-    type: ai.summarize
-    with:
-      input: |
-        ## Lambda incident investigation for {{ inputs.function_name }}
-        Alert timestamp: {{ inputs.alert_timestamp }}
+      - name: synthesize_findings
+        type: ai.summarize
+        with:
+          input: |
+            ## Lambda incident investigation for {{ steps.resolve.output.function_name }}
+            Alert timestamp: {{ steps.resolve.output.alert_timestamp }}
+            Triggered by: {{ steps.resolve.output.triggering_rule }}
 
-        Classification: {{ steps.classify_lambda_pattern.output.category }}
-        Rationale: {{ steps.classify_lambda_pattern.output.rationale }}
+            Classification: {{ steps.classify_lambda_pattern.output.category }}
+            Rationale: {{ steps.classify_lambda_pattern.output.rationale }}
 
-        Incident: {{ steps.errors_incident.output | json }}
-        Baseline: {{ steps.errors_baseline.output | json }}
-        SLO status:    {{ steps.slo_context.output | json }}
-        Active alerts: {{ steps.active_alerts.output | json }}
-      instructions: |
-        You are an SRE assistant synthesising an AWS Lambda incident investigation.
-        Produce a structured root-cause summary in EXACTLY these sections:
-        ROOT CAUSE HYPOTHESIS — one sentence naming the dominant failure mode.
-        EVIDENCE — errors, invocations, error_rate vs baseline_error_rate, throttles,
-          max_concurrency, max_duration.
-        SEVERITY & CALIBRATION — if an SLO is VIOLATED/DEGRADING (or its error budget is
-          materially consumed), or an alert is active for this resource, ANCHOR severity
-          and root cause on that calibrated signal and name the alert/SLO + its reason
-          (the shipped thresholds encode what is "bad" for this resource, which the raw
-          magnitude alone cannot establish). If no SLO/alert context is present or empty,
-          state the assessment rests on raw metrics alone with no SLO/alert corroboration
-          — do NOT invent one.
-        CAUSAL CHAIN — adjust to the evidence (e.g. arrival spike → concurrency exhausted →
-          throttles → dropped/failed invocations; or a failing dependency → error rate up).
-        RECOMMENDED NEXT STEPS — e.g. raise reserved/provisioned concurrency for throttling;
-          inspect function logs / the failing dependency for elevated_errors; profile cold
-          starts / downstream calls for duration_degradation.
-        DOWNSTREAM IMPACT — what the failed/throttled invocations affect.
-        CONFIDENCE NOTE — only if ambiguous.
-      maxLength: 1500
+            Incident: {{ steps.errors_incident.output | json }}
+            Baseline: {{ steps.errors_baseline.output | json }}
+            SLO status:    {{ steps.slo_context.output | json }}
+            Active alerts: {{ steps.active_alerts.output | json }}
+          instructions: |
+            You are an SRE assistant synthesising an AWS Lambda incident investigation.
+            Produce a structured root-cause summary in EXACTLY these sections:
+            ROOT CAUSE HYPOTHESIS — one sentence naming the dominant failure mode.
+            EVIDENCE — errors, invocations, error_rate vs baseline_error_rate, throttles,
+              max_concurrency, max_duration.
+            SEVERITY & CALIBRATION — if an SLO is VIOLATED/DEGRADING (or its error budget is
+              materially consumed), or an alert is active for this resource, ANCHOR severity
+              and root cause on that calibrated signal and name the alert/SLO + its reason
+              (the shipped thresholds encode what is "bad" for this resource, which the raw
+              magnitude alone cannot establish). If no SLO/alert context is present or empty,
+              state the assessment rests on raw metrics alone with no SLO/alert corroboration
+              — do NOT invent one.
+            CAUSAL CHAIN — adjust to the evidence (e.g. arrival spike → concurrency exhausted →
+              throttles → dropped/failed invocations; or a failing dependency → error rate up).
+            RECOMMENDED NEXT STEPS — e.g. raise reserved/provisioned concurrency for throttling;
+              inspect function logs / the failing dependency for elevated_errors; profile cold
+              starts / downstream calls for duration_degradation.
+            DOWNSTREAM IMPACT — what the failed/throttled invocations affect.
+            CONFIDENCE NOTE — only if ambiguous.
+          maxLength: 1500
+
+      # Expose the result as the workflow's output for callers / composing workflows.
+      - name: output_result
+        type: workflow.output
+        with:
+          status: "investigated"
+          resource: "{{ steps.resolve.output.function_name }}"
+          triggered_by: "{{ steps.resolve.output.triggering_rule }}"
+          classification: "{{ steps.classify_lambda_pattern.output.category }}"
+          rationale: "{{ steps.classify_lambda_pattern.output.rationale }}"
+          summary: "{{ steps.synthesize_findings.output.content }}"
+
+    else:
+      - name: output_insufficient_evidence
+        type: workflow.output
+        with:
+          status: "insufficient_evidence"
+          resource: "{{ steps.resolve.output.function_name }}"
+          triggered_by: "{{ steps.resolve.output.triggering_rule }}"
+          summary: >-
+            No Lambda datapoints found for "{{ steps.resolve.output.function_name }}"
+            in the incident window around {{ steps.resolve.output.alert_timestamp }}.
+            Either the function name could not be resolved (manual input missing, or the
+            triggering alert's group carries no FunctionName), the metrics have not been
+            ingested yet, or the name does not match this cluster's data. Refusing to
+            produce a diagnosis without evidence.

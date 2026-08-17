@@ -21,177 +21,275 @@ description: >
   CloudWatch metrics from the EDOT awscloudwatch collector (metrics-aws.*.otel-*).
 
 consts:
-  alb_metrics_index: "metrics-aws.applicationelb.otel-*"
-  # Recent pre-incident baseline (no deep history needed); widen for stable production LBs.
-  baseline_lookback: "45 minutes"
-  baseline_lookend: "12 minutes"
+  # `elb` is the canonical dataset of the aws_elb_metrics_otel package: its alert
+  # templates and dashboard all read metrics-aws.elb.otel-* (NOT "applicationelb").
+  alb_metrics_index: "metrics-aws.elb.otel-*"
+  # Baseline T-50m..T-20m vs incident T-20m..T+5m — windows must NOT overlap or
+  # incident data contaminates the baseline comparison. Recent pre-incident baseline
+  # (no deep history needed); widen for stable production LBs.
+  baseline_lookback: "50 minutes"
+  baseline_lookend: "20 minutes"
   incident_lookback: "20 minutes"
 
+# Inputs are optional: manual runs supply them; alert-triggered runs resolve them
+# from the alert payload in the `resolve` step below.
+inputs:
+  - name: load_balancer
+    type: string
+    description: >-
+      ApplicationELB dimension of the alerting ALB (e.g. app/fis-demo-fleet-alb/<id>).
+      Manual runs must supply it; alert-triggered runs derive it from the alert.
+    required: false
+  - name: service_name
+    type: string
+    description: >-
+      The service behind the ALB target group (e.g. gateway).
+    required: false
+  - name: alert_timestamp
+    type: string
+    description: >-
+      ISO8601 timestamp of the alert firing. Manual runs must supply it;
+      alert-triggered runs derive it from the alert.
+    required: false
+
+# The alert trigger fires only when a rule is connected to this workflow via the
+# "Run Workflow" rule action (.workflows system connector). Configure that action
+# with summaryMode:false so each run carries exactly ONE alert in event.alerts.
 triggers:
-  - type: alert
   - type: manual
-    inputs:
-      - name: load_balancer
-        type: string
-        description: >-
-          ApplicationELB dimension of the alerting ALB
-          (e.g. app/fis-demo-fleet-alb/<id>).
-        required: true
-      - name: service_name
-        type: string
-        description: >-
-          The service behind the ALB target group (e.g. gateway).
-        required: true
-      - name: alert_timestamp
-        type: string
-        description: ISO8601 timestamp of the alert firing.
-        required: true
+  - type: alert
 
 steps:
-  # 1. Error volume + latency during the incident. Target 5xx points at the backend;
-  #    ELB 5xx (LB-generated) points at no-healthy-targets / connection rejection.
-  - name: errors_incident
+  # 0. Resolve the target + timestamp: manual inputs win; otherwise the triggering
+  #    alert's structured group-by fields (kibana.alert.grouping.*) name the resource
+  #    and kibana.alert.start is the firing time. The LoadBalancer dimension arrives
+  #    intact as the full "app/<name>/<id>" reference. "MISSING" makes the incident
+  #    query match nothing so the evidence gate aborts cleanly.
+  - name: resolve
+    type: data.set
+    with:
+      load_balancer: "{{ inputs.load_balancer | default: event.alerts[0].kibana.alert.grouping.LoadBalancer | default: 'MISSING' }}"
+      alert_timestamp: "{{ inputs.alert_timestamp | default: event.alerts[0].kibana.alert.start | default: 'MISSING' }}"
+      service_name: "{{ inputs.service_name | default: 'the backend service' }}"
+      triggering_rule: "{{ event.rule.name | default: 'manual run' }}"
+
+  # 1. Traffic volume + latency during the incident — the REQUIRED evidence base. This
+  #    step references ONLY dense metrics (RequestCount / TargetResponseTime exist whenever
+  #    the LB serves traffic). The 5xx counters are SPARSE CloudWatch metrics: the field is
+  #    unmapped until the first 5xx ever lands, and ES|QL fails verification on an unknown
+  #    column — a hard-failing query must never reference a field that may not exist yet,
+  #    so each sparse family gets its own optional step below.
+  - name: traffic_incident
     type: elasticsearch.esql.query
     with:
       query: |
         FROM {{ consts.alb_metrics_index }}
-        | WHERE attributes.LoadBalancer == "{{ inputs.load_balancer }}"
-          AND @timestamp >= TO_DATETIME("{{ inputs.alert_timestamp }}") - {{ consts.incident_lookback }}
-          AND @timestamp <= TO_DATETIME("{{ inputs.alert_timestamp }}") + 5 minutes
+        | WHERE attributes.LoadBalancer == "{{ steps.resolve.output.load_balancer }}"
+          AND @timestamp >= TO_DATETIME("{{ steps.resolve.output.alert_timestamp }}") - {{ consts.incident_lookback }}
+          AND @timestamp <= TO_DATETIME("{{ steps.resolve.output.alert_timestamp }}") + 5 minutes
         | STATS
-            target_5xx          = SUM(`metrics.amazonaws.com/AWS/ApplicationELB/HTTPCode_Target_5XX_Count`),
-            elb_5xx             = SUM(`metrics.amazonaws.com/AWS/ApplicationELB/HTTPCode_ELB_5XX_Count`),
-            request_count       = SUM(`metrics.amazonaws.com/AWS/ApplicationELB/RequestCount`),
-            max_target_response = MAX(`metrics.amazonaws.com/AWS/ApplicationELB/TargetResponseTime`)
+            request_count       = SUM(`metrics.amazonaws.com/AWS/ApplicationELB/RequestCount`)       WHERE attributes.stat == "Sum",
+            max_target_response = MAX(`metrics.amazonaws.com/AWS/ApplicationELB/TargetResponseTime`) WHERE attributes.stat == "Maximum"
       format: json
-    on-failure:
-      continue: true
 
-  # 2. Baseline error volume BEFORE the incident.
-  - name: errors_baseline
+  # 2. Baseline traffic BEFORE the incident.
+  - name: traffic_baseline
     type: elasticsearch.esql.query
     with:
       query: |
         FROM {{ consts.alb_metrics_index }}
-        | WHERE attributes.LoadBalancer == "{{ inputs.load_balancer }}"
-          AND @timestamp >= TO_DATETIME("{{ inputs.alert_timestamp }}") - {{ consts.baseline_lookback }}
-          AND @timestamp <= TO_DATETIME("{{ inputs.alert_timestamp }}") - {{ consts.baseline_lookend }}
-        | STATS
-            baseline_target_5xx = SUM(`metrics.amazonaws.com/AWS/ApplicationELB/HTTPCode_Target_5XX_Count`),
-            baseline_requests   = SUM(`metrics.amazonaws.com/AWS/ApplicationELB/RequestCount`)
+        | WHERE attributes.LoadBalancer == "{{ steps.resolve.output.load_balancer }}"
+          AND @timestamp >= TO_DATETIME("{{ steps.resolve.output.alert_timestamp }}") - {{ consts.baseline_lookback }}
+          AND @timestamp <= TO_DATETIME("{{ steps.resolve.output.alert_timestamp }}") - {{ consts.baseline_lookend }}
+        | STATS baseline_requests = SUM(`metrics.amazonaws.com/AWS/ApplicationELB/RequestCount`) WHERE attributes.stat == "Sum"
+      format: json
+
+  # 3. Target 5xx, baseline vs incident in one phase-split query. OPTIONAL: the field may
+  #    be unmapped if the LB has never returned a target 5xx — its absence IS a finding
+  #    (no backend errors at all), never a reason to kill the run.
+  - name: target_5xx
+    type: elasticsearch.esql.query
+    with:
+      query: |
+        FROM {{ consts.alb_metrics_index }}
+        | WHERE attributes.LoadBalancer == "{{ steps.resolve.output.load_balancer }}"
+          AND attributes.stat == "Sum"
+          AND @timestamp >= TO_DATETIME("{{ steps.resolve.output.alert_timestamp }}") - {{ consts.baseline_lookback }}
+          AND @timestamp <= TO_DATETIME("{{ steps.resolve.output.alert_timestamp }}") + 5 minutes
+        | EVAL phase = CASE(@timestamp >= TO_DATETIME("{{ steps.resolve.output.alert_timestamp }}") - {{ consts.incident_lookback }}, "incident", "baseline")
+        | STATS target_5xx = SUM(`metrics.amazonaws.com/AWS/ApplicationELB/HTTPCode_Target_5XX_Count`) BY phase
       format: json
     on-failure:
       continue: true
 
-  # 3. Target health — are backend hosts failing health checks (the backend is down /
-  #    can't serve)? Unhealthy hosts alongside target 5xx => the targets are the cause.
+  # 4. ELB-generated 5xx (LB has no healthy target to route to), same phase split.
+  #    OPTIONAL for the same sparse-field reason.
+  - name: elb_5xx
+    type: elasticsearch.esql.query
+    with:
+      query: |
+        FROM {{ consts.alb_metrics_index }}
+        | WHERE attributes.LoadBalancer == "{{ steps.resolve.output.load_balancer }}"
+          AND attributes.stat == "Sum"
+          AND @timestamp >= TO_DATETIME("{{ steps.resolve.output.alert_timestamp }}") - {{ consts.baseline_lookback }}
+          AND @timestamp <= TO_DATETIME("{{ steps.resolve.output.alert_timestamp }}") + 5 minutes
+        | EVAL phase = CASE(@timestamp >= TO_DATETIME("{{ steps.resolve.output.alert_timestamp }}") - {{ consts.incident_lookback }}, "incident", "baseline")
+        | STATS elb_5xx = SUM(`metrics.amazonaws.com/AWS/ApplicationELB/HTTPCode_ELB_5XX_Count`) BY phase
+      format: json
+    on-failure:
+      continue: true
+
+  # 5. Target health — are backend hosts failing health checks? OPTIONAL corroboration
+  #    (host-count metrics may not be collected in every onboarding).
   - name: target_health
     type: elasticsearch.esql.query
     with:
       query: |
         FROM {{ consts.alb_metrics_index }}
-        | WHERE attributes.LoadBalancer == "{{ inputs.load_balancer }}"
-          AND @timestamp >= TO_DATETIME("{{ inputs.alert_timestamp }}") - {{ consts.incident_lookback }}
-          AND @timestamp <= TO_DATETIME("{{ inputs.alert_timestamp }}") + 5 minutes
+        | WHERE attributes.LoadBalancer == "{{ steps.resolve.output.load_balancer }}"
+          AND @timestamp >= TO_DATETIME("{{ steps.resolve.output.alert_timestamp }}") - {{ consts.incident_lookback }}
+          AND @timestamp <= TO_DATETIME("{{ steps.resolve.output.alert_timestamp }}") + 5 minutes
         | STATS
-            min_healthy   = MIN(`metrics.amazonaws.com/AWS/ApplicationELB/HealthyHostCount`),
-            max_unhealthy = MAX(`metrics.amazonaws.com/AWS/ApplicationELB/UnHealthyHostCount`)
+            min_healthy   = MIN(`metrics.amazonaws.com/AWS/ApplicationELB/HealthyHostCount`)   WHERE attributes.stat == "Average",
+            max_unhealthy = MAX(`metrics.amazonaws.com/AWS/ApplicationELB/UnHealthyHostCount`) WHERE attributes.stat == "Average"
       format: json
     on-failure:
       continue: true
 
-  # 4. Classify the failure locus.
-  - name: classify_alb_failure
-    type: ai.classify
-    with:
-      input: |
-        LoadBalancer: {{ inputs.load_balancer }}
-        Errors (incident): {{ steps.errors_incident.output | json }}
-        Errors (baseline): {{ steps.errors_baseline.output | json }}
-        Target health:     {{ steps.target_health.output | json }}
-      categories:
-        - target_5xx_backend
-        - elb_5xx_no_healthy_targets
-        - latency_degradation
-        - healthy
-      instructions: |
-        Decide where the ALB failure originates:
-          - target_5xx_backend: target_5xx is elevated vs baseline (the registered targets
-            are returning 5xx — the application/backend is failing, e.g. it can't reach its
-            database). max_unhealthy may also be > 0.
-          - elb_5xx_no_healthy_targets: elb_5xx dominates and min_healthy is ~0 — the load
-            balancer itself returns 5xx because there are no healthy targets to route to.
-          - latency_degradation: 5xx is low but max_target_response is sharply elevated —
-            timeouts/slowness rather than hard errors.
-          - healthy: target_5xx/elb_5xx near baseline and hosts healthy.
-        Pick the single best category. Prefer target_5xx_backend when target 5xx is the
-        dominant elevated signal.
-      includeRationale: true
+  # 4. Evidence gate — deterministic, BEFORE any AI step. Zero datapoints for the
+  #    resolved load balancer (wrong/missing dimension, data not yet ingested,
+  #    degenerate alert group) → refuse to diagnose instead of classifying nulls.
+  - name: evidence_gate
+    type: if
+    condition: "steps.traffic_incident.output.documents_found > 0"
+    steps:
+      # 5. Classify the failure locus.
+      - name: classify_alb_failure
+        type: ai.classify
+        with:
+          input: |
+            LoadBalancer: {{ steps.resolve.output.load_balancer }}
+            Traffic (incident): {{ steps.traffic_incident.output | json }}
+            Traffic (baseline): {{ steps.traffic_baseline.output | json }}
+            Target 5xx by phase: {{ steps.target_5xx.output | json }}
+            ELB 5xx by phase:    {{ steps.elb_5xx.output | json }}
+            Target health:       {{ steps.target_health.output | json }}
+          categories:
+            - target_5xx_backend
+            - elb_5xx_no_healthy_targets
+            - latency_degradation
+            - healthy
+          instructions: |
+            Decide where the ALB failure originates:
+              - target_5xx_backend: target_5xx is elevated vs baseline (the registered targets
+                are returning 5xx — the application/backend is failing, e.g. it can't reach its
+                database). max_unhealthy may also be > 0.
+              - elb_5xx_no_healthy_targets: elb_5xx dominates and min_healthy is ~0 — the load
+                balancer itself returns 5xx because there are no healthy targets to route to.
+              - latency_degradation: 5xx is low but max_target_response is sharply elevated —
+                timeouts/slowness rather than hard errors.
+              - healthy: target_5xx/elb_5xx near baseline and hosts healthy.
+            Pick the single best category. Prefer target_5xx_backend when target 5xx is the
+            dominant elevated signal. A FAILED/empty 5xx step means that metric family has
+            never been emitted by this LB (CloudWatch omits zero-valued sparse metrics) —
+            treat it as "no such errors observed", and weigh the families that ARE present.
+            If the baseline returned no rows or nulls, note the comparison is unavailable.
+          includeRationale: true
 
-  # Optional calibration anchors (graceful if SLOs/alerts aren't deployed).
-  - name: slo_context
-    type: elasticsearch.esql.query
-    with:
-      query: |
-        FROM .slo-observability.summary-*
-        | WHERE slo.instanceId LIKE "*{{ inputs.load_balancer }}*"
-        | STATS sliValue = MAX(sliValue), errorBudgetConsumed = MAX(errorBudgetConsumed), status = VALUES(status) BY slo.name
-      format: json
-    on-failure:
-      continue: true
+      # Optional calibration anchors (graceful if SLOs/alerts aren't deployed).
+      - name: slo_context
+        type: elasticsearch.esql.query
+        with:
+          query: |
+            FROM .slo-observability.summary-*
+            | WHERE slo.instanceId LIKE "*{{ steps.resolve.output.load_balancer }}*"
+            | STATS sliValue = MAX(sliValue), errorBudgetConsumed = MAX(errorBudgetConsumed), status = VALUES(status) BY slo.name
+          format: json
+        on-failure:
+          continue: true
 
-  - name: active_alerts
-    type: elasticsearch.esql.query
-    with:
-      query: |
-        FROM .alerts-*
-        | WHERE kibana.alert.instance.id LIKE "*{{ inputs.load_balancer }}*"
-          AND @timestamp >= TO_DATETIME("{{ inputs.alert_timestamp }}") - {{ consts.incident_lookback }}
-          AND @timestamp <= TO_DATETIME("{{ inputs.alert_timestamp }}") + 5 minutes
-        | KEEP kibana.alert.rule.name, kibana.alert.status, kibana.alert.reason, kibana.alert.start
-        | SORT kibana.alert.start DESC
-        | LIMIT 20
-      format: json
-    on-failure:
-      continue: true
+      - name: active_alerts
+        type: elasticsearch.esql.query
+        with:
+          query: |
+            FROM .alerts-*
+            | WHERE kibana.alert.instance.id LIKE "*{{ steps.resolve.output.load_balancer }}*"
+              AND @timestamp >= TO_DATETIME("{{ steps.resolve.output.alert_timestamp }}") - {{ consts.incident_lookback }}
+              AND @timestamp <= TO_DATETIME("{{ steps.resolve.output.alert_timestamp }}") + 5 minutes
+            | KEEP kibana.alert.rule.name, kibana.alert.status, kibana.alert.reason, kibana.alert.start
+            | SORT kibana.alert.start DESC
+            | LIMIT 20
+          format: json
+        on-failure:
+          continue: true
 
-  - name: synthesize_findings
-    type: ai.summarize
-    with:
-      input: |
-        ## ALB 5xx investigation for {{ inputs.load_balancer }}
-        Alert timestamp: {{ inputs.alert_timestamp }}
-        Backing service: {{ inputs.service_name }}
+      - name: synthesize_findings
+        type: ai.summarize
+        with:
+          input: |
+            ## ALB 5xx investigation for {{ steps.resolve.output.load_balancer }}
+            Alert timestamp: {{ steps.resolve.output.alert_timestamp }}
+            Triggered by: {{ steps.resolve.output.triggering_rule }}
+            Backing service: {{ steps.resolve.output.service_name }}
 
-        Classification: {{ steps.classify_alb_failure.output.category }}
-        Rationale: {{ steps.classify_alb_failure.output.rationale }}
+            Classification: {{ steps.classify_alb_failure.output.category }}
+            Rationale: {{ steps.classify_alb_failure.output.rationale }}
 
-        Errors (incident): {{ steps.errors_incident.output | json }}
-        Errors (baseline): {{ steps.errors_baseline.output | json }}
-        Target health:     {{ steps.target_health.output | json }}
-        SLO status:    {{ steps.slo_context.output | json }}
-        Active alerts: {{ steps.active_alerts.output | json }}
-      instructions: |
-        You are an SRE assistant synthesising an AWS ALB incident investigation.
-        Produce a structured root-cause summary in EXACTLY these sections:
-        ROOT CAUSE HYPOTHESIS — one sentence. If the targets are returning 5xx, name the
-          BACKEND ({{ inputs.service_name }}) as the cause and note the next place to look
-          is that service's own dependencies (e.g. its database connection pool).
-        EVIDENCE — target vs ELB 5xx (incident vs baseline), target response time, healthy
-          vs unhealthy host counts.
-        SEVERITY & CALIBRATION — if an SLO is VIOLATED/DEGRADING (or its error budget is
-          materially consumed), or an alert is active for this resource, ANCHOR severity
-          and root cause on that calibrated signal and name the alert/SLO + its reason
-          (the shipped thresholds encode what is "bad" for this resource, which the raw
-          magnitude alone cannot establish). If no SLO/alert context is present or empty,
-          state the assessment rests on raw metrics alone with no SLO/alert corroboration
-          — do NOT invent one.
-        CAUSAL CHAIN — backend dependency fails → {{ inputs.service_name }} returns 5xx →
-          ALB target 5xx at the edge (adjust to the evidence; for elb_5xx_no_healthy_targets,
-          the chain is targets-unhealthy → LB has nowhere to route → ELB 5xx).
-        RECOMMENDED NEXT STEPS — e.g. investigate {{ inputs.service_name }} and its backend
-          (DB connection exhaustion?), check target health-check failures, consider scaling
-          or restarting unhealthy targets.
-        DOWNSTREAM IMPACT — user-facing symptom (failed requests / latency).
-        CONFIDENCE NOTE — only if ambiguous.
-      maxLength: 1500
+            Traffic (incident): {{ steps.traffic_incident.output | json }}
+            Traffic (baseline): {{ steps.traffic_baseline.output | json }}
+            Target 5xx by phase: {{ steps.target_5xx.output | json }}
+            ELB 5xx by phase:    {{ steps.elb_5xx.output | json }}
+            Target health:       {{ steps.target_health.output | json }}
+            SLO status:    {{ steps.slo_context.output | json }}
+            Active alerts: {{ steps.active_alerts.output | json }}
+          instructions: |
+            You are an SRE assistant synthesising an AWS ALB incident investigation.
+            Produce a structured root-cause summary in EXACTLY these sections:
+            ROOT CAUSE HYPOTHESIS — one sentence. If the targets are returning 5xx, name the
+              BACKEND ({{ steps.resolve.output.service_name }}) as the cause and note the next
+              place to look is that service's own dependencies (e.g. its database connection pool).
+            EVIDENCE — target vs ELB 5xx (incident vs baseline), target response time, healthy
+              vs unhealthy host counts.
+            SEVERITY & CALIBRATION — if an SLO is VIOLATED/DEGRADING (or its error budget is
+              materially consumed), or an alert is active for this resource, ANCHOR severity
+              and root cause on that calibrated signal and name the alert/SLO + its reason
+              (the shipped thresholds encode what is "bad" for this resource, which the raw
+              magnitude alone cannot establish). If no SLO/alert context is present or empty,
+              state the assessment rests on raw metrics alone with no SLO/alert corroboration
+              — do NOT invent one.
+            CAUSAL CHAIN — backend dependency fails → {{ steps.resolve.output.service_name }}
+              returns 5xx → ALB target 5xx at the edge (adjust to the evidence; for
+              elb_5xx_no_healthy_targets, the chain is targets-unhealthy → LB has nowhere to
+              route → ELB 5xx).
+            RECOMMENDED NEXT STEPS — e.g. investigate {{ steps.resolve.output.service_name }}
+              and its backend (DB connection exhaustion?), check target health-check failures,
+              consider scaling or restarting unhealthy targets.
+            DOWNSTREAM IMPACT — user-facing symptom (failed requests / latency).
+            CONFIDENCE NOTE — only if ambiguous.
+          maxLength: 1500
+
+      # Expose the result as the workflow's output for callers / composing workflows.
+      - name: output_result
+        type: workflow.output
+        with:
+          status: "investigated"
+          resource: "{{ steps.resolve.output.load_balancer }}"
+          triggered_by: "{{ steps.resolve.output.triggering_rule }}"
+          classification: "{{ steps.classify_alb_failure.output.category }}"
+          rationale: "{{ steps.classify_alb_failure.output.rationale }}"
+          summary: "{{ steps.synthesize_findings.output.content }}"
+
+    else:
+      - name: output_insufficient_evidence
+        type: workflow.output
+        with:
+          status: "insufficient_evidence"
+          resource: "{{ steps.resolve.output.load_balancer }}"
+          triggered_by: "{{ steps.resolve.output.triggering_rule }}"
+          summary: >-
+            No ALB datapoints found for "{{ steps.resolve.output.load_balancer }}" in the
+            incident window around {{ steps.resolve.output.alert_timestamp }}. Either the
+            LoadBalancer dimension could not be resolved (manual input missing, or the
+            triggering alert's group carries no LoadBalancer), the metrics have not been
+            ingested yet, or the dimension does not match this cluster's data. Refusing
+            to produce a diagnosis without evidence.
