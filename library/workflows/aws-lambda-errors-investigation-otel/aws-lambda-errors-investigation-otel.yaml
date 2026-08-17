@@ -119,6 +119,7 @@ steps:
           categories:
             - elevated_errors
             - throttling
+            - load_surge
             - duration_degradation
             - healthy
           instructions: |
@@ -128,12 +129,20 @@ steps:
               - elevated_errors: error_rate is MATERIALLY above baseline_error_rate (roughly
                 2x or more, or a jump of many percentage points) with few/no throttles —
                 the function code/dependency is failing.
-              - duration_degradation: error_rate near baseline but max_duration sharply up — the
-                function is slow (downstream latency / cold starts / resource limits).
+              - load_surge: incident invocations are sharply above baseline (roughly 3x or
+                more) while error_rate stays near baseline and throttles are ~0 — the
+                function is absorbing a traffic surge, not failing. Absolute error COUNTS
+                rise with volume even at a healthy rate, which is often what tripped the
+                alert or burned SLO error budget; say so rather than inventing a code failure.
+              - duration_degradation: error_rate near baseline but max_duration is MATERIALLY
+                above baseline (roughly 1.5x or more) — the function is slow (downstream
+                latency / cold starts / resource limits). Small duration wiggles of a few
+                percent — especially during a load surge — are ambient, NOT degradation.
               - healthy: error_rate within normal fluctuation of baseline (small drifts of a
                 couple of percentage points are ambient noise, NOT an incident), no throttles,
-                duration stable.
-            Pick the single best category; prefer throttling when throttles > 0.
+                invocations near baseline, duration stable.
+            Pick the single best category. Precedence when several apply: throttling first
+            (throttles > 0), then elevated_errors, then load_surge, then duration_degradation.
             A null error_rate means zero invocations in the window — do not read it as 0%;
             if invocations are zero while throttles are high, that IS the throttling pattern.
             If the baseline returned no rows or nulls, note the comparison is unavailable —
@@ -198,8 +207,10 @@ steps:
             CAUSAL CHAIN — adjust to the evidence (e.g. arrival spike → concurrency exhausted →
               throttles → dropped/failed invocations; or a failing dependency → error rate up).
             RECOMMENDED NEXT STEPS — e.g. raise reserved/provisioned concurrency for throttling;
-              inspect function logs / the failing dependency for elevated_errors; profile cold
-              starts / downstream calls for duration_degradation.
+              inspect function logs / the failing dependency for elevated_errors; for load_surge,
+              identify the traffic source, confirm concurrency headroom, and consider whether the
+              alert threshold should be rate-based for this workload; profile cold starts /
+              downstream calls for duration_degradation.
             DOWNSTREAM IMPACT — what the failed/throttled invocations affect.
             CONFIDENCE NOTE — only if ambiguous.
           maxLength: 1500
