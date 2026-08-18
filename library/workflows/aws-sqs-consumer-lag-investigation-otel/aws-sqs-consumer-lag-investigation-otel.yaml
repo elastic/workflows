@@ -1,0 +1,250 @@
+template-metadata:
+  slug: aws-sqs-consumer-lag-investigation-otel
+  version: "1.0.0"
+  availability: ">=9.5.0"
+  name: "AWS SQS consumer lag investigation (OTel)"
+  description: >-
+    Investigate an SQS queue whose backlog is growing. Correlates visible-message
+    backlog, oldest-message age, and sent-vs-deleted throughput to distinguish
+    consumer lag, a stalled consumer, or a producer spike. Requires AWS OTel
+    metrics from the EDOT awscloudwatch collector (metrics-aws.*.otel-*).
+  solutions: [observability]
+  categories: [root-cause-analysis, monitoring]
+
+name: AWS SQS Consumer Lag Investigation (OTel)
+description: >
+  Automated investigation of an SQS queue whose backlog is growing. Confirms
+  whether the queue is backing up because the consumer can't keep up (consumer
+  lag), the consumer has stalled entirely, or producers spiked — by correlating
+  the visible-message backlog, the age of the oldest message, and the sent-vs-
+  deleted throughput balance. Built against OTel-schema AWS CloudWatch metrics
+  shipped by the EDOT awscloudwatch collector (metrics-aws.*.otel-*).
+
+# OTel-schema SQS data stream. Metric value field is the CloudWatch name flattened
+# under `metrics` (dots + slashes), so every reference is backticked in ES|QL.
+consts:
+  sqs_metrics_index: "metrics-aws.sqs.otel-*"
+  # Baseline T-50m..T-20m vs incident T-20m..T+5m — windows must NOT overlap or
+  # incident data contaminates the baseline comparison.
+  baseline_lookback: "50 minutes"
+  baseline_lookend: "20 minutes"
+  incident_lookback: "20 minutes"
+
+# Inputs are optional: manual runs supply them; alert-triggered runs resolve them
+# from the alert payload in the `resolve` step below.
+inputs:
+  - name: queue_name
+    type: string
+    description: >-
+      SQS QueueName of the alerting queue (e.g. fis-order-events).
+      Manual runs must supply it; alert-triggered runs derive it from the alert.
+    required: false
+  - name: service_name
+    type: string
+    description: >-
+      The consumer service that drains the queue (e.g. fulfillment-worker).
+    required: false
+  - name: alert_timestamp
+    type: string
+    description: >-
+      ISO8601 timestamp of the alert firing. Manual runs must supply it;
+      alert-triggered runs derive it from the alert.
+    required: false
+
+# The alert trigger fires only when a rule is connected to this workflow via the
+# "Run Workflow" rule action (.workflows system connector). Configure that action
+# with summaryMode:false so each run carries exactly ONE alert in event.alerts.
+triggers:
+  - type: manual
+  - type: alert
+
+steps:
+  # 0. Resolve the target + timestamp: manual inputs win; otherwise the triggering
+  #    alert's structured group-by fields (kibana.alert.grouping.*) name the resource
+  #    and kibana.alert.start is the firing time. "MISSING" makes the incident query
+  #    match nothing so the evidence gate aborts cleanly.
+  - name: resolve
+    type: data.set
+    with:
+      queue_name: "{{ inputs.queue_name | default: event.alerts[0].kibana.alert.grouping.QueueName | default: 'MISSING' }}"
+      alert_timestamp: "{{ inputs.alert_timestamp | default: event.alerts[0].kibana.alert.start | default: 'MISSING' }}"
+      service_name: "{{ inputs.service_name | default: 'the consumer service' }}"
+      triggering_rule: "{{ event.rule.name | default: 'manual run' }}"
+
+  # 1. Backlog + lag during the incident: did the visible-message count and the age of
+  #    the oldest message climb? That pair is the signature of the queue backing up.
+  #    REQUIRED evidence: a query failure fails the run.
+  - name: backlog_incident
+    type: elasticsearch.esql.query
+    with:
+      query: |
+        FROM {{ consts.sqs_metrics_index }}
+        | WHERE attributes.QueueName == "{{ steps.resolve.output.queue_name }}"
+          AND @timestamp >= TO_DATETIME("{{ steps.resolve.output.alert_timestamp }}") - {{ consts.incident_lookback }}
+          AND @timestamp <= TO_DATETIME("{{ steps.resolve.output.alert_timestamp }}") + 5 minutes
+        | STATS
+            peak_visible    = MAX(`metrics.amazonaws.com/AWS/SQS/ApproximateNumberOfMessagesVisible`)    WHERE attributes.stat == "Maximum",
+            avg_visible     = AVG(`metrics.amazonaws.com/AWS/SQS/ApproximateNumberOfMessagesVisible`)    WHERE attributes.stat == "Average",
+            peak_oldest_age = MAX(`metrics.amazonaws.com/AWS/SQS/ApproximateAgeOfOldestMessage`)         WHERE attributes.stat == "Maximum",
+            peak_in_flight  = MAX(`metrics.amazonaws.com/AWS/SQS/ApproximateNumberOfMessagesNotVisible`) WHERE attributes.stat == "Maximum"
+      format: json
+
+  # 2. Baseline backlog BEFORE the incident — the comparison denominator.
+  - name: backlog_baseline
+    type: elasticsearch.esql.query
+    with:
+      query: |
+        FROM {{ consts.sqs_metrics_index }}
+        | WHERE attributes.QueueName == "{{ steps.resolve.output.queue_name }}"
+          AND @timestamp >= TO_DATETIME("{{ steps.resolve.output.alert_timestamp }}") - {{ consts.baseline_lookback }}
+          AND @timestamp <= TO_DATETIME("{{ steps.resolve.output.alert_timestamp }}") - {{ consts.baseline_lookend }}
+        | STATS baseline_visible = AVG(`metrics.amazonaws.com/AWS/SQS/ApproximateNumberOfMessagesVisible`) WHERE attributes.stat == "Average"
+      format: json
+
+  # 3. Throughput balance — sent vs deleted vs received. If sent outpaces deleted, the
+  #    producer is arriving faster than the consumer drains; if deleted ~ 0 while sent
+  #    continues, the consumer has stalled entirely.
+  - name: throughput_balance
+    type: elasticsearch.esql.query
+    with:
+      query: |
+        FROM {{ consts.sqs_metrics_index }}
+        | WHERE attributes.QueueName == "{{ steps.resolve.output.queue_name }}"
+          AND @timestamp >= TO_DATETIME("{{ steps.resolve.output.alert_timestamp }}") - {{ consts.incident_lookback }}
+          AND @timestamp <= TO_DATETIME("{{ steps.resolve.output.alert_timestamp }}") + 5 minutes
+        | STATS
+            sent     = SUM(`metrics.amazonaws.com/AWS/SQS/NumberOfMessagesSent`)     WHERE attributes.stat == "Sum",
+            deleted  = SUM(`metrics.amazonaws.com/AWS/SQS/NumberOfMessagesDeleted`)  WHERE attributes.stat == "Sum",
+            received = SUM(`metrics.amazonaws.com/AWS/SQS/NumberOfMessagesReceived`) WHERE attributes.stat == "Sum",
+            empty_receives = SUM(`metrics.amazonaws.com/AWS/SQS/NumberOfEmptyReceives`) WHERE attributes.stat == "Sum"
+      format: json
+
+  # 4. Evidence gate — deterministic, BEFORE any AI step. Zero datapoints for the
+  #    resolved queue (wrong/missing name, data not yet ingested, degenerate alert
+  #    group) → refuse to diagnose instead of classifying a row of nulls.
+  - name: evidence_gate
+    type: if
+    condition: "steps.backlog_incident.output.documents_found > 0"
+    steps:
+      # 5. Classify the queue failure mode from backlog growth + throughput balance.
+      - name: classify_queue_pattern
+        type: ai.classify
+        with:
+          input: |
+            QueueName: {{ steps.resolve.output.queue_name }}
+            Backlog during incident: {{ steps.backlog_incident.output | json }}
+            Baseline backlog:        {{ steps.backlog_baseline.output | json }}
+            Throughput balance:      {{ steps.throughput_balance.output | json }}
+          categories:
+            - consumer_lag
+            - consumer_stalled
+            - producer_spike
+            - healthy
+          instructions: |
+            Classify why the SQS queue backlog is behaving as it is:
+              - consumer_lag: peak_visible and peak_oldest_age climb well above baseline,
+                and `deleted` is non-zero but LOWER than `sent` — the consumer is draining
+                but can't keep up with the arrival rate.
+              - consumer_stalled: backlog and oldest-age climb sharply while `deleted` is
+                ~0 (and `empty_receives` may be ~0) — the consumer has stopped draining.
+              - producer_spike: `sent` is sharply elevated vs baseline and far exceeds
+                `deleted` — an arrival-rate surge is the dominant driver.
+              - healthy: peak_visible stays near baseline and oldest-age is low.
+            Pick the single best category. If signals are ambiguous, prefer the most
+            specific that fits (consumer_stalled over consumer_lag when deleted ~ 0).
+            If the baseline returned no rows or nulls, note the comparison is unavailable —
+            do not treat a missing baseline as a zero baseline.
+          includeRationale: true
+
+      # Optional calibration anchors (graceful if SLOs/alerts aren't deployed).
+      - name: slo_context
+        type: elasticsearch.esql.query
+        with:
+          query: |
+            FROM .slo-observability.summary-*
+            | WHERE slo.instanceId LIKE "*{{ steps.resolve.output.queue_name }}*"
+            | STATS sliValue = MAX(sliValue), errorBudgetConsumed = MAX(errorBudgetConsumed), status = VALUES(status) BY slo.name
+          format: json
+        on-failure:
+          continue: true
+
+      - name: active_alerts
+        type: elasticsearch.esql.query
+        with:
+          query: |
+            FROM .alerts-*
+            | WHERE kibana.alert.instance.id LIKE "*{{ steps.resolve.output.queue_name }}*"
+              AND @timestamp >= TO_DATETIME("{{ steps.resolve.output.alert_timestamp }}") - {{ consts.incident_lookback }}
+              AND @timestamp <= TO_DATETIME("{{ steps.resolve.output.alert_timestamp }}") + 5 minutes
+            | KEEP kibana.alert.rule.name, kibana.alert.status, kibana.alert.reason, kibana.alert.start
+            | SORT kibana.alert.start DESC
+            | LIMIT 20
+          format: json
+        on-failure:
+          continue: true
+
+      - name: synthesize_findings
+        type: ai.summarize
+        with:
+          input: |
+            ## SQS incident investigation for {{ steps.resolve.output.queue_name }}
+            Alert timestamp: {{ steps.resolve.output.alert_timestamp }}
+            Triggered by: {{ steps.resolve.output.triggering_rule }}
+            Consumer service: {{ steps.resolve.output.service_name }}
+
+            Classification: {{ steps.classify_queue_pattern.output.category }}
+            Rationale: {{ steps.classify_queue_pattern.output.rationale }}
+
+            Backlog (incident): {{ steps.backlog_incident.output | json }}
+            Backlog (baseline): {{ steps.backlog_baseline.output | json }}
+            Throughput:         {{ steps.throughput_balance.output | json }}
+            SLO status:    {{ steps.slo_context.output | json }}
+            Active alerts: {{ steps.active_alerts.output | json }}
+          instructions: |
+            You are an SRE assistant synthesising an AWS SQS incident investigation.
+            Produce a structured root-cause summary in EXACTLY these sections:
+            ROOT CAUSE HYPOTHESIS — one sentence naming the most likely cause.
+            EVIDENCE — the specific values: peak vs baseline visible messages, oldest-message
+              age, and the sent-vs-deleted balance.
+            SEVERITY & CALIBRATION — if an SLO is VIOLATED/DEGRADING (or its error budget is
+              materially consumed), or an alert is active for this resource, ANCHOR severity
+              and root cause on that calibrated signal and name the alert/SLO + its reason
+              (the shipped thresholds encode what is "bad" for this resource, which the raw
+              magnitude alone cannot establish). If no SLO/alert context is present or empty,
+              state the assessment rests on raw metrics alone with no SLO/alert corroboration
+              — do NOT invent one.
+            CAUSAL CHAIN — producers enqueue faster than the consumer drains →
+              backlog (visible messages) grows → oldest-message age rises → downstream
+              processing is delayed (adjust to the evidence).
+            RECOMMENDED NEXT STEPS — e.g. scale out consumer concurrency / batch size to
+              drain the backlog; shed or throttle producer load until the queue recovers;
+              check for a stalled or crash-looping consumer.
+            DOWNSTREAM IMPACT — what is delayed and the user-facing symptom.
+            CONFIDENCE NOTE — only if the classification was ambiguous.
+          maxLength: 1500
+
+      # Expose the result as the workflow's output for callers / composing workflows.
+      - name: output_result
+        type: workflow.output
+        with:
+          status: "investigated"
+          resource: "{{ steps.resolve.output.queue_name }}"
+          triggered_by: "{{ steps.resolve.output.triggering_rule }}"
+          classification: "{{ steps.classify_queue_pattern.output.category }}"
+          rationale: "{{ steps.classify_queue_pattern.output.rationale }}"
+          summary: "{{ steps.synthesize_findings.output.content }}"
+
+    else:
+      - name: output_insufficient_evidence
+        type: workflow.output
+        with:
+          status: "insufficient_evidence"
+          resource: "{{ steps.resolve.output.queue_name }}"
+          triggered_by: "{{ steps.resolve.output.triggering_rule }}"
+          summary: >-
+            No SQS datapoints found for "{{ steps.resolve.output.queue_name }}" in the
+            incident window around {{ steps.resolve.output.alert_timestamp }}. Either the
+            queue name could not be resolved (manual input missing, or the triggering
+            alert's group carries no QueueName), the metrics have not been ingested yet,
+            or the name does not match this cluster's data. Refusing to produce a
+            diagnosis without evidence.
