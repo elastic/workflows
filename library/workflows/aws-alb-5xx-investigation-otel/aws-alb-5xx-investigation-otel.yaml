@@ -4,29 +4,33 @@ template-metadata:
   availability: ">=9.5.0"
   name: "AWS ALB 5xx surge investigation (OTel)"
   description: >-
-    Investigate an Application Load Balancer returning elevated 5xx. Distinguishes
-    backend target failures, LB-generated 5xx from no healthy targets, and latency
-    degradation using target health and response time. Requires AWS OTel metrics
-    from the EDOT awscloudwatch collector (metrics-aws.*.otel-*).
+    Investigate an Application Load Balancer returning elevated 5xx. Layered
+    diagnosis: where the 5xx is generated (target vs per-code ELB 500/502/503/504),
+    why the ALB can't reach targets (connection/TLS errors, host health), whether
+    the ALB itself is under pressure (rejected connections), and backend latency.
+    Requires AWS OTel metrics from the EDOT awscloudwatch collector
+    (metrics-aws.*.otel-*).
   solutions: [observability]
   categories: [root-cause-analysis, monitoring]
 
 name: AWS ALB 5xx Surge Investigation (OTel)
 description: >
-  Automated investigation of an Application Load Balancer returning elevated 5xx.
-  An operator is paged on edge errors; this workflow decides whether the cause is the
-  TARGETS failing (backend 5xx / unhealthy hosts — e.g. the app can't reach its database)
-  versus the LOAD BALANCER itself having no healthy targets, versus latency degradation,
-  and correlates with target health + response time. Built against OTel-schema AWS
+  Automated layered investigation of an Application Load Balancer returning elevated
+  5xx. Layer 1 — where is the 5xx generated (target-generated vs ELB-generated, split
+  by code: 500 internal, 502 bad gateway, 503 no capacity/target, 504 timeout).
+  Layer 2 — why can't the ALB reach targets (TargetConnectionErrorCount,
+  TargetTLSNegotiationErrorCount, healthy/unhealthy host counts). Layer 3 — is the
+  ALB itself under pressure (RejectedConnectionCount vs request volume). Layer 4 —
+  application evidence (logs, when collected). Built against OTel-schema AWS
   CloudWatch metrics from the EDOT awscloudwatch collector (metrics-aws.*.otel-*).
 
 consts:
   # `elb` is the canonical dataset of the aws_elb_metrics_otel package: its alert
   # templates and dashboard all read metrics-aws.elb.otel-* (NOT "applicationelb").
   alb_metrics_index: "metrics-aws.elb.otel-*"
+  logs_index: "logs-*.otel-*"
   # Baseline T-50m..T-20m vs incident T-20m..T+5m — windows must NOT overlap or
-  # incident data contaminates the baseline comparison. Recent pre-incident baseline
-  # (no deep history needed); widen for stable production LBs.
+  # incident data contaminates the baseline comparison.
   baseline_lookback: "50 minutes"
   baseline_lookend: "20 minutes"
   incident_lookback: "20 minutes"
@@ -59,12 +63,18 @@ triggers:
   - type: manual
   - type: alert
 
+# SPARSE-METRIC DISCIPLINE (learned on a live alert-triggered run): CloudWatch omits
+# zero-valued counters entirely, so a per-code or error-count field is UNMAPPED in
+# Elastic until the first such error ever occurs — and ES|QL fails verification on any
+# unknown column, killing the whole query. Therefore: the REQUIRED evidence step below
+# references only dense fields (RequestCount / TargetResponseTime), and every sparse
+# family gets its OWN on-failure:continue step. A failed/empty sparse step means "no
+# such errors ever observed on this LB" — that is itself a finding, never a failure.
 steps:
   # 0. Resolve the target + timestamp: manual inputs win; otherwise the triggering
   #    alert's structured group-by fields (kibana.alert.grouping.*) name the resource
-  #    and kibana.alert.start is the firing time. The LoadBalancer dimension arrives
-  #    intact as the full "app/<name>/<id>" reference. "MISSING" makes the incident
-  #    query match nothing so the evidence gate aborts cleanly.
+  #    and kibana.alert.start is the firing time. "MISSING" makes the incident query
+  #    match nothing so the evidence gate aborts cleanly.
   - name: resolve
     type: data.set
     with:
@@ -73,12 +83,7 @@ steps:
       service_name: "{{ inputs.service_name | default: 'the backend service' }}"
       triggering_rule: "{{ event.rule.name | default: 'manual run' }}"
 
-  # 1. Traffic volume + latency during the incident — the REQUIRED evidence base. This
-  #    step references ONLY dense metrics (RequestCount / TargetResponseTime exist whenever
-  #    the LB serves traffic). The 5xx counters are SPARSE CloudWatch metrics: the field is
-  #    unmapped until the first 5xx ever lands, and ES|QL fails verification on an unknown
-  #    column — a hard-failing query must never reference a field that may not exist yet,
-  #    so each sparse family gets its own optional step below.
+  # ── Layer 0: traffic context (REQUIRED — dense fields only; hard-fails) ──────────
   - name: traffic_incident
     type: elasticsearch.esql.query
     with:
@@ -92,7 +97,6 @@ steps:
             max_target_response = MAX(`metrics.amazonaws.com/AWS/ApplicationELB/TargetResponseTime`) WHERE attributes.stat == "Maximum"
       format: json
 
-  # 2. Baseline traffic BEFORE the incident.
   - name: traffic_baseline
     type: elasticsearch.esql.query
     with:
@@ -101,12 +105,13 @@ steps:
         | WHERE attributes.LoadBalancer == "{{ steps.resolve.output.load_balancer }}"
           AND @timestamp >= TO_DATETIME("{{ steps.resolve.output.alert_timestamp }}") - {{ consts.baseline_lookback }}
           AND @timestamp <= TO_DATETIME("{{ steps.resolve.output.alert_timestamp }}") - {{ consts.baseline_lookend }}
-        | STATS baseline_requests = SUM(`metrics.amazonaws.com/AWS/ApplicationELB/RequestCount`) WHERE attributes.stat == "Sum"
+        | STATS
+            baseline_requests   = SUM(`metrics.amazonaws.com/AWS/ApplicationELB/RequestCount`)       WHERE attributes.stat == "Sum",
+            baseline_max_target_response = MAX(`metrics.amazonaws.com/AWS/ApplicationELB/TargetResponseTime`) WHERE attributes.stat == "Maximum"
       format: json
 
-  # 3. Target 5xx, baseline vs incident in one phase-split query. OPTIONAL: the field may
-  #    be unmapped if the LB has never returned a target 5xx — its absence IS a finding
-  #    (no backend errors at all), never a reason to kill the run.
+  # ── Layer 1: WHERE is the 5xx generated? (each family sparse → optional) ─────────
+  # Target-generated 5xx: the application/backend answered with an error.
   - name: target_5xx
     type: elasticsearch.esql.query
     with:
@@ -122,25 +127,98 @@ steps:
     on-failure:
       continue: true
 
-  # 4. ELB-generated 5xx (LB has no healthy target to route to), same phase split.
-  #    OPTIONAL for the same sparse-field reason.
-  - name: elb_5xx
+  # ELB-generated 5xx, split by code. Each code is its own sparse field:
+  #   500 = ALB internal error; 502 = bad gateway (target reset / broke the HTTP
+  #   contract mid-request); 503 = no healthy target to route to / capacity;
+  #   504 = target exceeded the ALB timeout. The split localizes the mechanism.
+  - name: elb_500
     type: elasticsearch.esql.query
     with:
       query: |
         FROM {{ consts.alb_metrics_index }}
         | WHERE attributes.LoadBalancer == "{{ steps.resolve.output.load_balancer }}"
           AND attributes.stat == "Sum"
-          AND @timestamp >= TO_DATETIME("{{ steps.resolve.output.alert_timestamp }}") - {{ consts.baseline_lookback }}
+          AND @timestamp >= TO_DATETIME("{{ steps.resolve.output.alert_timestamp }}") - {{ consts.incident_lookback }}
           AND @timestamp <= TO_DATETIME("{{ steps.resolve.output.alert_timestamp }}") + 5 minutes
-        | EVAL phase = CASE(@timestamp >= TO_DATETIME("{{ steps.resolve.output.alert_timestamp }}") - {{ consts.incident_lookback }}, "incident", "baseline")
-        | STATS elb_5xx = SUM(`metrics.amazonaws.com/AWS/ApplicationELB/HTTPCode_ELB_5XX_Count`) BY phase
+        | STATS elb_500 = SUM(`metrics.amazonaws.com/AWS/ApplicationELB/HTTPCode_ELB_500_Count`)
       format: json
     on-failure:
       continue: true
 
-  # 5. Target health — are backend hosts failing health checks? OPTIONAL corroboration
-  #    (host-count metrics may not be collected in every onboarding).
+  - name: elb_502
+    type: elasticsearch.esql.query
+    with:
+      query: |
+        FROM {{ consts.alb_metrics_index }}
+        | WHERE attributes.LoadBalancer == "{{ steps.resolve.output.load_balancer }}"
+          AND attributes.stat == "Sum"
+          AND @timestamp >= TO_DATETIME("{{ steps.resolve.output.alert_timestamp }}") - {{ consts.incident_lookback }}
+          AND @timestamp <= TO_DATETIME("{{ steps.resolve.output.alert_timestamp }}") + 5 minutes
+        | STATS elb_502 = SUM(`metrics.amazonaws.com/AWS/ApplicationELB/HTTPCode_ELB_502_Count`)
+      format: json
+    on-failure:
+      continue: true
+
+  - name: elb_503
+    type: elasticsearch.esql.query
+    with:
+      query: |
+        FROM {{ consts.alb_metrics_index }}
+        | WHERE attributes.LoadBalancer == "{{ steps.resolve.output.load_balancer }}"
+          AND attributes.stat == "Sum"
+          AND @timestamp >= TO_DATETIME("{{ steps.resolve.output.alert_timestamp }}") - {{ consts.incident_lookback }}
+          AND @timestamp <= TO_DATETIME("{{ steps.resolve.output.alert_timestamp }}") + 5 minutes
+        | STATS elb_503 = SUM(`metrics.amazonaws.com/AWS/ApplicationELB/HTTPCode_ELB_503_Count`)
+      format: json
+    on-failure:
+      continue: true
+
+  - name: elb_504
+    type: elasticsearch.esql.query
+    with:
+      query: |
+        FROM {{ consts.alb_metrics_index }}
+        | WHERE attributes.LoadBalancer == "{{ steps.resolve.output.load_balancer }}"
+          AND attributes.stat == "Sum"
+          AND @timestamp >= TO_DATETIME("{{ steps.resolve.output.alert_timestamp }}") - {{ consts.incident_lookback }}
+          AND @timestamp <= TO_DATETIME("{{ steps.resolve.output.alert_timestamp }}") + 5 minutes
+        | STATS elb_504 = SUM(`metrics.amazonaws.com/AWS/ApplicationELB/HTTPCode_ELB_504_Count`)
+      format: json
+    on-failure:
+      continue: true
+
+  # ── Layer 2: WHY can't the ALB reach targets? (sparse → optional) ────────────────
+  - name: target_conn_errors
+    type: elasticsearch.esql.query
+    with:
+      query: |
+        FROM {{ consts.alb_metrics_index }}
+        | WHERE attributes.LoadBalancer == "{{ steps.resolve.output.load_balancer }}"
+          AND attributes.stat == "Sum"
+          AND @timestamp >= TO_DATETIME("{{ steps.resolve.output.alert_timestamp }}") - {{ consts.incident_lookback }}
+          AND @timestamp <= TO_DATETIME("{{ steps.resolve.output.alert_timestamp }}") + 5 minutes
+        | STATS target_conn_errors = SUM(`metrics.amazonaws.com/AWS/ApplicationELB/TargetConnectionErrorCount`)
+      format: json
+    on-failure:
+      continue: true
+
+  - name: target_tls_errors
+    type: elasticsearch.esql.query
+    with:
+      query: |
+        FROM {{ consts.alb_metrics_index }}
+        | WHERE attributes.LoadBalancer == "{{ steps.resolve.output.load_balancer }}"
+          AND attributes.stat == "Sum"
+          AND @timestamp >= TO_DATETIME("{{ steps.resolve.output.alert_timestamp }}") - {{ consts.incident_lookback }}
+          AND @timestamp <= TO_DATETIME("{{ steps.resolve.output.alert_timestamp }}") + 5 minutes
+        | STATS target_tls_errors = SUM(`metrics.amazonaws.com/AWS/ApplicationELB/TargetTLSNegotiationErrorCount`)
+      format: json
+    on-failure:
+      continue: true
+
+  # Host health. No stat filter: HealthyHostCount/UnHealthyHostCount are one-sample-
+  # per-period gauges, so Average == Sum == Maximum per period and MIN/MAX are safe
+  # across both discovery-mode (per-stat gauges) and named-mode (reshaped) pipelines.
   - name: target_health
     type: elasticsearch.esql.query
     with:
@@ -150,20 +228,50 @@ steps:
           AND @timestamp >= TO_DATETIME("{{ steps.resolve.output.alert_timestamp }}") - {{ consts.incident_lookback }}
           AND @timestamp <= TO_DATETIME("{{ steps.resolve.output.alert_timestamp }}") + 5 minutes
         | STATS
-            min_healthy   = MIN(`metrics.amazonaws.com/AWS/ApplicationELB/HealthyHostCount`)   WHERE attributes.stat == "Average",
-            max_unhealthy = MAX(`metrics.amazonaws.com/AWS/ApplicationELB/UnHealthyHostCount`) WHERE attributes.stat == "Average"
+            min_healthy   = MIN(`metrics.amazonaws.com/AWS/ApplicationELB/HealthyHostCount`),
+            max_unhealthy = MAX(`metrics.amazonaws.com/AWS/ApplicationELB/UnHealthyHostCount`)
       format: json
     on-failure:
       continue: true
 
-  # 4. Evidence gate — deterministic, BEFORE any AI step. Zero datapoints for the
-  #    resolved load balancer (wrong/missing dimension, data not yet ingested,
-  #    degenerate alert group) → refuse to diagnose instead of classifying nulls.
+  # ── Layer 3: is the ALB ITSELF under pressure? (sparse → optional) ───────────────
+  - name: alb_pressure
+    type: elasticsearch.esql.query
+    with:
+      query: |
+        FROM {{ consts.alb_metrics_index }}
+        | WHERE attributes.LoadBalancer == "{{ steps.resolve.output.load_balancer }}"
+          AND attributes.stat == "Sum"
+          AND @timestamp >= TO_DATETIME("{{ steps.resolve.output.alert_timestamp }}") - {{ consts.incident_lookback }}
+          AND @timestamp <= TO_DATETIME("{{ steps.resolve.output.alert_timestamp }}") + 5 minutes
+        | STATS rejected_connections = SUM(`metrics.amazonaws.com/AWS/ApplicationELB/RejectedConnectionCount`)
+      format: json
+    on-failure:
+      continue: true
+
+  # ── Layer 4: application evidence (optional — logs may not be onboarded) ─────────
+  - name: app_logs
+    type: elasticsearch.esql.query
+    with:
+      query: |
+        FROM {{ consts.logs_index }}
+        | WHERE service.name == "{{ steps.resolve.output.service_name }}"
+          AND @timestamp >= TO_DATETIME("{{ steps.resolve.output.alert_timestamp }}") - {{ consts.incident_lookback }}
+          AND @timestamp <= TO_DATETIME("{{ steps.resolve.output.alert_timestamp }}") + 5 minutes
+          AND severity_text IN ("ERROR", "FATAL", "error", "fatal")
+        | SORT @timestamp DESC
+        | KEEP @timestamp, severity_text, body.text
+        | LIMIT 20
+      format: json
+    on-failure:
+      continue: true
+
+  # ── Evidence gate — deterministic, BEFORE any AI step ────────────────────────────
   - name: evidence_gate
     type: if
     condition: "steps.traffic_incident.output.documents_found > 0"
     steps:
-      # 5. Classify the failure locus.
+      # Classify the failure locus + mechanism.
       - name: classify_alb_failure
         type: ai.classify
         with:
@@ -172,28 +280,57 @@ steps:
             Traffic (incident): {{ steps.traffic_incident.output | json }}
             Traffic (baseline): {{ steps.traffic_baseline.output | json }}
             Target 5xx by phase: {{ steps.target_5xx.output | json }}
-            ELB 5xx by phase:    {{ steps.elb_5xx.output | json }}
-            Target health:       {{ steps.target_health.output | json }}
+            ELB 500 (incident): {{ steps.elb_500.output | json }}
+            ELB 502 (incident): {{ steps.elb_502.output | json }}
+            ELB 503 (incident): {{ steps.elb_503.output | json }}
+            ELB 504 (incident): {{ steps.elb_504.output | json }}
+            Target connection errors: {{ steps.target_conn_errors.output | json }}
+            Target TLS errors:        {{ steps.target_tls_errors.output | json }}
+            Target health:            {{ steps.target_health.output | json }}
+            ALB rejected connections: {{ steps.alb_pressure.output | json }}
+            App logs (errors):        {{ steps.app_logs.output | json }}
           categories:
-            - target_5xx_backend
-            - elb_5xx_no_healthy_targets
-            - latency_degradation
+            - target_application_5xx
+            - target_connection_failure
+            - target_tls_failure
+            - no_healthy_targets
+            - alb_capacity_pressure
+            - alb_internal_5xx
+            - backend_latency_timeout
             - healthy
+            - unrecognized
           instructions: |
-            Decide where the ALB failure originates:
-              - target_5xx_backend: target_5xx is elevated vs baseline (the registered targets
-                are returning 5xx — the application/backend is failing, e.g. it can't reach its
-                database). max_unhealthy may also be > 0.
-              - elb_5xx_no_healthy_targets: elb_5xx dominates and min_healthy is ~0 — the load
-                balancer itself returns 5xx because there are no healthy targets to route to.
-              - latency_degradation: 5xx is low but max_target_response is sharply elevated —
-                timeouts/slowness rather than hard errors.
-              - healthy: target_5xx/elb_5xx near baseline and hosts healthy.
-            Pick the single best category. Prefer target_5xx_backend when target 5xx is the
-            dominant elevated signal. A FAILED/empty 5xx step means that metric family has
-            never been emitted by this LB (CloudWatch omits zero-valued sparse metrics) —
-            treat it as "no such errors observed", and weigh the families that ARE present.
-            If the baseline returned no rows or nulls, note the comparison is unavailable.
+            Layered diagnosis — first decide WHERE the 5xx is generated, then the mechanism:
+              - target_application_5xx: target_5xx dominates (incident >> baseline) — the
+                registered targets themselves answered 5xx; the application/backend is
+                failing (check app logs for the specific error if present).
+              - target_connection_failure: target_conn_errors > 0 and/or elb_502 elevated —
+                the ALB could not establish/keep connections to targets (target resetting,
+                crashing mid-request, or port not accepting).
+              - target_tls_failure: target_tls_errors > 0 — backend TLS handshake failures
+                (cert expiry/mismatch on the target side).
+              - no_healthy_targets: elb_503 dominates and min_healthy is ~0 (or max_unhealthy
+                is the whole target group) — the ALB has nowhere to route.
+              - alb_capacity_pressure: rejected_connections > 0 — the ALB itself is refusing
+                connections (surge queue / connection limits), independent of target health.
+              - alb_internal_5xx: elb_500 elevated with none of the above — an ALB-internal
+                error (rare; often a config/rule evaluation problem).
+              - backend_latency_timeout: elb_504 elevated and/or max_target_response sharply
+                above baseline_max_target_response — targets respond but exceed the ALB
+                timeout; slowness, not hard failure.
+              - healthy: all 5xx families near zero/baseline, hosts healthy, latency stable.
+              - unrecognized: evidence conflicts or fits none of the above.
+            ABSENCE SEMANTICS: a FAILED or empty sparse step means that metric family has
+            NEVER been emitted by this LB (CloudWatch omits zero-valued counters) — read it
+            as "no such errors observed", never as missing data, and never fabricate a value.
+            COARSENING RULE: when the metric that separates two sibling categories is absent
+            (e.g. target_conn_errors vs target_tls_errors both never emitted, but elb_502 is
+            elevated), choose the COARSER truthful category (target_connection_failure for
+            502-dominance) and state in the rationale which discriminating metric was
+            unavailable. Do not fabricate precision the evidence cannot support.
+            MATERIALITY: compare against baseline where provided; small drifts within normal
+            fluctuation are ambient, not incidents. If baseline steps returned no rows, note
+            the comparison is unavailable — a missing baseline is not a zero baseline.
           includeRationale: true
 
       # Optional calibration anchors (graceful if SLOs/alerts aren't deployed).
@@ -238,34 +375,38 @@ steps:
             Traffic (incident): {{ steps.traffic_incident.output | json }}
             Traffic (baseline): {{ steps.traffic_baseline.output | json }}
             Target 5xx by phase: {{ steps.target_5xx.output | json }}
-            ELB 5xx by phase:    {{ steps.elb_5xx.output | json }}
-            Target health:       {{ steps.target_health.output | json }}
+            ELB 5xx by code: 500={{ steps.elb_500.output | json }} 502={{ steps.elb_502.output | json }} 503={{ steps.elb_503.output | json }} 504={{ steps.elb_504.output | json }}
+            Target reach: conn_errors={{ steps.target_conn_errors.output | json }} tls_errors={{ steps.target_tls_errors.output | json }}
+            Target health: {{ steps.target_health.output | json }}
+            ALB pressure:  {{ steps.alb_pressure.output | json }}
+            App logs:      {{ steps.app_logs.output | json }}
             SLO status:    {{ steps.slo_context.output | json }}
             Active alerts: {{ steps.active_alerts.output | json }}
           instructions: |
             You are an SRE assistant synthesising an AWS ALB incident investigation.
             Produce a structured root-cause summary in EXACTLY these sections:
-            ROOT CAUSE HYPOTHESIS — one sentence. If the targets are returning 5xx, name the
-              BACKEND ({{ steps.resolve.output.service_name }}) as the cause and note the next
-              place to look is that service's own dependencies (e.g. its database connection pool).
-            EVIDENCE — target vs ELB 5xx (incident vs baseline), target response time, healthy
-              vs unhealthy host counts.
-            SEVERITY & CALIBRATION — if an SLO is VIOLATED/DEGRADING (or its error budget is
-              materially consumed), or an alert is active for this resource, ANCHOR severity
-              and root cause on that calibrated signal and name the alert/SLO + its reason
-              (the shipped thresholds encode what is "bad" for this resource, which the raw
-              magnitude alone cannot establish). If no SLO/alert context is present or empty,
-              state the assessment rests on raw metrics alone with no SLO/alert corroboration
-              — do NOT invent one.
-            CAUSAL CHAIN — backend dependency fails → {{ steps.resolve.output.service_name }}
-              returns 5xx → ALB target 5xx at the edge (adjust to the evidence; for
-              elb_5xx_no_healthy_targets, the chain is targets-unhealthy → LB has nowhere to
-              route → ELB 5xx).
-            RECOMMENDED NEXT STEPS — e.g. investigate {{ steps.resolve.output.service_name }}
-              and its backend (DB connection exhaustion?), check target health-check failures,
-              consider scaling or restarting unhealthy targets.
-            DOWNSTREAM IMPACT — user-facing symptom (failed requests / latency).
-            CONFIDENCE NOTE — only if ambiguous.
+            ROOT CAUSE HYPOTHESIS — one sentence naming the layer (target application /
+              target reachability / ALB capacity / ALB internal / backend latency) and the
+              mechanism. If the targets are answering 5xx, name the BACKEND
+              ({{ steps.resolve.output.service_name }}) and note the next place to look is
+              that service's own dependencies.
+            EVIDENCE — the per-code 5xx split, target vs ELB attribution, reach/health
+              signals, and latency vs baseline. Name what was ABSENT too (e.g. "no
+              connection or TLS errors ever recorded") — absence localizes the fault.
+            SEVERITY & CALIBRATION — if an SLO is VIOLATED/DEGRADING or an alert is active
+              for this resource, ANCHOR severity on that calibrated signal and name it. If
+              no SLO/alert context is present, state the assessment rests on raw metrics
+              alone — do NOT invent one.
+            CAUSAL CHAIN — from the originating layer to the user-visible 5xx (adjust to
+              the classified mechanism).
+            RECOMMENDED NEXT STEPS — targeted at the classified layer (e.g. app logs/
+              dependencies for target_application_5xx; target process/port health for
+              connection failures; cert chain for TLS; scaling/health-check config for
+              no_healthy_targets; ALB limits for capacity; timeout tuning + profiling for
+              latency).
+            DOWNSTREAM IMPACT — user-facing symptom.
+            CONFIDENCE NOTE — required when a COARSENING rule was applied or a
+              discriminating metric family was absent.
           maxLength: 1500
 
       # Expose the result as the workflow's output for callers / composing workflows.
