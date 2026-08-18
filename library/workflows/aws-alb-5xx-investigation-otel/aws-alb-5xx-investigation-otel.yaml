@@ -309,8 +309,11 @@ steps:
                 crashing mid-request, or port not accepting).
               - target_tls_failure: target_tls_errors > 0 — backend TLS handshake failures
                 (cert expiry/mismatch on the target side).
-              - no_healthy_targets: elb_503 dominates and min_healthy is ~0 (or max_unhealthy
-                is the whole target group) — the ALB has nowhere to route.
+              - no_healthy_targets: elb_503 dominates and EITHER min_healthy is ~0, OR the
+                host-count metrics are entirely ABSENT during the window while they existed
+                before it (deregistered targets emit no host-count datapoints at all — a
+                scaled-to-zero service disappears from the metric rather than reading 0;
+                live-verified 2026-08-18) — the ALB has nowhere to route.
               - alb_capacity_pressure: rejected_connections > 0 — the ALB itself is refusing
                 connections (surge queue / connection limits), independent of target health.
               - alb_internal_5xx: elb_500 elevated with none of the above — an ALB-internal
