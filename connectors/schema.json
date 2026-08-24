@@ -1,0 +1,466 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://workflows.elastic.co/connectors/v1/schema.json",
+  "title": "Elastic declarative connector definition",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "id", "version", "metadata", "config", "auth", "actions", "test"],
+  "properties": {
+    "schemaVersion": {
+      "const": 1
+    },
+    "id": {
+      "type": "string",
+      "pattern": "^\\.[a-z0-9_-]+$",
+      "maxLength": 128
+    },
+    "version": {
+      "type": "string",
+      "pattern": "^\\d+\\.\\d+\\.\\d+$"
+    },
+    "metadata": {
+      "$ref": "#/$defs/metadata"
+    },
+    "config": {
+      "$ref": "#/$defs/objectJsonSchema"
+    },
+    "auth": {
+      "$ref": "#/$defs/auth"
+    },
+    "actions": {
+      "type": "object",
+      "minProperties": 1,
+      "maxProperties": 100,
+      "propertyNames": {
+        "pattern": "^[A-Za-z][A-Za-z0-9_]*$",
+        "maxLength": 128
+      },
+      "additionalProperties": {
+        "$ref": "#/$defs/action"
+      }
+    },
+    "test": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["request"],
+      "properties": {
+        "description": {
+          "type": "string",
+          "maxLength": 1024
+        },
+        "request": {
+          "$ref": "#/$defs/request"
+        }
+      }
+    }
+  },
+  "$defs": {
+    "metadata": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["displayName", "description", "minimumLicense", "supportedFeatureIds"],
+      "properties": {
+        "displayName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "description": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1024
+        },
+        "icon": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["path", "contentHash"],
+          "properties": {
+            "path": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*\\.svg$",
+              "maxLength": 512
+            },
+            "contentHash": {
+              "$ref": "#/$defs/contentHash"
+            }
+          }
+        },
+        "docsUrl": {
+          "type": "string",
+          "maxLength": 2048
+        },
+        "minimumLicense": {
+          "enum": ["basic", "gold", "platinum", "enterprise"]
+        },
+        "isTechnicalPreview": {
+          "type": "boolean"
+        },
+        "supportedFeatureIds": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 32,
+          "uniqueItems": true,
+          "items": {
+            "enum": [
+              "alerting",
+              "cases",
+              "uptime",
+              "siem",
+              "generativeAIForSecurity",
+              "generativeAIForObservability",
+              "generativeAIForSearchPlayground",
+              "endpointSecurity",
+              "workflows",
+              "agentBuilder",
+              "contextEngine"
+            ]
+          }
+        }
+      }
+    },
+    "auth": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type"],
+      "properties": {
+        "type": {
+          "enum": ["api_key_header", "basic", "bearer", "none"]
+        },
+        "header": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "prefix": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "label": {
+          "type": "string",
+          "maxLength": 256
+        },
+        "placeholder": {
+          "type": "string",
+          "maxLength": 256
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "type": {
+                "const": "api_key_header"
+              }
+            }
+          },
+          "then": {
+            "required": ["header"]
+          }
+        }
+      ]
+    },
+    "action": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["input", "request"],
+      "properties": {
+        "description": {
+          "type": "string",
+          "maxLength": 1024
+        },
+        "isTool": {
+          "type": "boolean"
+        },
+        "scope": {
+          "enum": ["read", "write", "destroy"]
+        },
+        "input": {
+          "$ref": "#/$defs/objectJsonSchema"
+        },
+        "request": {
+          "$ref": "#/$defs/request"
+        }
+      }
+    },
+    "request": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["method"],
+      "properties": {
+        "method": {
+          "enum": ["GET", "POST", "PUT", "PATCH", "DELETE"]
+        },
+        "url": {
+          "type": "string",
+          "maxLength": 4096
+        },
+        "baseUrl": {
+          "type": "string",
+          "maxLength": 4096
+        },
+        "path": {
+          "type": "string",
+          "maxLength": 4096
+        },
+        "query": {
+          "type": "object",
+          "maxProperties": 100
+        },
+        "headers": {
+          "type": "object",
+          "maxProperties": 100
+        },
+        "body": true,
+        "bodyType": {
+          "enum": ["json", "form", "text"]
+        },
+        "retry": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["statusCodes", "maxAttempts"],
+          "properties": {
+            "statusCodes": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 32,
+              "uniqueItems": true,
+              "items": {
+                "type": "integer",
+                "minimum": 100,
+                "maximum": 599
+              }
+            },
+            "maxAttempts": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 5
+            },
+            "initialDelayMs": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 30000
+            },
+            "maxDelayMs": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 60000
+            }
+          }
+        },
+        "pagination": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["strategy", "maxPages", "outputKey"],
+          "properties": {
+            "strategy": {
+              "const": "link_header"
+            },
+            "header": {
+              "type": "string",
+              "maxLength": 256
+            },
+            "maxPages": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100
+            },
+            "itemsPath": {
+              "type": "string",
+              "maxLength": 1024
+            },
+            "outputKey": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256
+            }
+          }
+        },
+        "response": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "dataPath": {
+              "type": "string",
+              "maxLength": 1024
+            },
+            "outputKey": {
+              "type": "string",
+              "maxLength": 256
+            },
+            "rateLimitHeaders": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "remaining": {
+                  "type": "string",
+                  "maxLength": 256
+                },
+                "reset": {
+                  "type": "string",
+                  "maxLength": 256
+                }
+              }
+            }
+          }
+        }
+      },
+      "oneOf": [
+        {
+          "required": ["url"],
+          "not": {
+            "anyOf": [
+              {
+                "required": ["baseUrl"]
+              },
+              {
+                "required": ["path"]
+              }
+            ]
+          }
+        },
+        {
+          "required": ["baseUrl", "path"],
+          "not": {
+            "required": ["url"]
+          }
+        }
+      ]
+    },
+    "objectJsonSchema": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/jsonSchema"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "const": "object"
+            }
+          }
+        }
+      ]
+    },
+    "jsonSchema": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type"],
+      "properties": {
+        "type": {
+          "enum": ["object", "string", "number", "integer", "boolean", "array"]
+        },
+        "properties": {
+          "type": "object",
+          "maxProperties": 200,
+          "additionalProperties": {
+            "$ref": "#/$defs/jsonSchema"
+          }
+        },
+        "required": {
+          "type": "array",
+          "maxItems": 200,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "maxLength": 256
+          }
+        },
+        "items": {
+          "$ref": "#/$defs/jsonSchema"
+        },
+        "format": {
+          "enum": ["uri", "ipv4", "date-time"]
+        },
+        "description": {
+          "type": "string",
+          "maxLength": 2048
+        },
+        "default": true,
+        "minimum": {
+          "type": "number"
+        },
+        "maximum": {
+          "type": "number"
+        },
+        "minLength": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "maxLength": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "enum": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 200,
+          "uniqueItems": true,
+          "items": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "number"
+              },
+              {
+                "type": "boolean"
+              }
+            ]
+          }
+        },
+        "additionalProperties": {
+          "type": "boolean"
+        },
+        "xUi": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "label": {
+              "type": "string",
+              "maxLength": 256
+            },
+            "placeholder": {
+              "type": "string",
+              "maxLength": 1024
+            },
+            "helpText": {
+              "type": "string",
+              "maxLength": 2048
+            },
+            "hidden": {
+              "type": "boolean"
+            },
+            "validate": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "allowedHosts": {
+                  "type": "boolean"
+                }
+              }
+            }
+          }
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "type": {
+                "const": "array"
+              }
+            }
+          },
+          "then": {
+            "required": ["items"]
+          }
+        }
+      ]
+    },
+    "contentHash": {
+      "type": "string",
+      "pattern": "^sha256:[a-f0-9]{64}$"
+    }
+  }
+}
