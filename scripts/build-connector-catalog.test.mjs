@@ -29,7 +29,8 @@ config:
   type: object
   additionalProperties: false
 auth:
-  type: none
+  types:
+    - api_key_query
 actions:
   ping:
     scope: read

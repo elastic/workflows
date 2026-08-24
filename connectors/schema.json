@@ -119,12 +119,95 @@
       }
     },
     "auth": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/connectorSpecAuth"
+        },
+        {
+          "$ref": "#/$defs/legacyAuth"
+        }
+      ]
+    },
+    "connectorSpecAuth": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["types"],
+      "properties": {
+        "types": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 16,
+          "uniqueItems": true,
+          "items": {
+            "oneOf": [
+              {
+                "$ref": "#/$defs/authTypeId"
+              },
+              {
+                "$ref": "#/$defs/authTypeDefinition"
+              }
+            ]
+          }
+        }
+      }
+    },
+    "authTypeId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128
+    },
+    "authTypeDefinition": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "defaults"],
+      "properties": {
+        "type": {
+          "$ref": "#/$defs/authTypeId"
+        },
+        "isRecommended": {
+          "type": "boolean"
+        },
+        "isLegacy": {
+          "type": "boolean"
+        },
+        "isExperimental": {
+          "type": "boolean"
+        },
+        "defaults": {
+          "type": "object",
+          "maxProperties": 64
+        },
+        "overrides": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "label": {
+              "type": "string",
+              "maxLength": 256
+            },
+            "meta": {
+              "type": "object",
+              "maxProperties": 64,
+              "additionalProperties": {
+                "type": "object",
+                "maxProperties": 32
+              }
+            }
+          }
+        },
+        "prefix": {
+          "type": "string",
+          "maxLength": 128
+        }
+      }
+    },
+    "legacyAuth": {
       "type": "object",
       "additionalProperties": false,
       "required": ["type"],
       "properties": {
         "type": {
-          "enum": ["api_key_header", "basic", "bearer", "none"]
+          "$ref": "#/$defs/authTypeId"
         },
         "header": {
           "type": "string",
