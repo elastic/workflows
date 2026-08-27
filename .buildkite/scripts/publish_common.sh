@@ -40,6 +40,39 @@ is_gcloud_not_found() {
     "${message}" == *"The following URLs matched no objects or files:"* ]]
 }
 
+is_gcloud_precondition_failed() {
+  local message=$1
+  [[ "${message}" == *"HTTPError 412"* || "${message}" == *"conditionNotMet"* ]]
+}
+
+publish_immutable_asset() {
+  local source=$1
+  local destination=$2
+  local cache_control=$3
+  local workspace=$4
+  local upload_error="${workspace}/asset-upload-error"
+  local existing_asset="${workspace}/existing-asset"
+
+  if gcloud storage cp "${source}" "${destination}" \
+    --cache-control="${cache_control}" \
+    --if-generation-match=0 2>"${upload_error}"; then
+    return
+  fi
+
+  local upload_message
+  upload_message="$(<"${upload_error}")"
+  if ! is_gcloud_precondition_failed "${upload_message}"; then
+    echo "${upload_message}" >&2
+    return 1
+  fi
+
+  gcloud storage cp "${destination}" "${existing_asset}"
+  if ! cmp -s "${source}" "${existing_asset}"; then
+    echo "Immutable asset already exists with different content: ${destination}" >&2
+    return 1
+  fi
+}
+
 authenticate_gcs_publisher() {
   echo "--- Fetch GCS publisher credentials from Vault"
   local secret_path="kv/ci-shared/workflows-library/gcs-publish"

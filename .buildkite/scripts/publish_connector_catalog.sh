@@ -6,7 +6,7 @@
 
 set -euo pipefail
 
-TARGET="${1:-prod}"
+TARGET="${1:?Usage: publish_connector_catalog.sh <prod|staging>}"
 source "$(dirname "${BASH_SOURCE[0]}")/publish_common.sh"
 
 configure_publish_target "$TARGET" "connectors/v1"
@@ -41,26 +41,25 @@ else
 fi
 
 echo "--- Publish immutable connector definitions"
-gcloud storage rsync dist/connectors/v1/connectors "gs://${BUCKET}/${DEST}/connectors" \
-  --recursive \
-  --no-clobber \
-  --cache-control="public, max-age=31536000, immutable"
+shopt -s globstar nullglob
+for asset in dist/connectors/v1/connectors/**/*; do
+  [[ -f "${asset}" ]] || continue
+  relative_path="${asset#dist/connectors/v1/}"
+  publish_immutable_asset \
+    "${asset}" \
+    "gs://${BUCKET}/${DEST}/${relative_path}" \
+    "public, max-age=31536000, immutable" \
+    "${publish_workspace}"
+done
 
-echo "--- Verify published connector definitions"
-mkdir -p "${publish_workspace}/remote/connectors"
-gcloud storage rsync \
-  "gs://${BUCKET}/${DEST}/connectors" "${publish_workspace}/remote/connectors" \
-  --recursive \
-  --checksums-only
-node scripts/verify-connector-catalog-assets.mjs \
-  dist/connectors/v1/catalog.json "${publish_workspace}/remote"
-
-echo "--- Publish schema and activate catalog"
-gcloud storage cp dist/connectors/v1/schema.json "gs://${BUCKET}/${DEST}/schema.json" \
-  --cache-control="public, max-age=300"
+echo "--- Activate catalog"
 gcloud storage cp dist/connectors/v1/catalog.json "${catalog_url}" \
   --cache-control="public, max-age=300" \
   --if-generation-match="${published_generation}"
+
+echo "--- Publish authoring schema"
+gcloud storage cp dist/connectors/v1/schema.json "gs://${BUCKET}/${DEST}/schema.json" \
+  --cache-control="public, max-age=300"
 
 echo "--- Annotate build"
 buildkite-agent annotate --style "success" --context "connector-catalog-publish" \

@@ -64,6 +64,9 @@ actions:
           type: boolean
           default: false
           description: Include reports from countries outside the top-level summary
+        someOtherParam:
+          type: string
+          description: Just to demonstrate how it all connects
     request:
       method: GET
       baseUrl: "{{ config.baseUrl }}"
@@ -72,6 +75,7 @@ actions:
         ipAddress: "{{ input.ipAddress }}"
         maxAgeInDays: "{{ input.maxAgeInDays }}"
         verbose: "{{ input.verbose }}"
+        someOtherParam: "{{ input.someOtherParam }}"
       retry:
         statusCodes:
           - 429

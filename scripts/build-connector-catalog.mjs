@@ -2,6 +2,7 @@
 
 import { createHash } from 'node:crypto';
 import { copyFile, mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+import { isIP } from 'node:net';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import Ajv2020 from 'ajv/dist/2020.js';
@@ -42,13 +43,113 @@ const resolveAssetPath = (definitionDir, relativePath) => {
   return resolved;
 };
 
+const matchesSchemaType = (value, type) => {
+  switch (type) {
+    case 'object':
+      return value !== null && typeof value === 'object' && !Array.isArray(value);
+    case 'string':
+      return typeof value === 'string';
+    case 'number':
+      return typeof value === 'number' && Number.isFinite(value);
+    case 'integer':
+      return Number.isInteger(value);
+    case 'boolean':
+      return typeof value === 'boolean';
+    case 'array':
+      return Array.isArray(value);
+    default:
+      return false;
+  }
+};
+
+const assertValueMatchesSchema = (value, definition, fieldPath, sourcePath) => {
+  if (!matchesSchemaType(value, definition.type)) {
+    throw new Error(`${sourcePath}: ${fieldPath} must match type ${definition.type}`);
+  }
+  if (definition.enum && !definition.enum.some((candidate) => Object.is(candidate, value))) {
+    throw new Error(`${sourcePath}: ${fieldPath} must match its enum`);
+  }
+  if (definition.type === 'string') {
+    if (definition.minLength !== undefined && value.length < definition.minLength) {
+      throw new Error(`${sourcePath}: ${fieldPath} is shorter than minLength`);
+    }
+    if (definition.maxLength !== undefined && value.length > definition.maxLength) {
+      throw new Error(`${sourcePath}: ${fieldPath} is longer than maxLength`);
+    }
+    if (definition.format === 'uri' && !URL.canParse(value)) {
+      throw new Error(`${sourcePath}: ${fieldPath} must be a valid URI`);
+    }
+    if (definition.format === 'ipv4' && isIP(value) !== 4) {
+      throw new Error(`${sourcePath}: ${fieldPath} must be a valid IPv4 address`);
+    }
+    if (definition.format === 'date-time' && Number.isNaN(Date.parse(value))) {
+      throw new Error(`${sourcePath}: ${fieldPath} must be a valid date-time`);
+    }
+  }
+  if (definition.type === 'number' || definition.type === 'integer') {
+    if (definition.minimum !== undefined && value < definition.minimum) {
+      throw new Error(`${sourcePath}: ${fieldPath} is less than minimum`);
+    }
+    if (definition.maximum !== undefined && value > definition.maximum) {
+      throw new Error(`${sourcePath}: ${fieldPath} is greater than maximum`);
+    }
+  }
+  if (definition.type === 'object') {
+    for (const name of definition.required ?? []) {
+      if (!(name in value)) {
+        throw new Error(`${sourcePath}: ${fieldPath} is missing required property ${name}`);
+      }
+    }
+    for (const [name, nestedValue] of Object.entries(value)) {
+      const property = definition.properties?.[name];
+      if (property) {
+        assertValueMatchesSchema(nestedValue, property, `${fieldPath}.${name}`, sourcePath);
+      } else if (definition.additionalProperties !== true) {
+        throw new Error(`${sourcePath}: ${fieldPath} contains unknown property ${name}`);
+      }
+    }
+  }
+  if (definition.type === 'array') {
+    value.forEach((item, index) =>
+      assertValueMatchesSchema(item, definition.items, `${fieldPath}[${index}]`, sourcePath)
+    );
+  }
+};
+
 const assertRuntimeCompatibleSchema = (definition, fieldPath, sourcePath) => {
+  const assertFieldsApplyToType = (fields, types) => {
+    for (const field of fields) {
+      if (definition[field] !== undefined && !types.includes(definition.type)) {
+        throw new Error(
+          `${sourcePath}: ${fieldPath}.${field} is only supported for ${types.join(' or ')} schemas`
+        );
+      }
+    }
+  };
   if (definition.type === 'array' && !definition.items) {
     throw new Error(`${sourcePath}: ${fieldPath} arrays require items`);
   }
   if (definition.type === 'object') {
-    for (const [name, property] of Object.entries(definition.properties ?? {})) {
+    const properties = definition.properties ?? {};
+    for (const name of definition.required ?? []) {
+      if (!(name in properties)) {
+        throw new Error(`${sourcePath}: ${fieldPath}.required references unknown property ${name}`);
+      }
+    }
+    for (const [name, property] of Object.entries(properties)) {
       assertRuntimeCompatibleSchema(property, `${fieldPath}.properties.${name}`, sourcePath);
+    }
+  }
+  assertFieldsApplyToType(['properties', 'required', 'additionalProperties'], ['object']);
+  assertFieldsApplyToType(['items'], ['array']);
+  assertFieldsApplyToType(['format', 'minLength', 'maxLength'], ['string']);
+  assertFieldsApplyToType(['minimum', 'maximum'], ['number', 'integer']);
+  if (definition.default !== undefined) {
+    assertValueMatchesSchema(definition.default, definition, `${fieldPath}.default`, sourcePath);
+  }
+  for (const value of definition.enum ?? []) {
+    if (!matchesSchemaType(value, definition.type)) {
+      throw new Error(`${sourcePath}: ${fieldPath}.enum values must match type ${definition.type}`);
     }
   }
   if (definition.items) {

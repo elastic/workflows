@@ -19,12 +19,16 @@ export const verifyConnectorCatalogAssets = async ({ catalog, assetRoot }) => {
     const definitionPath = resolveCatalogPath(assetRoot, entry.definitionUrl);
     const definitionRaw = await readFile(definitionPath, 'utf8');
     if (sha256(definitionRaw) !== entry.contentHash) {
-      throw new Error(`Published connector definition ${entry.id}@${entry.version} has wrong bytes`);
+      throw new Error(
+        `Published connector definition ${entry.id}@${entry.version} has wrong bytes`
+      );
     }
 
     const definition = yaml.load(definitionRaw);
     if (definition.id !== entry.id || definition.version !== entry.version) {
-      throw new Error(`Published connector definition ${entry.id}@${entry.version} has wrong identity`);
+      throw new Error(
+        `Published connector definition ${entry.id}@${entry.version} has wrong identity`
+      );
     }
 
     if (definition.metadata.icon) {

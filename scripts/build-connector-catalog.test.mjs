@@ -149,17 +149,114 @@ test('rejects schemas that Kibana cannot materialize', async (context) => {
   );
 });
 
+test('rejects required schema fields that have no property definition', async (context) => {
+  const repoRoot = await createFixture();
+  context.after(() => rm(repoRoot, { recursive: true, force: true }));
+  await writeFile(
+    path.join(repoRoot, 'connectors/test/1.0.0.yaml'),
+    definition.replace(
+      'config:\n  type: object\n  additionalProperties: false',
+      'config:\n  type: object\n  additionalProperties: false\n  required: [missing]'
+    )
+  );
+
+  await assert.rejects(
+    buildConnectorCatalog({ repoRoot }),
+    /config\.required references unknown property missing/
+  );
+});
+
+test('rejects defaults that do not match their schema type', async (context) => {
+  const repoRoot = await createFixture();
+  context.after(() => rm(repoRoot, { recursive: true, force: true }));
+  await writeFile(
+    path.join(repoRoot, 'connectors/test/1.0.0.yaml'),
+    definition.replace(
+      'config:\n  type: object\n  additionalProperties: false',
+      'config:\n  type: object\n  additionalProperties: false\n  properties:\n    retries:\n      type: integer\n      default: wrong'
+    )
+  );
+
+  await assert.rejects(
+    buildConnectorCatalog({ repoRoot }),
+    /config\.properties\.retries\.default must match type integer/
+  );
+});
+
+test('rejects defaults that violate schema constraints', async (context) => {
+  const repoRoot = await createFixture();
+  context.after(() => rm(repoRoot, { recursive: true, force: true }));
+  await writeFile(
+    path.join(repoRoot, 'connectors/test/1.0.0.yaml'),
+    definition.replace(
+      'config:\n  type: object\n  additionalProperties: false',
+      'config:\n  type: object\n  additionalProperties: false\n  properties:\n    endpoint:\n      type: string\n      format: uri\n      default: not-a-valid-url'
+    )
+  );
+
+  await assert.rejects(
+    buildConnectorCatalog({ repoRoot }),
+    /config\.properties\.endpoint\.default must be a valid URI/
+  );
+});
+
+test('rejects type-specific fields on other schema types', async (context) => {
+  const repoRoot = await createFixture();
+  context.after(() => rm(repoRoot, { recursive: true, force: true }));
+  await writeFile(
+    path.join(repoRoot, 'connectors/test/1.0.0.yaml'),
+    definition.replace(
+      'config:\n  type: object\n  additionalProperties: false',
+      'config:\n  type: object\n  additionalProperties: false\n  properties:\n    retries:\n      type: integer\n      minLength: 1'
+    )
+  );
+
+  await assert.rejects(
+    buildConnectorCatalog({ repoRoot }),
+    /config\.properties\.retries\.minLength is only supported for string schemas/
+  );
+});
+
 test('rejects changes to an already published connector version', () => {
   const published = {
     activeVersions: { '.declarative-test': '1.0.0' },
-    connectors: [{ id: '.declarative-test', version: '1.0.0', contentHash: 'sha256:old' }],
+    connectors: [
+      {
+        id: '.declarative-test',
+        version: '1.0.0',
+        definitionUrl: 'connectors/test/1.0.0.yaml',
+        contentHash: 'sha256:old',
+      },
+    ],
   };
 
   assert.throws(
     () =>
       assertConnectorCatalogIsImmutable(published, {
         activeVersions: { '.declarative-test': '1.0.0' },
-        connectors: [{ id: '.declarative-test', version: '1.0.0', contentHash: 'sha256:new' }],
+        connectors: [
+          {
+            id: '.declarative-test',
+            version: '1.0.0',
+            definitionUrl: 'connectors/test/1.0.0.yaml',
+            contentHash: 'sha256:new',
+          },
+        ],
+      }),
+    /cannot be changed/
+  );
+  assert.throws(
+    () =>
+      assertConnectorCatalogIsImmutable(published, {
+        activeVersions: { '.declarative-test': '1.0.0' },
+        connectors: [
+          {
+            id: '.declarative-test',
+            version: '1.0.0',
+            definitionUrl: 'connectors/renamed/1.0.0.yaml',
+            contentHash: 'sha256:old',
+          },
+        ],
       }),
     /cannot be changed/
   );
@@ -167,8 +264,18 @@ test('rejects changes to an already published connector version', () => {
     assertConnectorCatalogIsImmutable(published, {
       activeVersions: { '.declarative-test': '1.1.0' },
       connectors: [
-        { id: '.declarative-test', version: '1.1.0', contentHash: 'sha256:new' },
-        { id: '.declarative-test', version: '1.0.0', contentHash: 'sha256:old' },
+        {
+          id: '.declarative-test',
+          version: '1.1.0',
+          definitionUrl: 'connectors/test/1.1.0.yaml',
+          contentHash: 'sha256:new',
+        },
+        {
+          id: '.declarative-test',
+          version: '1.0.0',
+          definitionUrl: 'connectors/test/1.0.0.yaml',
+          contentHash: 'sha256:old',
+        },
       ],
     })
   );

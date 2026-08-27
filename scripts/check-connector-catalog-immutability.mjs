@@ -11,7 +11,10 @@ export const assertConnectorCatalogIsImmutable = (published, next) => {
     if (!nextEntry) {
       throw new Error(`Published connector version ${keyFor(publishedEntry)} cannot be removed`);
     }
-    if (nextEntry.contentHash !== publishedEntry.contentHash) {
+    if (
+      nextEntry.contentHash !== publishedEntry.contentHash ||
+      nextEntry.definitionUrl !== publishedEntry.definitionUrl
+    ) {
       throw new Error(`Published connector version ${keyFor(publishedEntry)} cannot be changed`);
     }
   }
