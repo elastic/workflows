@@ -1,0 +1,20 @@
+# Buildkite steps for the declarative connector catalog publisher.
+#
+# Runs on merge to `main` and publishes only when connector sources or their
+# build and publishing pipeline changed.
+steps:
+  - label: ':electric_plug: Publish connector catalog → workflows.elastic.co'
+    command: .buildkite/scripts/publish_connector_catalog.sh prod
+    timeout_in_minutes: 20
+    if_changed:
+      - 'connectors/**/*'
+      - 'scripts/build-connector-catalog.mjs'
+      - 'scripts/check-connector-catalog-immutability.mjs'
+      - 'scripts/verify-connector-catalog-assets.mjs'
+      - 'package.json'
+      - 'package-lock.json'
+      - '.buildkite/scripts/publish_connector_catalog.sh'
+      - '.buildkite/scripts/publish_common.sh'
+      - '.buildkite/pipelines/publish_connector_catalog.yml'
+    agents:
+      image: 'docker.elastic.co/ci-agent-images/kibana/chainguard-nodejs-20'
