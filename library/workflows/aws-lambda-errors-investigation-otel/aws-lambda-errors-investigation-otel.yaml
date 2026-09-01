@@ -28,27 +28,24 @@ consts:
   baseline_lookend: "20 minutes"
   incident_lookback: "20 minutes"
 
-# Inputs are optional: manual runs supply them; alert-triggered runs resolve them
-# from the alert payload in the `resolve` step below.
-inputs:
-  - name: function_name
-    type: string
-    description: >-
-      Lambda FunctionName of the alerting function (e.g. fis-worker-fns-0).
-      Manual runs must supply it; alert-triggered runs derive it from the alert.
-    required: false
-  - name: alert_timestamp
-    type: string
-    description: >-
-      ISO8601 timestamp of the alert firing. Manual runs must supply it;
-      alert-triggered runs derive it from the alert.
-    required: false
-
 # The alert trigger fires only when a rule is connected to this workflow via the
 # "Run Workflow" rule action (.workflows system connector). Configure that action
 # with summaryMode:false so each run carries exactly ONE alert in event.alerts.
 triggers:
   - type: manual
+    inputs:
+      - name: function_name
+        type: string
+        description: >-
+          Lambda FunctionName of the alerting function (e.g. fis-worker-fns-0).
+          Manual runs must supply it; alert-triggered runs derive it from the alert.
+        required: false
+      - name: alert_timestamp
+        type: string
+        description: >-
+          ISO8601 timestamp of the alert firing. Manual runs must supply it;
+          alert-triggered runs derive it from the alert.
+        required: false
   - type: alert
 
 steps:

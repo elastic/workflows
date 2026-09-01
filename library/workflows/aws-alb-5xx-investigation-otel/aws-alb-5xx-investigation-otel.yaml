@@ -35,41 +35,31 @@ consts:
   baseline_lookend: "20 minutes"
   incident_lookback: "20 minutes"
 
-# Inputs are optional: manual runs supply them; alert-triggered runs resolve them
-# from the alert payload in the `resolve` step below.
-inputs:
-  - name: load_balancer
-    type: string
-    description: >-
-      ApplicationELB dimension of the alerting ALB (e.g. app/fis-demo-fleet-alb/<id>).
-      Manual runs must supply it; alert-triggered runs derive it from the alert.
-    required: false
-  - name: service_name
-    type: string
-    description: >-
-      The service behind the ALB target group (e.g. gateway).
-    required: false
-  - name: alert_timestamp
-    type: string
-    description: >-
-      ISO8601 timestamp of the alert firing. Manual runs must supply it;
-      alert-triggered runs derive it from the alert.
-    required: false
-
 # The alert trigger fires only when a rule is connected to this workflow via the
 # "Run Workflow" rule action (.workflows system connector). Configure that action
 # with summaryMode:false so each run carries exactly ONE alert in event.alerts.
 triggers:
   - type: manual
+    inputs:
+      - name: load_balancer
+        type: string
+        description: >-
+          ApplicationELB dimension of the alerting ALB (e.g. app/fis-demo-fleet-alb/<id>).
+          Manual runs must supply it; alert-triggered runs derive it from the alert.
+        required: false
+      - name: service_name
+        type: string
+        description: >-
+          The service behind the ALB target group (e.g. gateway).
+        required: false
+      - name: alert_timestamp
+        type: string
+        description: >-
+          ISO8601 timestamp of the alert firing. Manual runs must supply it;
+          alert-triggered runs derive it from the alert.
+        required: false
   - type: alert
 
-# SPARSE-METRIC DISCIPLINE (learned on a live alert-triggered run): CloudWatch omits
-# zero-valued counters entirely, so a per-code or error-count field is UNMAPPED in
-# Elastic until the first such error ever occurs — and ES|QL fails verification on any
-# unknown column, killing the whole query. Therefore: the REQUIRED evidence step below
-# references only dense fields (RequestCount / TargetResponseTime), and every sparse
-# family gets its OWN on-failure:continue step. A failed/empty sparse step means "no
-# such errors ever observed on this LB" — that is itself a finding, never a failure.
 steps:
   # 0. Resolve the target + timestamp: manual inputs win; otherwise the triggering
   #    alert's structured group-by fields (kibana.alert.grouping.*) name the resource

@@ -39,33 +39,6 @@ consts:
   # Incident window padding around the alert timestamp.
   incident_lookback: "20 minutes"
 
-# Inputs are optional: manual runs supply them; alert-triggered runs resolve them
-# from the alert payload in the `resolve` step below.
-inputs:
-  - name: db_instance_identifier
-    type: string
-    description: >-
-      RDS DBInstanceIdentifier of the alerting database (e.g. fis-orders-db-...).
-      Manual runs must supply it; alert-triggered runs derive it from the alert.
-    required: false
-  - name: service_name
-    type: string
-    description: >-
-      Application service that depends on the database (e.g. orders).
-    required: false
-  - name: load_balancer
-    type: string
-    description: >-
-      ApplicationELB dimension of the fronting ALB
-      (e.g. app/fis-demo-fleet-alb/<id>) for the 5xx cascade check.
-    required: false
-  - name: alert_timestamp
-    type: string
-    description: >-
-      ISO8601 timestamp of the alert firing. Manual runs must supply it;
-      alert-triggered runs derive it from the alert.
-    required: false
-
 # The alert trigger fires only when a rule is connected to this workflow via the
 # "Run Workflow" rule action (.workflows system connector). Configure that action
 # with summaryMode:false so each run carries exactly ONE alert in event.alerts —
@@ -73,6 +46,30 @@ inputs:
 # unrelated resources) and only the first would be investigated.
 triggers:
   - type: manual
+    inputs:
+      - name: db_instance_identifier
+        type: string
+        description: >-
+          RDS DBInstanceIdentifier of the alerting database (e.g. fis-orders-db-...).
+          Manual runs must supply it; alert-triggered runs derive it from the alert.
+        required: false
+      - name: service_name
+        type: string
+        description: >-
+          Application service that depends on the database (e.g. orders).
+        required: false
+      - name: load_balancer
+        type: string
+        description: >-
+          ApplicationELB dimension of the fronting ALB
+          (e.g. app/fis-demo-fleet-alb/<id>) for the 5xx cascade check.
+        required: false
+      - name: alert_timestamp
+        type: string
+        description: >-
+          ISO8601 timestamp of the alert firing. Manual runs must supply it;
+          alert-triggered runs derive it from the alert.
+        required: false
   - type: alert
 
 steps:
