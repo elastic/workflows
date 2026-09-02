@@ -536,3 +536,20 @@ steps:
 
         Do not add commentary outside this format.
       maxLength: 1500
+
+  # =========================================================================
+  # STEP 6 — Expose the result as the workflow output
+  # =========================================================================
+  # Surface the RCA as the workflow's output (status / resource / classification /
+  # summary) so it appears in the execution Overview and is consumable by callers or
+  # composed workflows — consistent with the aws-*-investigation-otel templates.
+  # Without this, the summary is reachable only by opening the synthesize_findings step.
+  - name: output_result
+    type: workflow.output
+    with:
+      status: "investigated"
+      pod: "{{ steps.resolve_inputs.output.pod_name }}"
+      namespace: "{{ steps.resolve_inputs.output.namespace }}"
+      service: "{{ steps.resolve_inputs.output.service_name }}"
+      classification: "{{ steps.set_term_reason.output.term_reason }}"
+      summary: "{{ steps.synthesize_findings.output.content }}"
