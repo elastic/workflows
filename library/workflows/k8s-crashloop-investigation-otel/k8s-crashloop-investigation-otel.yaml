@@ -67,6 +67,15 @@ steps:
   # Kibana "Workflows" alert action instead delivers the alert as
   # event.alerts[*] (no input mapping). Take the named input when present,
   # else fall back to the alert event's grouping fields.
+  #
+  # The grouping-field paths below are not arbitrary: an alert rule's group-by keys are
+  # surfaced on the event under `kibana.alert.grouping.<field>`, and the field names used
+  # here — k8s.pod.name, k8s.container.name, k8s.namespace.name — are the OTel Kubernetes
+  # semantic-convention resource attributes:
+  #   https://opentelemetry.io/docs/specs/semconv/resource/k8s/
+  # The EDOT / kube-stack ingest path sets these on every k8s signal, and the shipped
+  # CrashLoopBackOff / OOMKilled rules group by them, so a triggering alert surfaces them
+  # at exactly these paths. If a rule groups on different fields, adjust these defaults.
   - name: resolve_inputs
     type: data.set
     with:
@@ -76,13 +85,10 @@ steps:
       # Empty (not MISSING) when unset, so the ES|QL anchor below falls back to NOW() for ad-hoc runs.
       alert_timestamp: "{{ inputs.alert_timestamp | default: event.alerts[0].kibana.alert.start | default: '' }}"
 
-  # Guard: surface whether the required identifiers resolved. If either pod or namespace is
-  # MISSING, downstream WHERE clauses match nothing, so the run degrades to a clean
-  # "insufficient data" RCA rather than a silent empty-string match.
-  - name: validate_inputs
-    type: data.set
-    with:
-      inputs_resolved: "{% if steps.resolve_inputs.output.pod_name == 'MISSING' or steps.resolve_inputs.output.namespace == 'MISSING' %}false{% else %}true{% endif %}"
+  # (The "inputs resolved?" guard is not a separate step: it gates no control flow —
+  # if pod/namespace are MISSING the WHERE clauses simply match nothing and the run
+  # degrades to a clean "insufficient data" RCA — so it is computed inline in the final
+  # synthesis prompt below rather than in its own data.set step.)
 
   # =========================================================================
   # STEP 1 — Characterize the triggering event
@@ -435,7 +441,7 @@ steps:
         ### Alert
         Alert timestamp: {{ steps.resolve_inputs.output.alert_timestamp }} (empty = ad-hoc "triage now" run)
         Pod: {{ steps.resolve_inputs.output.pod_name }}
-        Inputs resolved: {{ steps.validate_inputs.output.inputs_resolved }}
+        Inputs resolved: {% if steps.resolve_inputs.output.pod_name == 'MISSING' or steps.resolve_inputs.output.namespace == 'MISSING' %}false{% else %}true{% endif %}
 
         ### Step 1 — Pod characterization
         Restart data: {{ steps.characterize_restarts.output | json }}
