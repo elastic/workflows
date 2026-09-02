@@ -1,0 +1,548 @@
+# Retrieves the MITRE ATT&CK tactics/techniques GTI observed for a file hash
+# across its sandboxes and indexes the full response. When run against an
+# alert (paths 1/2) it also writes a summary note and an alert tag; a
+# standalone run (path 3) only indexes.
+version: '1'
+name: GTI MITRE ATT&CK Techniques
+description: >-
+  Retrieve the MITRE ATT&CK tactics and techniques Google Threat Intelligence
+  observed for a file hash, grouped by sandbox. Indexes the full response and
+  summarises it on the triggering alert.
+enabled: true
+
+tags:
+  - security
+  - threat-intel
+  - google-threat-intelligence
+  - mitre-attack
+
+consts:
+  gti_connector_id: REPLACE_WITH_GTI_CONNECTOR_ID
+  index: gti-soar-mitre-attack
+  # Alert fields checked in order; a value repeated across fields is enriched once.
+  # Default example fields - please update according to your own needs.
+  observable_fields: ["file.hash.sha256", "process.hash.sha256", "dll.hash.sha256"]
+  gti_ui_base: https://www.virustotal.com/gui/file
+  empty_arr: []
+  # Documented value set is HIGH/MEDIUM/LOW/INFO/UNKNOWN; the ordering itself
+  # is a local choice (UNKNOWN ranked lowest - no severity assigned, not benign).
+  severity_rank: "UNKNOWN,INFO,LOW,MEDIUM,HIGH"
+
+triggers:
+  - type: alert
+  - type: manual
+    inputs:
+      - name: file_hash
+        type: string
+        required: false
+        description: >-
+          SHA-256, SHA-1 or MD5 hash. Leave blank when running against an alert,
+          the hash is read from the alert instead.
+      - name: alert_index
+        type: string
+        required: false
+        description: >-
+          Concrete alert index to annotate. Filled in automatically when the
+          workflow is started from the alert table or flyout.
+      - name: alert_id
+        type: string
+        required: false
+        description: >-
+          Alert document _id to annotate. Filled in automatically when the
+          workflow is started from the alert table or flyout.
+
+steps:
+
+  # Self-provisions this workflow's index template so mapping settings apply
+  # before the first real write, rather than relying on manual setup.
+  - name: bootstrap_index_template
+    type: elasticsearch.request
+    with:
+      method: PUT
+      path: "_index_template/{{ consts.index }}"
+      body:
+        index_patterns: ["{{ consts.index }}"]
+        priority: 500
+        template:
+          settings:
+            index.mapping.total_fields.limit: 2000
+            index.mapping.total_fields.ignore_dynamic_beyond_limit: true
+            index.mapping.ignore_malformed: true
+    on-failure:
+      continue: true
+
+  - name: resolve_target_doc
+    type: data.set
+    with:
+      target_index: "{{ event.alerts[0]._index | default: inputs.alert_index }}"
+      target_id: "{{ event.alerts[0]._id | default: inputs.alert_id }}"
+      rule_id: "{{ event.rule.id }}"
+      rule_name: "{{ event.rule.name | default: 'Manual run' }}"
+
+  # execution.triggeredBy is the reliable discriminator; event.rule is populated on both paths 1 and 2.
+  - name: classify_trigger
+    type: data.set
+    with:
+      trigger_mode: "{% if execution.triggeredBy == 'alert' %}detection_rule{% elsif variables.target_id != blank %}manual_with_alert{% else %}manual_standalone{% endif %}"
+
+  # Only runs when there's an alert to annotate; falls back to plain text in the note if this fails.
+  - name: find_data_view
+    if: "${{ variables.target_id != blank }}"
+    type: kibana.request
+    with:
+      method: GET
+      path: /api/data_views
+    on-failure:
+      continue: true
+
+  - name: check_data_view
+    type: data.set
+    with:
+      existing_data_view_id: |-
+        {%- assign hit = '' -%}
+        {%- for v in steps.find_data_view.output.data_view -%}
+          {%- if v.title == consts.index -%}{%- assign hit = v.id -%}{%- break -%}{%- endif -%}
+        {%- endfor -%}
+        {{ hit }}
+
+  # Duplicate create returns 400, not 409, so on-failure:continue absorbs a race safely.
+  - name: create_data_view
+    if: "${{ variables.target_id != blank and variables.existing_data_view_id == blank }}"
+    type: kibana.request
+    with:
+      method: POST
+      path: /api/data_views/data_view
+      headers:
+        kbn-xsrf: "true"
+        Content-Type: application/json
+      body:
+        data_view:
+          id: "{{ consts.index }}"
+          title: "{{ consts.index }}"
+          name: "{{ consts.index }}"
+          timeFieldName: "@timestamp"
+          allowNoIndex: true
+    on-failure:
+      continue: true
+
+  - name: resolve_data_view
+    type: data.set
+    with:
+      data_view_id: |-
+        {%- if variables.existing_data_view_id != blank -%}{{ variables.existing_data_view_id }}
+        {%- elsif steps.create_data_view.output.data_view.id != blank -%}{{ steps.create_data_view.output.data_view.id }}
+        {%- endif -%}
+
+  # Length check because the connector validates fileHash against a SHA-256/1/MD5 regex.
+  - name: build_targets
+    type: data.parseJson
+    source: |-
+      [
+      {%- assign sep = '' -%}
+      {%- if event.alerts[0] != blank -%}
+        {%- assign fields = consts.observable_fields -%}
+        {%- assign seen = consts.empty_arr -%}
+        {%- for f in fields -%}
+          {%- assign parts = f | strip | split: '.' -%}
+          {%- assign node = event.alerts[0] -%}
+          {%- for p in parts -%}{%- assign node = node[p] -%}{%- endfor -%}
+          {%- if node != blank -%}
+            {%- assign len = node | size -%}
+            {%- if len == 32 or len == 40 or len == 64 -%}
+              {%- unless seen contains node -%}
+                {{ sep }}{"field":"{{ f | strip }}","value":"{{ node }}"}
+                {%- assign sep = ',' -%}
+                {%- assign seen = seen | push: node -%}
+              {%- endunless -%}
+            {%- endif -%}
+          {%- endif -%}
+        {%- endfor -%}
+      {%- elsif inputs.file_hash != blank -%}
+        {"field":"manual","value":"{{ inputs.file_hash | strip }}"}
+      {%- endif -%}
+      ]
+    with: {}
+
+  - name: no_targets
+    type: if
+    condition: "${{ steps.build_targets.output.size == 0 }}"
+    steps:
+      - name: log_no_targets
+        type: console
+        with:
+          message: >-
+            No usable file hash found. Checked {{ consts.observable_fields | join: ', ' }} on
+            the alert and the file_hash input. Nothing to look up.
+
+  - name: enrich_each_hash
+    type: foreach
+    foreach: "${{ steps.build_targets.output }}"
+    steps:
+
+      - name: stash_observable
+        type: data.set
+        with:
+          observable: "{{ foreach.item.value }}"
+          field_name: "{{ foreach.item.field }}"
+          doc_id: "{{ variables.target_id | default: 'manual' | append: '-' | append: foreach.item.value | sha256 }}"
+          failure_doc_id: "{{ variables.target_id | default: 'manual' | append: '-' | append: foreach.item.value | append: '-run-summary' | sha256 }}"
+
+      - name: get_mitre_techniques
+        type: google_threat_intelligence.getFileMitreAttackTechniques
+        connector-id: "{{ consts.gti_connector_id }}"
+        with:
+          fileHash: "{{ foreach.item.value }}"
+        on-failure:
+          retry:
+            max-attempts: 2
+            delay: 3s
+          continue: true
+
+      - name: skip_on_fetch_error
+        type: if
+        condition: "${{ steps.get_mitre_techniques.error != blank }}"
+        steps:
+          - name: log_fetch_error
+            type: console
+            with:
+              message: |-
+                STATUS: failed - GTI getFileMitreAttackTechniques failed for {{ variables.field_name }} ({{ variables.observable }}).
+                {{ steps.get_mitre_techniques.error | json }}
+
+          - name: write_fetch_failure
+            type: elasticsearch.index
+            with:
+              index: "{{ consts.index }}"
+              id: "{{ variables.failure_doc_id }}"
+              document:
+                "@timestamp": "{{ execution.startedAt | date: '%Y-%m-%dT%H:%M:%S.%L%z' }}"
+                event:
+                  kind: enrichment
+                  category: threat
+                  dataset: gti_soar.mitre_attack
+                  outcome: failure
+                doc_type: fetch_failure
+                error:
+                  message: "{{ steps.get_mitre_techniques.error.message }}"
+                  type: "{{ steps.get_mitre_techniques.error.type }}"
+                observable:
+                  type: file_hash
+                  field: "{{ variables.field_name }}"
+                  value: "{{ variables.observable }}"
+                trigger_mode: "{{ variables.trigger_mode }}"
+                kibana:
+                  alert:
+                    uuid: "{{ variables.target_id }}"
+                    index: "{{ variables.target_index }}"
+                rule:
+                  id: "{{ variables.rule_id }}"
+                  name: "{{ variables.rule_name }}"
+                workflow:
+                  execution_id: "{{ execution.id }}"
+            on-failure:
+              continue: true
+
+          # Path 1/2 only - a standalone run has no alert to annotate.
+          - name: annotate_alert_failure
+            type: if
+            condition: "${{ variables.target_id != blank }}"
+            steps:
+              - name: find_existing_note_failure
+                type: kibana.request
+                with:
+                  method: GET
+                  path: /api/note
+                  query:
+                    documentIds: "{{ variables.target_id }}"
+                on-failure:
+                  continue: true
+
+              - name: build_failure_doc_link
+                type: data.set
+                with:
+                  failure_doc_link: |-
+                    {%- if variables.data_view_id != blank -%}
+                      {%- assign sp = '' -%}
+                      {%- if workflow.spaceId != blank and workflow.spaceId != 'default' -%}{%- assign sp = '/s/' | append: workflow.spaceId -%}{%- endif -%}
+                      {{ sp }}/app/discover#/doc/{{ variables.data_view_id }}/{{ consts.index }}?id={{ variables.failure_doc_id }}
+                    {%- endif -%}
+
+              # Same marker the success-path note uses, so this replaces it in place.
+              - name: prepare_failure_note
+                type: data.set
+                with:
+                  existing_note_id: |-
+                    {%- assign marker = 'GTI ATT&CK: ' | append: variables.observable -%}
+                    {%- for n in steps.find_existing_note_failure.output.notes -%}
+                      {%- if n.note contains marker -%}{{ n.noteId }}{%- endif -%}
+                    {%- endfor -%}
+                  note_text: |-
+                    ## GTI ATT&CK: {{ variables.observable }}
+
+                    _Managed by the GTI MITRE ATT&CK workflow. This note is replaced on every run; record your own analysis in a separate note._
+
+                    Observed on `{{ variables.field_name }}` - [View file on GTI]({{ consts.gti_ui_base }}/{{ variables.observable }})
+                    Run [{{ workflow.name }}:{{ execution.id }}]({{ execution.url }})
+
+                    ---
+
+                    > **STATUS: failed.** The last refresh attempt could not retrieve data from GTI.
+                    > `{{ steps.get_mitre_techniques.error.message }}`
+                    > See the indexed failure record for detail: {% if variables.failure_doc_link != blank %}[open in Discover](<{{ variables.failure_doc_link }}>){% else %}index `{{ consts.index }}`, document
+                    ```
+                    {{ variables.failure_doc_id }}
+                    ```
+                    {% endif %}
+
+              - name: write_failure_note
+                type: if
+                condition: "${{ variables.existing_note_id != blank }}"
+                steps:
+                  - name: update_failure_note
+                    type: kibana.request
+                    with:
+                      method: PATCH
+                      path: /api/note
+                      headers:
+                        kbn-xsrf: "true"
+                        Content-Type: application/json
+                      body:
+                        noteId: "{{ variables.existing_note_id }}"
+                        note:
+                          eventId: "{{ variables.target_id }}"
+                          timelineId: ""
+                          note: "{{ variables.note_text }}"
+                    on-failure:
+                      continue: true
+                else:
+                  - name: create_failure_note
+                    type: kibana.request
+                    with:
+                      method: PATCH
+                      path: /api/note
+                      headers:
+                        kbn-xsrf: "true"
+                        Content-Type: application/json
+                      body:
+                        note:
+                          eventId: "{{ variables.target_id }}"
+                          timelineId: ""
+                          note: "{{ variables.note_text }}"
+                    on-failure:
+                      continue: true
+
+          - name: skip_iteration
+            type: loop.continue
+
+      # Response has no attributes wrapper - data is keyed directly by sandbox
+      # name, so a Liquid loop yields [name, tree] pairs.
+      - name: stash_iter
+        type: data.set
+        with:
+          mitre: "${{ steps.get_mitre_techniques.output.data }}"
+          observable: "{{ foreach.item.value }}"
+          field_name: "{{ foreach.item.field }}"
+          doc_id: "{{ variables.target_id | default: 'manual' | append: '-' | append: foreach.item.value | sha256 }}"
+
+      - name: summarise
+        type: data.set
+        with:
+          sandbox_count: "{%- assign n = 0 -%}{%- for s in variables.mitre -%}{%- assign n = n | plus: 1 -%}{%- endfor -%}{{ n }}"
+          # Distinct counts - the same technique routinely appears under several tactics/sandboxes.
+          tactic_count: |-
+            {%- assign seen = consts.empty_arr -%}{%- assign n = 0 -%}
+            {%- for s in variables.mitre -%}{%- for t in s[1].tactics -%}
+              {%- unless seen contains t.id -%}{%- assign n = n | plus: 1 -%}{%- assign seen = seen | push: t.id -%}{%- endunless -%}
+            {%- endfor -%}{%- endfor -%}{{ n }}
+          technique_count: |-
+            {%- assign seen = consts.empty_arr -%}{%- assign n = 0 -%}
+            {%- for s in variables.mitre -%}{%- for t in s[1].tactics -%}{%- for tech in t.techniques -%}
+              {%- unless seen contains tech.id -%}{%- assign n = n | plus: 1 -%}{%- assign seen = seen | push: tech.id -%}{%- endunless -%}
+            {%- endfor -%}{%- endfor -%}{%- endfor -%}{{ n }}
+          technique_occurrences: "{%- assign n = 0 -%}{%- for s in variables.mitre -%}{%- for t in s[1].tactics -%}{%- assign n = n | plus: t.techniques.size -%}{%- endfor -%}{%- endfor -%}{{ n }}"
+          technique_ids: |-
+            {%- assign seen = consts.empty_arr -%}{%- assign sep = '' -%}
+            {%- for s in variables.mitre -%}{%- for t in s[1].tactics -%}{%- for tech in t.techniques -%}
+              {%- unless seen contains tech.id -%}
+                {{ sep }}{{ tech.id }}{%- assign sep = ', ' -%}{%- assign seen = seen | push: tech.id -%}
+              {%- endunless -%}
+            {%- endfor -%}{%- endfor -%}{%- endfor -%}
+          # Highest signature severity anywhere in the tree, by consts.severity_rank.
+          max_severity: |-
+            {%- assign order = consts.severity_rank | split: ',' -%}{%- assign maxi = 0 -%}
+            {%- for s in variables.mitre -%}{%- for t in s[1].tactics -%}{%- for tech in t.techniques -%}
+              {%- for sig in tech.signatures -%}
+                {%- for o in order -%}
+                  {%- if o == sig.severity and forloop.index0 > maxi -%}{%- assign maxi = forloop.index0 -%}{%- endif -%}
+                {%- endfor -%}
+              {%- endfor -%}
+            {%- endfor -%}{%- endfor -%}{%- endfor -%}
+            {%- assign resolved_severity = order[maxi] -%}
+            {{ resolved_severity }}
+
+      - name: skip_when_empty
+        type: if
+        condition: "${{ variables.technique_count == '0' }}"
+        steps:
+          - name: log_empty
+            type: console
+            with:
+              message: >-
+                GTI has no ATT&CK tree for {{ variables.observable }}; the file
+                is known but has not been detonated. Nothing written.
+          - name: skip_empty_iteration
+            type: loop.continue
+
+      - name: index_enrichment
+        type: elasticsearch.index
+        with:
+          index: "{{ consts.index }}"
+          id: "{{ variables.doc_id }}"
+          document:
+            "@timestamp": "{{ execution.startedAt | date: '%Y-%m-%dT%H:%M:%S.%L%z' }}"
+            event:
+              kind: enrichment
+              category: threat
+              dataset: gti_soar.mitre_attack
+            observable:
+              type: file_hash
+              field: "{{ variables.field_name }}"
+              value: "{{ variables.observable }}"
+            trigger_mode: "{{ variables.trigger_mode }}"
+            kibana:
+              alert:
+                uuid: "{{ variables.target_id }}"
+                index: "{{ variables.target_index }}"
+            rule:
+              id: "{{ variables.rule_id }}"
+              name: "{{ variables.rule_name }}"
+            workflow:
+              execution_id: "{{ execution.id }}"
+            summary:
+              sandbox_count: "${{ variables.sandbox_count | plus: 0 }}"
+              tactic_count: "${{ variables.tactic_count | plus: 0 }}"
+              technique_count: "${{ variables.technique_count | plus: 0 }}"
+              technique_occurrences: "${{ variables.technique_occurrences | plus: 0 }}"
+              max_severity: "{{ variables.max_severity }}"
+              technique_ids: "{{ variables.technique_ids }}"
+            gti: "${{ steps.get_mitre_techniques.output.data }}"
+        on-failure:
+          continue: true
+
+      # Paths 1/2 only, and only once the document actually exists.
+      - name: annotate_alert
+        type: if
+        condition: "${{ variables.target_id != blank and steps.index_enrichment.error == blank }}"
+        steps:
+
+          - name: find_existing_note
+            type: kibana.request
+            with:
+              method: GET
+              path: /api/note
+              query:
+                documentIds: "{{ variables.target_id }}"
+            on-failure:
+              continue: true
+
+          - name: build_doc_link
+            type: data.set
+            with:
+              doc_link: |-
+                {%- if variables.data_view_id != blank -%}
+                  {%- assign sp = '' -%}
+                  {%- if workflow.spaceId != blank and workflow.spaceId != 'default' -%}{%- assign sp = '/s/' | append: workflow.spaceId -%}{%- endif -%}
+                  {{ sp }}/app/discover#/doc/{{ variables.data_view_id }}/{{ consts.index }}?id={{ variables.doc_id }}
+                {%- endif -%}
+
+          - name: prepare_note
+            type: data.set
+            with:
+              existing_note_id: |-
+                {%- assign marker = 'GTI ATT&CK: ' | append: variables.observable -%}
+                {%- for n in steps.find_existing_note.output.notes -%}
+                  {%- if n.note contains marker -%}{{ n.noteId }}{%- endif -%}
+                {%- endfor -%}
+              note_text: |-
+                ## GTI ATT&CK: {{ variables.observable }}
+
+                _Managed by the GTI MITRE ATT&CK workflow. This note is replaced on every run; record your own analysis in a separate note._
+
+                Observed on `{{ variables.field_name }}` - [View file on GTI]({{ consts.gti_ui_base }}/{{ variables.observable }})
+                Run [{{ workflow.name }}:{{ execution.id }}]({{ execution.url }})
+
+                ---
+
+                **{{ variables.technique_count }} unique technique(s) across {{ variables.tactic_count }} tactic(s), observed in {{ variables.sandbox_count }} sandbox(es). Highest signature severity {{ variables.max_severity }}.**
+
+                {% for sandbox in variables.mitre %}### Sandbox: {{ sandbox[0] }}
+
+                {% for tactic in sandbox[1].tactics %}**[{{ tactic.name }}]({{ tactic.link }})** `{{ tactic.id }}`
+                {% for technique in tactic.techniques %}{%- assign order = consts.severity_rank | split: ',' -%}{%- assign sigs = technique.signatures | default: consts.empty_arr -%}{%- assign maxi = 0 -%}{%- for sig in sigs -%}{%- for o in order -%}{%- if o == sig.severity and forloop.index0 > maxi -%}{%- assign maxi = forloop.index0 -%}{%- endif -%}{%- endfor -%}{%- endfor -%}- [{{ technique.name }}]({{ technique.link }}) `{{ technique.id }}`{% assign resolved_severity = order[maxi] %} - {% if sigs.size > 0 %}{{ sigs.size }} signature(s), highest severity **{{ resolved_severity }}**{% else %}no signatures{% endif %}
+                {% endfor %}
+                {% endfor %}
+                {% endfor %}
+                ---
+                {% if variables.doc_link != blank %}Full response: [open the stored document in Discover](<{{ variables.doc_link }}>){% else %}Full response in index `{{ consts.index }}`, document
+                ```
+                {{ variables.doc_id }}
+                ```
+                {% endif %}
+
+          - name: write_note
+            type: if
+            condition: "${{ variables.existing_note_id != blank }}"
+            steps:
+              - name: update_note
+                type: kibana.request
+                with:
+                  method: PATCH
+                  path: /api/note
+                  headers:
+                    kbn-xsrf: "true"
+                    Content-Type: application/json
+                  body:
+                    noteId: "{{ variables.existing_note_id }}"
+                    note:
+                      eventId: "{{ variables.target_id }}"
+                      timelineId: ""
+                      note: "{{ variables.note_text }}"
+                on-failure:
+                  continue: true
+            else:
+              - name: create_note
+                type: kibana.request
+                with:
+                  method: PATCH
+                  path: /api/note
+                  headers:
+                    kbn-xsrf: "true"
+                    Content-Type: application/json
+                  body:
+                    note:
+                      eventId: "{{ variables.target_id }}"
+                      timelineId: ""
+                      note: "{{ variables.note_text }}"
+                on-failure:
+                  continue: true
+
+          - name: tag_alert
+            type: security.setAlertTags
+            with:
+              alert_ids: "{{ variables.target_id }}"
+              tags_to_add:
+                - "gti:mitre-attack"
+            on-failure:
+              continue: true
+
+      # Path 3: no alert to annotate.
+      - name: report_standalone
+        type: if
+        condition: "${{ variables.target_id == blank }}"
+        steps:
+          - name: log_document_reference
+            type: console
+            with:
+              message: |-
+                STATUS: succeeded - GTI ATT&CK for {{ variables.observable }}: {{ variables.technique_count }} technique(s) across {{ variables.sandbox_count }} sandbox(es).
+                Indexed to {{ consts.index }} / {{ variables.doc_id }}
