@@ -1,0 +1,997 @@
+# Submits a URL to Google Threat Intelligence for a public analysis, polls
+# until the analysis completes, then retrieves and indexes the full report.
+# Paths 1/2 also write a summary note and an alert tag; path 3 only indexes.
+# Unlike GTI URL Report, this one submits new content to GTI rather than
+# reading an already-computed verdict, so it chains three actions (submit,
+# poll, retrieve) instead of one. Public sibling of GTI URL Scan (Private) -
+# same pipeline shape, minus the six private-only optional parameters, plus a
+# real public GTI GUI link the private workflow deliberately doesn't have.
+version: '1'
+name: GTI URL Scan (Public)
+description: >-
+  Submit a URL to Google Threat Intelligence for public analysis, poll until
+  the scan completes, then retrieve and index the full report. Summarises the
+  result on the triggering alert.
+enabled: true
+
+tags:
+  - security
+  - threat-intel
+  - google-threat-intelligence
+  - url-scan-public
+
+consts:
+  gti_connector_id: REPLACE_WITH_GTI_CONNECTOR_ID
+  index: gti-soar-url-scan-public
+  # Alert fields checked in order; a value repeated across fields is enriched once.
+  # Default example fields - please update according to your own needs.
+  observable_fields: ["url.full", "url.original"]
+  gti_ui_base: https://www.virustotal.com/gui/url
+  empty_arr: []
+
+triggers:
+  - type: alert
+  - type: manual
+    inputs:
+      - name: url
+        type: string
+        required: false
+        description: >-
+          URL in its natural form, e.g. "https://example.com/path". Leave
+          blank when running against an alert, the URL is read from the
+          alert instead.
+      - name: alert_index
+        type: string
+        required: false
+        description: >-
+          Concrete alert index to annotate. Filled in automatically when the
+          workflow is started from the alert table or flyout.
+      - name: alert_id
+        type: string
+        required: false
+        description: >-
+          Alert document _id to annotate. Filled in automatically when the
+          workflow is started from the alert table or flyout.
+
+steps:
+
+  # Self-provisions this workflow's index template so mapping settings apply
+  # before the first real write, rather than relying on manual setup.
+  - name: bootstrap_index_template
+    type: elasticsearch.request
+    with:
+      method: PUT
+      path: "_index_template/{{ consts.index }}"
+      body:
+        index_patterns: ["{{ consts.index }}"]
+        priority: 500
+        template:
+          settings:
+            index.mapping.total_fields.limit: 2000
+            index.mapping.total_fields.ignore_dynamic_beyond_limit: true
+            index.mapping.ignore_malformed: true
+    on-failure:
+      continue: true
+
+  - name: resolve_target_doc
+    type: data.set
+    with:
+      target_index: "{{ event.alerts[0]._index | default: inputs.alert_index }}"
+      target_id: "{{ event.alerts[0]._id | default: inputs.alert_id }}"
+      rule_id: "{{ event.rule.id }}"
+      rule_name: "{{ event.rule.name | default: 'Manual run' }}"
+
+  # execution.triggeredBy is the reliable discriminator; event.rule is populated on both paths 1 and 2.
+  - name: classify_trigger
+    type: data.set
+    with:
+      trigger_mode: "{% if execution.triggeredBy == 'alert' %}detection_rule{% elsif variables.target_id != blank %}manual_with_alert{% else %}manual_standalone{% endif %}"
+
+  # Only runs when there's an alert to annotate; falls back to plain text in the note if this fails.
+  - name: find_data_view
+    if: "${{ variables.target_id != blank }}"
+    type: kibana.request
+    with:
+      method: GET
+      path: /api/data_views
+    on-failure:
+      continue: true
+
+  - name: check_data_view
+    type: data.set
+    with:
+      existing_data_view_id: |-
+        {%- assign hit = '' -%}
+        {%- for v in steps.find_data_view.output.data_view -%}
+          {%- if v.title == consts.index -%}{%- assign hit = v.id -%}{%- break -%}{%- endif -%}
+        {%- endfor -%}
+        {{ hit }}
+
+  # Duplicate create returns 400, not 409, so on-failure:continue absorbs a race safely.
+  - name: create_data_view
+    if: "${{ variables.target_id != blank and variables.existing_data_view_id == blank }}"
+    type: kibana.request
+    with:
+      method: POST
+      path: /api/data_views/data_view
+      headers:
+        kbn-xsrf: "true"
+        Content-Type: application/json
+      body:
+        data_view:
+          id: "{{ consts.index }}"
+          title: "{{ consts.index }}"
+          name: "{{ consts.index }}"
+          timeFieldName: "@timestamp"
+          allowNoIndex: true
+    on-failure:
+      continue: true
+
+  - name: resolve_data_view
+    type: data.set
+    with:
+      data_view_id: |-
+        {%- if variables.existing_data_view_id != blank -%}{{ variables.existing_data_view_id }}
+        {%- elsif steps.create_data_view.output.data_view.id != blank -%}{{ steps.create_data_view.output.data_view.id }}
+        {%- endif -%}
+
+  - name: build_targets
+    type: data.parseJson
+    source: |-
+      [
+      {%- assign sep = '' -%}
+      {%- if event.alerts[0] != blank -%}
+        {%- assign fields = consts.observable_fields -%}
+        {%- assign seen = consts.empty_arr -%}
+        {%- for f in fields -%}
+          {%- assign parts = f | strip | split: '.' -%}
+          {%- assign node = event.alerts[0] -%}
+          {%- for p in parts -%}{%- assign node = node[p] -%}{%- endfor -%}
+          {%- if node != blank -%}
+            {%- unless seen contains node -%}
+              {{ sep }}{"field":"{{ f | strip }}","value":"{{ node }}"}
+              {%- assign sep = ',' -%}
+              {%- assign seen = seen | push: node -%}
+            {%- endunless -%}
+          {%- endif -%}
+        {%- endfor -%}
+      {%- elsif inputs.url != blank -%}
+        {"field":"manual","value":"{{ inputs.url | strip }}"}
+      {%- endif -%}
+      ]
+    with: {}
+
+  - name: no_targets
+    type: if
+    condition: "${{ steps.build_targets.output.size == 0 }}"
+    steps:
+      - name: log_no_targets
+        type: console
+        with:
+          message: >-
+            No usable URL found. Checked {{ consts.observable_fields | join: ', ' }} on
+            the alert and the url input. Nothing to scan.
+
+  - name: scan_each_url
+    type: foreach
+    foreach: "${{ steps.build_targets.output }}"
+    steps:
+
+      - name: stash_observable
+        type: data.set
+        with:
+          observable: "{{ foreach.item.value }}"
+          field_name: "{{ foreach.item.field }}"
+          doc_id: "{{ variables.target_id | default: 'manual' | append: '-' | append: foreach.item.value | sha256 }}"
+          failure_doc_id: "{{ variables.target_id | default: 'manual' | append: '-' | append: foreach.item.value | append: '-run-summary' | sha256 }}"
+
+      # --- 1. Submit ------------------------------------------------------
+      # scanUrl takes only `url` - no optional parameters, unlike scanPrivateUrl.
+      - name: submit_scan
+        type: google_threat_intelligence.scanUrl
+        connector-id: "{{ consts.gti_connector_id }}"
+        with:
+          url: "{{ variables.observable }}"
+        on-failure:
+          retry:
+            max-attempts: 2
+            delay: 3s
+          continue: true
+
+      - name: submission_failed
+        type: if
+        condition: "${{ steps.submit_scan.error != blank or steps.submit_scan.output.data.id == blank }}"
+        steps:
+          - name: log_submission_error
+            type: console
+            with:
+              message: |-
+                STATUS: failed - GTI scanUrl failed for {{ variables.field_name }} ({{ variables.observable }}).
+                {{ steps.submit_scan.error | json }}
+
+          - name: write_submission_failure
+            type: elasticsearch.index
+            with:
+              index: "{{ consts.index }}"
+              id: "{{ variables.failure_doc_id }}"
+              document:
+                "@timestamp": "{{ execution.startedAt | date: '%Y-%m-%dT%H:%M:%S.%L%z' }}"
+                event:
+                  kind: enrichment
+                  category: threat
+                  dataset: gti_soar.url_scan_public
+                  outcome: failure
+                doc_type: fetch_failure
+                error:
+                  message: "{{ steps.submit_scan.error.message }}"
+                  type: "{{ steps.submit_scan.error.type }}"
+                observable:
+                  type: url
+                  field: "{{ variables.field_name }}"
+                  value: "{{ variables.observable }}"
+                trigger_mode: "{{ variables.trigger_mode }}"
+                kibana:
+                  alert:
+                    uuid: "{{ variables.target_id }}"
+                    index: "{{ variables.target_index }}"
+                rule:
+                  id: "{{ variables.rule_id }}"
+                  name: "{{ variables.rule_name }}"
+                workflow:
+                  execution_id: "{{ execution.id }}"
+            on-failure:
+              continue: true
+
+          # Path 1/2 only - a standalone run has no alert to annotate.
+          - name: annotate_alert_submission_failure
+            type: if
+            condition: "${{ variables.target_id != blank }}"
+            steps:
+              - name: find_existing_note_submission_failure
+                type: kibana.request
+                with:
+                  method: GET
+                  path: /api/note
+                  query:
+                    documentIds: "{{ variables.target_id }}"
+                on-failure:
+                  continue: true
+
+              - name: prepare_submission_failure_note
+                type: data.set
+                with:
+                  existing_note_id: |-
+                    {%- assign marker = 'GTI URL Scan (Public): ' | append: variables.observable -%}
+                    {%- for n in steps.find_existing_note_submission_failure.output.notes -%}
+                      {%- if n.note contains marker -%}{{ n.noteId }}{%- endif -%}
+                    {%- endfor -%}
+                  note_text: |-
+                    ## GTI URL Scan (Public): {{ variables.observable }}
+
+                    _Managed by the GTI URL Scan (Public) workflow. This note is replaced on every run; record your own analysis in a separate note._
+
+                    Observed on `{{ variables.field_name }}` - [View URL on GTI]({{ consts.gti_ui_base }}/{%- if variables.url_report_id != blank -%}{{ variables.url_report_id }}{%- else -%}{{ variables.observable | sha256 }}{%- endif -%})
+                    Run [{{ workflow.name }}:{{ execution.id }}]({{ execution.url }})
+
+                    ---
+
+                    > **STATUS: failed.** The scan could not be submitted to GTI.
+                    > `{{ steps.submit_scan.error.message }}`
+                    > See the indexed failure record for detail: index `{{ consts.index }}`, document
+                    ```
+                    {{ variables.failure_doc_id }}
+                    ```
+
+              - name: write_submission_failure_note
+                type: if
+                condition: "${{ variables.existing_note_id != blank }}"
+                steps:
+                  - name: update_submission_failure_note
+                    type: kibana.request
+                    with:
+                      method: PATCH
+                      path: /api/note
+                      headers:
+                        kbn-xsrf: "true"
+                        Content-Type: application/json
+                      body:
+                        noteId: "{{ variables.existing_note_id }}"
+                        note:
+                          eventId: "{{ variables.target_id }}"
+                          timelineId: ""
+                          note: "{{ variables.note_text }}"
+                    on-failure:
+                      continue: true
+                else:
+                  - name: create_submission_failure_note
+                    type: kibana.request
+                    with:
+                      method: PATCH
+                      path: /api/note
+                      headers:
+                        kbn-xsrf: "true"
+                        Content-Type: application/json
+                      body:
+                        note:
+                          eventId: "{{ variables.target_id }}"
+                          timelineId: ""
+                          note: "{{ variables.note_text }}"
+                    on-failure:
+                      continue: true
+
+          - name: skip_iteration_on_submission_failure
+            type: loop.continue
+
+      # --- 2. Poll ----------------------------------------------------
+      # Same shape as GTI URL Scan (Private), including both live-caught fixes
+      # from that workflow applied from the start here: poll immediately, wait
+      # only if still not done, gated by an explicit `if` on the tracked id,
+      # max-iterations 60 at a 10s interval (10-minute ceiling, modeled on
+      # Censys's shipped Rescan workflow) - and getAnalysis's meta.url_info.id
+      # is read as a sibling of data, not nested under it, from the start.
+      - name: init_polling
+        type: data.set
+        with:
+          analysis_id: "{{ steps.submit_scan.output.data.id }}"
+          scan_status: ""
+          url_report_id: ""
+
+      - name: poll_scan_status_gate
+        type: if
+        condition: "${{ variables.analysis_id != blank }}"
+        steps:
+          - name: poll_until_complete
+            type: while
+            # queued / in-progress / blank (not yet reported) keep polling;
+            # anything else - completed, poll_error, or any status word GTI
+            # might add later that this workflow doesn't recognize - stops
+            # the loop rather than spinning on an unrecognized value.
+            condition: "${{ variables.scan_status == '' or variables.scan_status == 'queued' or variables.scan_status == 'in-progress' }}"
+            max-iterations: 60   # literal only (see rescan.yaml); keep this and the note text below in sync
+            steps:
+              - name: get_analysis
+                type: google_threat_intelligence.getAnalysis
+                connector-id: "{{ consts.gti_connector_id }}"
+                with:
+                  analysisId: "{{ variables.analysis_id }}"
+                on-failure:
+                  retry:
+                    max-attempts: 2
+                    delay: 3s
+                  continue: true
+
+              - name: record_poll_success
+                type: if
+                condition: "${{ steps.get_analysis.error == blank }}"
+                steps:
+                  - name: stash_status
+                    type: data.set
+                    with:
+                      scan_status: "{{ steps.get_analysis.output.data.attributes.status }}"
+                      url_report_id: "{{ steps.get_analysis.output.meta.url_info.id | default: variables.url_report_id }}"
+
+              - name: record_poll_error
+                type: if
+                condition: "${{ steps.get_analysis.error != blank }}"
+                steps:
+                  - name: stash_poll_error
+                    type: data.set
+                    with:
+                      scan_status: "poll_error"
+                      poll_error_message: "{{ steps.get_analysis.error.message }}"
+                      poll_error_type: "{{ steps.get_analysis.error.type }}"
+
+              - name: wait_if_not_done
+                type: if
+                condition: "${{ variables.scan_status == 'queued' or variables.scan_status == 'in-progress' }}"
+                steps:
+                  - name: wait_between_polls
+                    type: wait
+                    with:
+                      duration: 10s
+
+      # --- 3. Retrieve, only if the poll loop reached a usable completion -
+      - name: classify_poll_outcome
+        type: data.set
+        with:
+          # "completed but no meta.url_info.id" is treated the same as
+          # "still pending" (falls to the else branch below) rather than as
+          # its own error case - conservative on purpose.
+          scan_outcome: |-
+            {%- if variables.scan_status == 'completed' and variables.url_report_id != blank -%}ready
+            {%- elsif variables.scan_status == 'poll_error' -%}error
+            {%- else -%}pending
+            {%- endif -%}
+
+      - name: retrieve_report
+        type: if
+        condition: "${{ variables.scan_outcome == 'ready' }}"
+        steps:
+          - name: get_url_scan_report
+            type: google_threat_intelligence.getUrlScanReport
+            connector-id: "{{ consts.gti_connector_id }}"
+            with:
+              urlId: "{{ variables.url_report_id }}"
+            on-failure:
+              retry:
+                max-attempts: 2
+                delay: 3s
+              continue: true
+
+          - name: stash_retrieval_success
+            type: if
+            condition: "${{ steps.get_url_scan_report.error == blank }}"
+            steps:
+              - name: stash_attrs
+                type: data.set
+                with:
+                  attrs: "${{ steps.get_url_scan_report.output.data.attributes }}"
+                  retrieval_ok: true
+
+          - name: stash_retrieval_error
+            type: if
+            condition: "${{ steps.get_url_scan_report.error != blank }}"
+            steps:
+              - name: stash_retrieval_error_detail
+                type: data.set
+                with:
+                  retrieval_ok: false
+                  retrieval_error_message: "{{ steps.get_url_scan_report.error.message }}"
+                  retrieval_error_type: "{{ steps.get_url_scan_report.error.type }}"
+
+      - name: compute_run_status
+        type: data.set
+        with:
+          run_status: |-
+            {%- if variables.scan_outcome == 'ready' and variables.retrieval_ok == true -%}succeeded
+            {%- elsif variables.scan_outcome == 'error' or variables.retrieval_ok == false -%}failed
+            {%- else -%}partial
+            {%- endif -%}
+
+      - name: log_run_status
+        type: console
+        with:
+          message: |-
+            STATUS: {{ variables.run_status }} - GTI URL Scan (Public) for {{ variables.observable }}. Analysis id: {{ variables.analysis_id }}. Last poll status: {{ variables.scan_status }}.
+
+      # --- 4a. failed: run-summary doc, failure note, no tag, skip rest ---
+      - name: handle_failed
+        type: if
+        condition: "${{ variables.run_status == 'failed' }}"
+        steps:
+          - name: write_run_summary_failed
+            type: elasticsearch.index
+            with:
+              index: "{{ consts.index }}"
+              id: "{{ variables.failure_doc_id }}"
+              document:
+                "@timestamp": "{{ execution.startedAt | date: '%Y-%m-%dT%H:%M:%S.%L%z' }}"
+                event:
+                  kind: enrichment
+                  category: threat
+                  dataset: gti_soar.url_scan_public
+                  outcome: failure
+                doc_type: fetch_failure
+                error:
+                  message: "{{ variables.poll_error_message | default: variables.retrieval_error_message }}"
+                  type: "{{ variables.poll_error_type | default: variables.retrieval_error_type }}"
+                observable:
+                  type: url
+                  field: "{{ variables.field_name }}"
+                  value: "{{ variables.observable }}"
+                trigger_mode: "{{ variables.trigger_mode }}"
+                kibana:
+                  alert:
+                    uuid: "{{ variables.target_id }}"
+                    index: "{{ variables.target_index }}"
+                rule:
+                  id: "{{ variables.rule_id }}"
+                  name: "{{ variables.rule_name }}"
+                workflow:
+                  execution_id: "{{ execution.id }}"
+                scan:
+                  analysis_id: "{{ variables.analysis_id }}"
+                  last_status: "{{ variables.scan_status }}"
+            on-failure:
+              continue: true
+
+          - name: annotate_alert_failed
+            type: if
+            condition: "${{ variables.target_id != blank }}"
+            steps:
+              - name: find_existing_note_failed
+                type: kibana.request
+                with:
+                  method: GET
+                  path: /api/note
+                  query:
+                    documentIds: "{{ variables.target_id }}"
+                on-failure:
+                  continue: true
+
+              - name: build_failure_doc_link
+                type: data.set
+                with:
+                  failure_doc_link: |-
+                    {%- if variables.data_view_id != blank -%}
+                      {%- assign sp = '' -%}
+                      {%- if workflow.spaceId != blank and workflow.spaceId != 'default' -%}{%- assign sp = '/s/' | append: workflow.spaceId -%}{%- endif -%}
+                      {{ sp }}/app/discover#/doc/{{ variables.data_view_id }}/{{ consts.index }}?id={{ variables.failure_doc_id }}
+                    {%- endif -%}
+
+              - name: prepare_failed_note
+                type: data.set
+                with:
+                  existing_note_id: |-
+                    {%- assign marker = 'GTI URL Scan (Public): ' | append: variables.observable -%}
+                    {%- for n in steps.find_existing_note_failed.output.notes -%}
+                      {%- if n.note contains marker -%}{{ n.noteId }}{%- endif -%}
+                    {%- endfor -%}
+                  note_text: |-
+                    ## GTI URL Scan (Public): {{ variables.observable }}
+
+                    _Managed by the GTI URL Scan (Public) workflow. This note is replaced on every run; record your own analysis in a separate note._
+
+                    Observed on `{{ variables.field_name }}` - [View URL on GTI]({{ consts.gti_ui_base }}/{%- if variables.url_report_id != blank -%}{{ variables.url_report_id }}{%- else -%}{{ variables.observable | sha256 }}{%- endif -%})
+                    Run [{{ workflow.name }}:{{ execution.id }}]({{ execution.url }})
+
+                    ---
+
+                    > **STATUS: failed.** Analysis id `{{ variables.analysis_id }}`. {% if variables.scan_outcome == 'error' %}Polling GTI for this analysis's status failed.{% else %}Retrieving the completed report from GTI failed.{% endif %}
+                    > `{{ variables.poll_error_message | default: variables.retrieval_error_message }}`
+                    > See the indexed failure record for detail: {% if variables.failure_doc_link != blank %}[open in Discover](<{{ variables.failure_doc_link }}>){% else %}index `{{ consts.index }}`, document
+                    ```
+                    {{ variables.failure_doc_id }}
+                    ```
+                    {% endif %}
+
+              - name: write_failed_note
+                type: if
+                condition: "${{ variables.existing_note_id != blank }}"
+                steps:
+                  - name: update_failed_note
+                    type: kibana.request
+                    with:
+                      method: PATCH
+                      path: /api/note
+                      headers:
+                        kbn-xsrf: "true"
+                        Content-Type: application/json
+                      body:
+                        noteId: "{{ variables.existing_note_id }}"
+                        note:
+                          eventId: "{{ variables.target_id }}"
+                          timelineId: ""
+                          note: "{{ variables.note_text }}"
+                    on-failure:
+                      continue: true
+                else:
+                  - name: create_failed_note
+                    type: kibana.request
+                    with:
+                      method: PATCH
+                      path: /api/note
+                      headers:
+                        kbn-xsrf: "true"
+                        Content-Type: application/json
+                      body:
+                        note:
+                          eventId: "{{ variables.target_id }}"
+                          timelineId: ""
+                          note: "{{ variables.note_text }}"
+                    on-failure:
+                      continue: true
+
+          - name: skip_iteration_on_failure
+            type: loop.continue
+
+      # --- 4b. partial: run-summary doc, "still processing" note, tagged --
+      - name: handle_partial
+        type: if
+        condition: "${{ variables.run_status == 'partial' }}"
+        steps:
+          - name: write_run_summary_partial
+            type: elasticsearch.index
+            with:
+              index: "{{ consts.index }}"
+              id: "{{ variables.failure_doc_id }}"
+              document:
+                "@timestamp": "{{ execution.startedAt | date: '%Y-%m-%dT%H:%M:%S.%L%z' }}"
+                event:
+                  kind: enrichment
+                  category: threat
+                  dataset: gti_soar.url_scan_public
+                  outcome: failure
+                doc_type: fetch_failure
+                error:
+                  message: ""
+                  type: ""
+                observable:
+                  type: url
+                  field: "{{ variables.field_name }}"
+                  value: "{{ variables.observable }}"
+                trigger_mode: "{{ variables.trigger_mode }}"
+                kibana:
+                  alert:
+                    uuid: "{{ variables.target_id }}"
+                    index: "{{ variables.target_index }}"
+                rule:
+                  id: "{{ variables.rule_id }}"
+                  name: "{{ variables.rule_name }}"
+                workflow:
+                  execution_id: "{{ execution.id }}"
+                scan:
+                  analysis_id: "{{ variables.analysis_id }}"
+                  last_status: "{{ variables.scan_status }}"
+                  timed_out: true
+            on-failure:
+              continue: true
+
+          - name: annotate_alert_partial
+            type: if
+            condition: "${{ variables.target_id != blank }}"
+            steps:
+              - name: find_existing_note_partial
+                type: kibana.request
+                with:
+                  method: GET
+                  path: /api/note
+                  query:
+                    documentIds: "{{ variables.target_id }}"
+                on-failure:
+                  continue: true
+
+              - name: prepare_partial_note
+                type: data.set
+                with:
+                  existing_note_id: |-
+                    {%- assign marker = 'GTI URL Scan (Public): ' | append: variables.observable -%}
+                    {%- for n in steps.find_existing_note_partial.output.notes -%}
+                      {%- if n.note contains marker -%}{{ n.noteId }}{%- endif -%}
+                    {%- endfor -%}
+                  note_text: |-
+                    ## GTI URL Scan (Public): {{ variables.observable }}
+
+                    _Managed by the GTI URL Scan (Public) workflow. This note is replaced on every run; record your own analysis in a separate note._
+
+                    Observed on `{{ variables.field_name }}` - [View URL on GTI]({{ consts.gti_ui_base }}/{%- if variables.url_report_id != blank -%}{{ variables.url_report_id }}{%- else -%}{{ variables.observable | sha256 }}{%- endif -%})
+                    Run [{{ workflow.name }}:{{ execution.id }}]({{ execution.url }})
+
+                    ---
+
+                    > **STATUS: partial.** The scan was submitted successfully (analysis id `{{ variables.analysis_id }}`), but GTI had not finished analyzing it after 60 status checks (~10 minutes). Last known status: `{{ variables.scan_status }}`. This is not a failure - GTI may still be working on it. Re-run this workflow later to check again, or poll `getAnalysis`/`getUrlScanReport` directly with this analysis id.
+                    > Indexed to `{{ consts.index }}`, document
+                    ```
+                    {{ variables.failure_doc_id }}
+                    ```
+
+              - name: write_partial_note
+                type: if
+                condition: "${{ variables.existing_note_id != blank }}"
+                steps:
+                  - name: update_partial_note
+                    type: kibana.request
+                    with:
+                      method: PATCH
+                      path: /api/note
+                      headers:
+                        kbn-xsrf: "true"
+                        Content-Type: application/json
+                      body:
+                        noteId: "{{ variables.existing_note_id }}"
+                        note:
+                          eventId: "{{ variables.target_id }}"
+                          timelineId: ""
+                          note: "{{ variables.note_text }}"
+                    on-failure:
+                      continue: true
+                else:
+                  - name: create_partial_note
+                    type: kibana.request
+                    with:
+                      method: PATCH
+                      path: /api/note
+                      headers:
+                        kbn-xsrf: "true"
+                        Content-Type: application/json
+                      body:
+                        note:
+                          eventId: "{{ variables.target_id }}"
+                          timelineId: ""
+                          note: "{{ variables.note_text }}"
+                    on-failure:
+                      continue: true
+
+              # Real work happened - a scan was genuinely submitted and is in flight -
+              # so this still gets tagged, same as a paginated workflow's partial batch.
+              - name: tag_alert_partial
+                type: security.setAlertTags
+                with:
+                  alert_ids: "{{ variables.target_id }}"
+                  tags_to_add:
+                    - "gti:url-scan-public"
+                on-failure:
+                  continue: true
+
+          - name: standalone_log_partial
+            type: if
+            condition: "${{ variables.target_id == blank }}"
+            steps:
+              - name: log_partial_standalone
+                type: console
+                with:
+                  message: |-
+                    STATUS: partial - GTI still processing {{ variables.observable }} after 60 status checks (~10 minutes). Analysis id: {{ variables.analysis_id }}. Re-run later or poll directly with this id.
+
+          - name: skip_iteration_on_partial
+            type: loop.continue
+
+      # --- 4c. succeeded: full report, index, note, tag ------------------
+      # categories is a vendor-name-keyed map, flattened via entries so a new
+      # vendor never grows this summary block's own field count.
+      #
+      # has_analysis_stats/has_reputation/has_votes gate the note the same
+      # defensive way GTI URL Scan (Private) does - carried over from the
+      # start here rather than re-discovered, since whether a fresh public
+      # scan populates these fields any faster than a private one is not
+      # assumed true without its own live check (see
+      # gti-workflow-url-scan.md §3).
+      - name: summarise
+        type: data.set
+        with:
+          verdict: "{{ variables.attrs.gti_assessment.verdict.value | default: 'UNKNOWN' }}"
+          severity: "{{ variables.attrs.gti_assessment.severity.value | default: 'UNKNOWN' }}"
+          threat_score: "{{ variables.attrs.gti_assessment.threat_score.value | default: 0 }}"
+          description: "{{ variables.attrs.gti_assessment.description | replace: '\n', ' ' | replace: '  ', ' ' | strip }}"
+          has_analysis_stats: "${{ variables.attrs.last_analysis_stats != blank }}"
+          malicious_count: "{{ variables.attrs.last_analysis_stats.malicious | default: 0 }}"
+          suspicious_count: "{{ variables.attrs.last_analysis_stats.suspicious | default: 0 }}"
+          harmless_count: "{{ variables.attrs.last_analysis_stats.harmless | default: 0 }}"
+          undetected_count: "{{ variables.attrs.last_analysis_stats.undetected | default: 0 }}"
+          last_analysis_date: "{{ variables.attrs.last_analysis_date }}"
+          has_reputation: "${{ variables.attrs.reputation != blank }}"
+          reputation: "{{ variables.attrs.reputation | default: 0 }}"
+          has_votes: "${{ variables.attrs.total_votes != blank }}"
+          votes_harmless: "{{ variables.attrs.total_votes.harmless | default: 0 }}"
+          votes_malicious: "{{ variables.attrs.total_votes.malicious | default: 0 }}"
+          title: "{{ variables.attrs.title }}"
+          tld: "{{ variables.attrs.tld }}"
+          web_category: "{{ variables.attrs.web_category }}"
+          tags: "${{ variables.attrs.tags }}"
+          threat_names: "${{ variables.attrs.threat_names | default: consts.empty_arr }}"
+          crowdsourced_context: "${{ variables.attrs.crowdsourced_context | default: consts.empty_arr }}"
+          categories_list: |-
+            {%- assign cats = variables.attrs.categories | default: consts.empty_arr | entries -%}
+            {%- for pair in cats -%}
+              {%- if forloop.first == false %}, {% endif -%}{{ pair.key }}: {{ pair.value }}
+            {%- endfor -%}
+
+      - name: index_scan_result
+        type: if
+        condition: "${{ variables.run_status == 'succeeded' }}"
+        steps:
+          - name: index_enrichment
+            type: elasticsearch.index
+            with:
+              index: "{{ consts.index }}"
+              id: "{{ variables.doc_id }}"
+              document:
+                "@timestamp": "{{ execution.startedAt | date: '%Y-%m-%dT%H:%M:%S.%L%z' }}"
+                event:
+                  kind: enrichment
+                  category: threat
+                  dataset: gti_soar.url_scan_public
+                observable:
+                  type: url
+                  field: "{{ variables.field_name }}"
+                  value: "{{ variables.observable }}"
+                trigger_mode: "{{ variables.trigger_mode }}"
+                kibana:
+                  alert:
+                    uuid: "{{ variables.target_id }}"
+                    index: "{{ variables.target_index }}"
+                rule:
+                  id: "{{ variables.rule_id }}"
+                  name: "{{ variables.rule_name }}"
+                workflow:
+                  execution_id: "{{ execution.id }}"
+                scan:
+                  analysis_id: "{{ variables.analysis_id }}"
+                  private: "${{ variables.attrs.private | default: false }}"
+                summary:
+                  verdict: "{{ variables.verdict }}"
+                  severity: "{{ variables.severity }}"
+                  description: "{{ variables.description }}"
+                  threat_score: "${{ variables.threat_score | plus: 0 }}"
+                  # false, not just an absent field, so "engines haven't run yet" is distinguishable
+                  # from "confirmed 0 detections" without having to compare against last_analysis_date too.
+                  analysis_stats_available: "${{ variables.has_analysis_stats }}"
+                  reputation_available: "${{ variables.has_reputation }}"
+                  votes_available: "${{ variables.has_votes }}"
+                  malicious_count: "${{ variables.malicious_count | plus: 0 }}"
+                  suspicious_count: "${{ variables.suspicious_count | plus: 0 }}"
+                  harmless_count: "${{ variables.harmless_count | plus: 0 }}"
+                  undetected_count: "${{ variables.undetected_count | plus: 0 }}"
+                  last_analysis_date: "{{ variables.last_analysis_date | date: '%Y-%m-%dT%H:%M:%S.%L%z' }}"
+                  reputation: "${{ variables.reputation | plus: 0 }}"
+                  votes_harmless: "${{ variables.votes_harmless | plus: 0 }}"
+                  votes_malicious: "${{ variables.votes_malicious | plus: 0 }}"
+                  title: "{{ variables.title }}"
+                  tld: "{{ variables.tld }}"
+                  web_category: "{{ variables.web_category }}"
+                  categories: "{{ variables.categories_list }}"
+                  tags: "${{ variables.tags }}"
+                  threat_names: "${{ variables.threat_names }}"
+                  crowdsourced_context: "${{ variables.crowdsourced_context }}"
+                gti: "${{ steps.get_url_scan_report.output.data }}"
+            on-failure:
+              continue: true
+
+          # Paths 1/2 only, and only once the document actually exists.
+          - name: annotate_alert_succeeded
+            type: if
+            condition: "${{ variables.target_id != blank and steps.index_enrichment.error == blank }}"
+            steps:
+
+              - name: find_existing_note_succeeded
+                type: kibana.request
+                with:
+                  method: GET
+                  path: /api/note
+                  query:
+                    documentIds: "{{ variables.target_id }}"
+                on-failure:
+                  continue: true
+
+              - name: build_doc_link
+                type: data.set
+                with:
+                  doc_link: |-
+                    {%- if variables.data_view_id != blank -%}
+                      {%- assign sp = '' -%}
+                      {%- if workflow.spaceId != blank and workflow.spaceId != 'default' -%}{%- assign sp = '/s/' | append: workflow.spaceId -%}{%- endif -%}
+                      {{ sp }}/app/discover#/doc/{{ variables.data_view_id }}/{{ consts.index }}?id={{ variables.doc_id }}
+                    {%- endif -%}
+
+              - name: prepare_succeeded_note
+                type: data.set
+                with:
+                  existing_note_id: |-
+                    {%- assign marker = 'GTI URL Scan (Public): ' | append: variables.observable -%}
+                    {%- for n in steps.find_existing_note_succeeded.output.notes -%}
+                      {%- if n.note contains marker -%}{{ n.noteId }}{%- endif -%}
+                    {%- endfor -%}
+                  note_text: |-
+                    ## GTI URL Scan (Public): {{ variables.observable }}
+
+                    _Managed by the GTI URL Scan (Public) workflow. This note is replaced on every run; record your own analysis in a separate note._
+
+                    Observed on `{{ variables.field_name }}` - [View URL on GTI]({{ consts.gti_ui_base }}/{%- if variables.url_report_id != blank -%}{{ variables.url_report_id }}{%- else -%}{{ variables.observable | sha256 }}{%- endif -%})
+                    Run [{{ workflow.name }}:{{ execution.id }}]({{ execution.url }})
+
+                    ---
+
+                    **STATUS: succeeded.**
+
+                    ### Scan submission
+                    - **Analysis id:** {{ variables.analysis_id }}
+
+                    ### Assessment
+                    - **Verdict:** {{ variables.verdict }}
+                    - **Severity:** {{ variables.severity }}
+                    - **Threat score:** {{ variables.threat_score }}
+                    {%- if variables.has_reputation %}
+                    - **Reputation:** {{ variables.reputation }}
+                    {%- endif %}
+                    {%- if variables.description != blank %}
+                    - **GTI summary:** {{ variables.description }}
+                    {%- endif %}
+
+                    ### Detection
+                    {%- if variables.has_analysis_stats %}
+                    - **Last analysis:** {{ variables.malicious_count }} malicious, {{ variables.suspicious_count }} suspicious, {{ variables.harmless_count }} harmless, {{ variables.undetected_count }} undetected{% if variables.last_analysis_date != blank %} (as of {{ variables.last_analysis_date | date: '%Y-%m-%d' }}){% endif %}
+                    {%- else %}
+                    - **Multi-engine analysis:** not yet available - GTI has not completed third-party engine analysis for this scan yet. The verdict above is GTI's own assessment only; re-run this workflow later or check GTI directly for updated engine results.
+                    {%- endif %}
+                    {%- if variables.has_votes %}
+                    - **Community votes:** {{ variables.votes_harmless | default: 0 }} harmless, {{ variables.votes_malicious | default: 0 }} malicious
+                    {%- endif %}
+                    {%- if variables.threat_names.size > 0 %}
+                    - **Threat names:** {{ variables.threat_names | join: ', ' }}
+                    {%- endif %}
+                    {%- if variables.title != blank or variables.web_category != blank %}
+
+                    ### URL info
+                    {%- if variables.title != blank %}
+                    - **Page title:** {{ variables.title }}
+                    {%- endif %}
+                    {%- if variables.web_category != blank %}
+                    - **Web category:** {{ variables.web_category }}
+                    {%- endif %}
+                    {%- if variables.tld != blank %}
+                    - **TLD:** {{ variables.tld }}
+                    {%- endif %}
+                    {%- endif %}
+                    {%- if variables.categories_list != blank %}
+
+                    ### Categories
+                    - {{ variables.categories_list }}
+                    {%- endif %}
+                    {%- if variables.tags.size > 0 %}
+
+                    ### Tags
+                    - {{ variables.tags | join: ', ' }}
+                    {%- endif %}
+                    {%- if variables.crowdsourced_context.size > 0 %}
+
+                    ### Community context
+                    {%- for c in variables.crowdsourced_context %}
+                    {%- assign detail_line = c.details | replace: '\n', ' ' | replace: '  ', ' ' | strip %}
+                    - **{{ c.title }}** ({{ c.severity | default: 'unknown' }} severity, via {{ c.source }}){% if c.timestamp != blank %}, {{ c.timestamp | date: '%Y-%m-%d' }}{% endif %}: {{ detail_line }}
+                    {%- endfor %}
+                    {%- endif %}
+
+                    ---
+                    {% if variables.doc_link != blank %}Full response: [open the stored document in Discover](<{{ variables.doc_link }}>){% else %}Full response in index `{{ consts.index }}`, document
+                    ```
+                    {{ variables.doc_id }}
+                    ```
+                    {% endif %}
+
+              - name: write_succeeded_note
+                type: if
+                condition: "${{ variables.existing_note_id != blank }}"
+                steps:
+                  - name: update_succeeded_note
+                    type: kibana.request
+                    with:
+                      method: PATCH
+                      path: /api/note
+                      headers:
+                        kbn-xsrf: "true"
+                        Content-Type: application/json
+                      body:
+                        noteId: "{{ variables.existing_note_id }}"
+                        note:
+                          eventId: "{{ variables.target_id }}"
+                          timelineId: ""
+                          note: "{{ variables.note_text }}"
+                    on-failure:
+                      continue: true
+                else:
+                  - name: create_succeeded_note
+                    type: kibana.request
+                    with:
+                      method: PATCH
+                      path: /api/note
+                      headers:
+                        kbn-xsrf: "true"
+                        Content-Type: application/json
+                      body:
+                        note:
+                          eventId: "{{ variables.target_id }}"
+                          timelineId: ""
+                          note: "{{ variables.note_text }}"
+                    on-failure:
+                      continue: true
+
+              - name: tag_alert_succeeded
+                type: security.setAlertTags
+                with:
+                  alert_ids: "{{ variables.target_id }}"
+                  tags_to_add:
+                    - "gti:url-scan-public"
+                on-failure:
+                  continue: true
+
+          # Path 3: no alert to annotate.
+          - name: report_standalone
+            type: if
+            condition: "${{ variables.target_id == blank }}"
+            steps:
+              - name: log_document_reference
+                type: console
+                with:
+                  message: |-
+                    STATUS: succeeded - GTI URL scan (public) for {{ variables.observable }}: verdict {{ variables.verdict }}, severity {{ variables.severity }}.
+                    Indexed to {{ consts.index }} / {{ variables.doc_id }}

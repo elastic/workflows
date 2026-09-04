@@ -1,0 +1,659 @@
+# Retrieves GTI sandbox detonation reports for a file hash, paging until GTI
+# has no more to give, and indexes every report as its own document. When
+# run against an alert (paths 1/2) it also writes one summary note (one
+# section per report) and an alert tag; a standalone run (path 3) only
+# indexes.
+version: '1'
+name: GTI File Sandbox Behaviour
+description: >-
+  Retrieve Google Threat Intelligence sandbox detonation reports for a file
+  hash, paging until GTI has no more to give. Indexes every report as its own
+  document and summarises the whole fetched batch on the triggering alert.
+enabled: true
+
+tags:
+  - security
+  - threat-intel
+  - google-threat-intelligence
+  - file-sandbox
+
+consts:
+  gti_connector_id: REPLACE_WITH_GTI_CONNECTOR_ID
+  index: gti-soar-file-behaviour
+  # Alert fields checked in order; a value repeated across fields is enriched once.
+  # Default example fields - please update according to your own needs.
+  observable_fields: ["file.hash.sha256", "process.hash.sha256", "dll.hash.sha256"]
+  gti_ui_base: https://www.virustotal.com/gui/file
+  empty_arr: []
+  page_size: 40
+  # processes_tree excluded - it's recursive, a flat size count would undercount.
+  behaviour_activity_fields: "processes_created,processes_terminated,files_opened,files_written,registry_keys_set,registry_keys_opened,mutexes_created,modules_loaded,dns_lookups,command_executions,windows_hidden,mitre_attack_techniques,signature_matches,mbc"
+
+triggers:
+  - type: alert
+  - type: manual
+    inputs:
+      - name: file_hash
+        type: string
+        required: false
+        description: >-
+          SHA-256, SHA-1 or MD5 hash. Leave blank when running against an
+          alert, the hash is read from the alert instead.
+      - name: limit
+        type: number
+        required: false
+        description: >-
+          Page size for each internal GTI fetch while paging (advanced,
+          rarely needed - defaults to 40, GTI's own maximum for this
+          endpoint). This does not cap the total number of reports collected:
+          the workflow still pages until GTI reports no more, or the safety
+          backstop (250 pages, see the paginate step) is hit; it only changes
+          how many reports are requested per underlying API call.
+      - name: cursor
+        type: string
+        required: false
+        description: >-
+          Continuation cursor from a previous standalone run's
+          pagination.next_cursor (only meaningful together with file_hash,
+          when a prior run hit the safety backstop below and left more
+          reports unfetched). Ignored on every other run — an alert-attached
+          run always pages from the start.
+      - name: alert_index
+        type: string
+        required: false
+        description: >-
+          Concrete alert index to annotate. Filled in automatically when the
+          workflow is started from the alert table or flyout.
+      - name: alert_id
+        type: string
+        required: false
+        description: >-
+          Alert document _id to annotate. Filled in automatically when the
+          workflow is started from the alert table or flyout.
+
+steps:
+
+  # Self-provisions this workflow's index template so mapping settings apply
+  # before the first real write, rather than relying on manual setup.
+  - name: bootstrap_index_template
+    type: elasticsearch.request
+    with:
+      method: PUT
+      path: "_index_template/{{ consts.index }}"
+      body:
+        index_patterns: ["{{ consts.index }}"]
+        priority: 500
+        template:
+          settings:
+            index.mapping.total_fields.limit: 2000
+            index.mapping.total_fields.ignore_dynamic_beyond_limit: true
+            index.mapping.ignore_malformed: true
+    on-failure:
+      continue: true
+
+  - name: resolve_target_doc
+    type: data.set
+    with:
+      target_index: "{{ event.alerts[0]._index | default: inputs.alert_index }}"
+      target_id: "{{ event.alerts[0]._id | default: inputs.alert_id }}"
+      rule_id: "{{ event.rule.id }}"
+      rule_name: "{{ event.rule.name | default: 'Manual run' }}"
+
+  # execution.triggeredBy is the reliable discriminator; event.rule is populated on both paths 1 and 2.
+  - name: classify_trigger
+    type: data.set
+    with:
+      trigger_mode: "{% if execution.triggeredBy == 'alert' %}detection_rule{% elsif variables.target_id != blank %}manual_with_alert{% else %}manual_standalone{% endif %}"
+
+  # Only runs when there's an alert to annotate; falls back to the GTI link alone if this fails.
+  - name: find_data_view
+    if: "${{ variables.target_id != blank }}"
+    type: kibana.request
+    with:
+      method: GET
+      path: /api/data_views
+    on-failure:
+      continue: true
+
+  - name: check_data_view
+    type: data.set
+    with:
+      existing_data_view_id: |-
+        {%- assign hit = '' -%}
+        {%- for v in steps.find_data_view.output.data_view -%}
+          {%- if v.title == consts.index -%}{%- assign hit = v.id -%}{%- break -%}{%- endif -%}
+        {%- endfor -%}
+        {{ hit }}
+
+  # Duplicate create returns 400, not 409, so on-failure:continue absorbs a race safely.
+  - name: create_data_view
+    if: "${{ variables.target_id != blank and variables.existing_data_view_id == blank }}"
+    type: kibana.request
+    with:
+      method: POST
+      path: /api/data_views/data_view
+      headers:
+        kbn-xsrf: "true"
+        Content-Type: application/json
+      body:
+        data_view:
+          id: "{{ consts.index }}"
+          title: "{{ consts.index }}"
+          name: "{{ consts.index }}"
+          timeFieldName: "@timestamp"
+          allowNoIndex: true
+    on-failure:
+      continue: true
+
+  - name: resolve_data_view
+    type: data.set
+    with:
+      data_view_id: |-
+        {%- if variables.existing_data_view_id != blank -%}{{ variables.existing_data_view_id }}
+        {%- elsif steps.create_data_view.output.data_view.id != blank -%}{{ steps.create_data_view.output.data_view.id }}
+        {%- endif -%}
+
+  - name: build_doc_link_base
+    type: data.set
+    with:
+      doc_link_base: |-
+        {%- if variables.data_view_id != blank -%}
+          {%- assign sp = '' -%}
+          {%- if workflow.spaceId != blank and workflow.spaceId != 'default' -%}{%- assign sp = '/s/' | append: workflow.spaceId -%}{%- endif -%}
+          {{ sp }}/app/discover#/doc/{{ variables.data_view_id }}/{{ consts.index }}
+        {%- endif -%}
+
+  # Length check because the connector validates fileHash against a SHA-256/1/MD5 regex.
+  - name: build_targets
+    type: data.parseJson
+    source: |-
+      [
+      {%- assign sep = '' -%}
+      {%- if event.alerts[0] != blank -%}
+        {%- assign fields = consts.observable_fields -%}
+        {%- assign seen = consts.empty_arr -%}
+        {%- for f in fields -%}
+          {%- assign parts = f | strip | split: '.' -%}
+          {%- assign node = event.alerts[0] -%}
+          {%- for p in parts -%}{%- assign node = node[p] -%}{%- endfor -%}
+          {%- if node != blank -%}
+            {%- assign node_str = node | join: ',' -%}
+            {%- if node_str == node -%}
+              {%- assign candidates = consts.empty_arr | push: node -%}
+            {%- else -%}
+              {%- assign candidates = node -%}
+            {%- endif -%}
+            {%- for candidate in candidates -%}
+              {%- if candidate != blank -%}
+                {%- assign len = candidate | size -%}
+                {%- if len == 32 or len == 40 or len == 64 -%}
+                  {%- unless seen contains candidate -%}
+                    {{ sep }}{"field":"{{ f | strip }}","value":"{{ candidate }}"}
+                    {%- assign sep = ',' -%}
+                    {%- assign seen = seen | push: candidate -%}
+                  {%- endunless -%}
+                {%- endif -%}
+              {%- endif -%}
+            {%- endfor -%}
+          {%- endif -%}
+        {%- endfor -%}
+      {%- elsif inputs.file_hash != blank -%}
+        {"field":"manual","value":"{{ inputs.file_hash | strip }}"}
+      {%- endif -%}
+      ]
+    with: {}
+
+  - name: no_targets
+    type: if
+    condition: "${{ steps.build_targets.output.size == 0 }}"
+    steps:
+      - name: log_no_targets
+        type: console
+        with:
+          message: >-
+            No usable file hash found. Checked {{ consts.observable_fields | join: ', ' }} on
+            the alert and the file_hash input. Nothing to look up.
+
+  - name: enrich_each_hash
+    type: foreach
+    foreach: "${{ steps.build_targets.output }}"
+    steps:
+
+      - name: stash_iter
+        type: data.set
+        with:
+          observable: "{{ foreach.item.value }}"
+          field_name: "{{ foreach.item.field }}"
+
+      - name: init_pagination
+        type: data.set
+        with:
+          note_sections: "${{ consts.empty_arr }}"
+          page_cursor: "{%- if variables.target_id == blank -%}{{ inputs.cursor }}{%- endif -%}"
+          has_more: true
+          collected: 0
+          any_success: false
+          fetch_incomplete: false
+          is_malicious: false
+
+      - name: paginate
+        type: while
+        condition: "${{ variables.has_more == true }}"
+        # Backstop only (GTI's own cursor going blank is the real stop condition), so a
+        # vendor-side cursor bug can't loop forever. `max-iterations` only accepts a literal
+        # number or {limit, on-limit} - not a template - so this can't be pulled from consts.
+        max-iterations: 250
+        steps:
+
+          - name: get_file_behaviours
+            type: google_threat_intelligence.getFileBehaviours
+            connector-id: "{{ consts.gti_connector_id }}"
+            with:
+              fileHash: "{{ variables.observable }}"
+              limit: "${{ inputs.limit | default: consts.page_size }}"
+              cursor: "{{ variables.page_cursor }}"
+            on-failure:
+              retry:
+                max-attempts: 2
+                delay: 3s
+              continue: true
+
+          - name: collect_page
+            type: if
+            condition: "${{ steps.get_file_behaviours.error == blank }}"
+            steps:
+              - name: stash_page
+                type: data.set
+                with:
+                  page_items: "${{ steps.get_file_behaviours.output.data | default: consts.empty_arr }}"
+                  page_next_cursor: "{{ steps.get_file_behaviours.output.meta.cursor }}"
+
+              - name: index_page_items
+                type: foreach
+                foreach: "${{ variables.page_items }}"
+                steps:
+                  - name: compute_item_doc_id
+                    type: data.set
+                    with:
+                      item_doc_id: "{{ variables.target_id | default: 'manual' | append: '-' | append: variables.observable | append: '-' | append: foreach.item.id | sha256 }}"
+                      item_is_malicious: |-
+                        {%- assign iv = foreach.item.attributes.verdicts | default: consts.empty_arr -%}
+                        {%- if iv contains 'MALWARE' -%}true{%- else -%}false{%- endif -%}
+
+                  - name: index_report
+                    type: elasticsearch.index
+                    with:
+                      index: "{{ consts.index }}"
+                      id: "{{ variables.item_doc_id }}"
+                      document:
+                        "@timestamp": "{{ execution.startedAt | date: '%Y-%m-%dT%H:%M:%S.%L%z' }}"
+                        event:
+                          kind: enrichment
+                          category: threat
+                          dataset: gti_soar.file_behaviour
+                        observable:
+                          type: file_hash
+                          field: "{{ variables.field_name }}"
+                          value: "{{ variables.observable }}"
+                        trigger_mode: "{{ variables.trigger_mode }}"
+                        kibana:
+                          alert:
+                            uuid: "{{ variables.target_id }}"
+                            index: "{{ variables.target_index }}"
+                        rule:
+                          id: "{{ variables.rule_id }}"
+                          name: "{{ variables.rule_name }}"
+                        workflow:
+                          execution_id: "{{ execution.id }}"
+                        summary:
+                          sandbox_name: "{{ foreach.item.attributes.sandbox_name }}"
+                          verdicts: "${{ foreach.item.attributes.verdicts | default: consts.empty_arr }}"
+                          is_malicious: "${{ variables.item_is_malicious }}"
+                          tags: "${{ foreach.item.attributes.tags | default: consts.empty_arr }}"
+                        gti: "${{ foreach.item }}"
+                    on-failure:
+                      continue: true
+
+                  - name: build_item_note_section
+                    type: data.set
+                    with:
+                      item_note_section: |-
+                        {%- assign v = foreach.item.attributes.verdicts | default: consts.empty_arr -%}
+                        {%- assign vc = foreach.item.attributes.verdict_confidence -%}
+                        {%- assign tags = foreach.item.attributes.tags | default: consts.empty_arr -%}
+                        {%- assign activity_fields = consts.behaviour_activity_fields | split: ',' -%}
+                        {%- assign has_activity = false -%}
+                        {%- for f in activity_fields -%}
+                          {%- assign arr = foreach.item.attributes[f] | default: consts.empty_arr -%}
+                          {%- if arr.size > 0 -%}{%- assign has_activity = true -%}{%- endif -%}
+                        {%- endfor %}
+                        ### {{ foreach.item.attributes.sandbox_name }}
+                        - **Analysis date:** {{ foreach.item.attributes.analysis_date | date: '%Y-%m-%d' }}
+                        - **Verdict:** {% if v.size > 0 %}{{ v | join: ', ' }}{% if vc != blank %} (confidence {{ vc }}){% endif %}{% else %}None{% endif %}
+                        - **Tags:** {% if tags.size > 0 %}{{ tags | join: ', ' }}{% else %}none{% endif %}
+
+                        **Activity:**
+                        {% if has_activity %}{% for f in activity_fields %}{% assign arr = foreach.item.attributes[f] | default: consts.empty_arr %}{% if arr.size > 0 %}{% assign label = f | replace: '_', ' ' | capitalize %}{% if f == 'dns_lookups' %}{% assign label = 'DNS lookups' %}{% elsif f == 'mbc' %}{% assign label = 'MBC (Malware Behavior Catalog) techniques' %}{% elsif f == 'mitre_attack_techniques' %}{% assign label = 'MITRE ATT&CK techniques' %}{% endif %}
+                        - {{ label }}: {{ arr.size }}
+                        {%- endif %}{% endfor %}{% else %}- no notable activity
+                        {% endif %}
+
+                        {% if variables.doc_link_base != blank %}[Open full document in Discover](<{{ variables.doc_link_base }}?id={{ variables.item_doc_id }}>){% else %}Full document in index `{{ consts.index }}`, document
+                        ```
+                        {{ variables.item_doc_id }}
+                        ```
+                        {% endif %}
+
+                  - name: wrap_note_section
+                    type: data.set
+                    with:
+                      item_note_section_arr: "${{ variables.item_note_section | split: '@@GTI_NOTE_SEP@@' }}"
+
+                  - name: accumulate_note_section
+                    type: data.set
+                    with:
+                      note_sections: "${{ variables.note_sections | concat: variables.item_note_section_arr }}"
+                      is_malicious: "${{ variables.is_malicious == true or variables.item_is_malicious == 'true' }}"
+
+              - name: advance_cursor
+                type: data.set
+                with:
+                  any_success: true
+                  page_cursor: "{{ variables.page_next_cursor }}"
+                  collected: "${{ variables.collected | plus: variables.page_items.size }}"
+              - name: eval_has_more
+                type: data.set
+                with:
+                  has_more: "${{ variables.page_next_cursor != blank }}"
+
+          - name: handle_page_error
+            type: if
+            condition: "${{ steps.get_file_behaviours.error != blank }}"
+            steps:
+              - name: stop_on_error
+                type: data.set
+                with:
+                  has_more: false
+                  fetch_incomplete: true
+                  fetch_error: "${{ steps.get_file_behaviours.error }}"
+
+      - name: compute_truncated
+        type: data.set
+        with:
+          truncated: "${{ variables.has_more == true }}"
+
+      - name: compute_run_status
+        type: data.set
+        with:
+          run_status: "{% if variables.any_success != true %}failed{% elsif variables.fetch_incomplete == true or variables.truncated == true %}partial{% else %}succeeded{% endif %}"
+          failure_doc_id: "{{ variables.target_id | default: 'manual' | append: '-' | append: variables.observable | append: '-run-summary' | sha256 }}"
+
+      - name: write_run_summary
+        type: if
+        condition: "${{ variables.run_status != 'succeeded' }}"
+        steps:
+          - name: index_run_summary
+            type: elasticsearch.index
+            with:
+              index: "{{ consts.index }}"
+              id: "{{ variables.failure_doc_id }}"
+              document:
+                "@timestamp": "{{ execution.startedAt | date: '%Y-%m-%dT%H:%M:%S.%L%z' }}"
+                event:
+                  kind: enrichment
+                  category: threat
+                  dataset: gti_soar.file_behaviour
+                  outcome: failure
+                doc_type: fetch_failure
+                error:
+                  message: "{{ variables.fetch_error.message }}"
+                  type: "{{ variables.fetch_error.type }}"
+                observable:
+                  type: file_hash
+                  field: "{{ variables.field_name }}"
+                  value: "{{ variables.observable }}"
+                trigger_mode: "{{ variables.trigger_mode }}"
+                kibana:
+                  alert:
+                    uuid: "{{ variables.target_id }}"
+                    index: "{{ variables.target_index }}"
+                rule:
+                  id: "{{ variables.rule_id }}"
+                  name: "{{ variables.rule_name }}"
+                workflow:
+                  execution_id: "{{ execution.id }}"
+                pagination:
+                  collected: "${{ variables.collected }}"
+                  fetch_incomplete: "${{ variables.fetch_incomplete }}"
+                  truncated: "${{ variables.truncated }}"
+                  next_cursor: "{{ variables.page_cursor }}"
+            on-failure:
+              continue: true
+
+      - name: skip_on_total_failure
+        type: if
+        condition: "${{ variables.any_success != true }}"
+        steps:
+          - name: log_fetch_failure
+            type: console
+            with:
+              message: |-
+                STATUS: failed - GTI getFileBehaviours failed for {{ variables.field_name }} ({{ variables.observable }}).
+                {{ variables.fetch_error | json }}
+
+          # Path 1/2 only - a standalone run has no alert to annotate.
+          - name: annotate_alert_failure
+            type: if
+            condition: "${{ variables.target_id != blank }}"
+            steps:
+              - name: find_existing_note_failure
+                type: kibana.request
+                with:
+                  method: GET
+                  path: /api/note
+                  query:
+                    documentIds: "{{ variables.target_id }}"
+                on-failure:
+                  continue: true
+
+              - name: build_failure_doc_link
+                type: data.set
+                with:
+                  failure_doc_link: |-
+                    {%- if variables.data_view_id != blank -%}
+                      {%- assign sp = '' -%}
+                      {%- if workflow.spaceId != blank and workflow.spaceId != 'default' -%}{%- assign sp = '/s/' | append: workflow.spaceId -%}{%- endif -%}
+                      {{ sp }}/app/discover#/doc/{{ variables.data_view_id }}/{{ consts.index }}?id={{ variables.failure_doc_id }}
+                    {%- endif -%}
+
+              # Same marker the success-path note uses, so this replaces it in place.
+              - name: prepare_failure_note
+                type: data.set
+                with:
+                  existing_note_id: |-
+                    {%- assign marker = 'GTI File Sandbox: ' | append: variables.observable -%}
+                    {%- for n in steps.find_existing_note_failure.output.notes -%}
+                      {%- if n.note contains marker -%}{{ n.noteId }}{%- endif -%}
+                    {%- endfor -%}
+                  note_text: |-
+                    ## GTI File Sandbox: {{ variables.observable }}
+
+                    _Managed by the GTI File Sandbox Behaviour workflow. This note is replaced on every run; record your own analysis in a separate note._
+
+                    Observed on `{{ variables.field_name }}` - [View full sandbox history on GTI]({{ consts.gti_ui_base }}/{{ variables.observable }}/behavior)
+                    Run [{{ workflow.name }}:{{ execution.id }}]({{ execution.url }})
+
+                    ---
+
+                    > **STATUS: failed.** The last refresh attempt could not retrieve any data from GTI.
+                    > `{{ variables.fetch_error.message }}`
+                    > See the indexed failure record for detail: {% if variables.failure_doc_link != blank %}[open in Discover](<{{ variables.failure_doc_link }}>){% else %}index `{{ consts.index }}`, document
+                    ```
+                    {{ variables.failure_doc_id }}
+                    ```
+                    {% endif %}
+
+              - name: write_failure_note
+                type: if
+                condition: "${{ variables.existing_note_id != blank }}"
+                steps:
+                  - name: update_failure_note
+                    type: kibana.request
+                    with:
+                      method: PATCH
+                      path: /api/note
+                      headers:
+                        kbn-xsrf: "true"
+                        Content-Type: application/json
+                      body:
+                        noteId: "{{ variables.existing_note_id }}"
+                        note:
+                          eventId: "{{ variables.target_id }}"
+                          timelineId: ""
+                          note: "{{ variables.note_text }}"
+                    on-failure:
+                      continue: true
+                else:
+                  - name: create_failure_note
+                    type: kibana.request
+                    with:
+                      method: PATCH
+                      path: /api/note
+                      headers:
+                        kbn-xsrf: "true"
+                        Content-Type: application/json
+                      body:
+                        note:
+                          eventId: "{{ variables.target_id }}"
+                          timelineId: ""
+                          note: "{{ variables.note_text }}"
+                    on-failure:
+                      continue: true
+
+          - name: skip_iteration
+            type: loop.continue
+
+      - name: skip_when_empty
+        type: if
+        condition: "${{ variables.collected == 0 }}"
+        steps:
+          - name: log_empty
+            type: console
+            with:
+              message: >-
+                GTI has no sandbox behaviour reports for {{ variables.observable }};
+                the file is known but has not been detonated. Nothing written.
+          - name: skip_empty_iteration
+            type: loop.continue
+
+      - name: annotate_alert
+        type: if
+        condition: "${{ variables.target_id != blank and variables.collected > 0 }}"
+        steps:
+
+          - name: find_existing_note
+            type: kibana.request
+            with:
+              method: GET
+              path: /api/note
+              query:
+                documentIds: "{{ variables.target_id }}"
+            on-failure:
+              continue: true
+
+          - name: prepare_note
+            type: data.set
+            with:
+              existing_note_id: |-
+                {%- assign marker = 'GTI File Sandbox: ' | append: variables.observable -%}
+                {%- for n in steps.find_existing_note.output.notes -%}
+                  {%- if n.note contains marker -%}{{ n.noteId }}{%- endif -%}
+                {%- endfor -%}
+              note_text: |-
+                ## GTI File Sandbox: {{ variables.observable }}
+
+                _Managed by the GTI File Sandbox Behaviour workflow. This note is replaced on every run and describes only what this run fetched; record your own analysis in a separate note._
+
+                Observed on `{{ variables.field_name }}` - [View full sandbox history on GTI]({{ consts.gti_ui_base }}/{{ variables.observable }}/behavior)
+                Run [{{ workflow.name }}:{{ execution.id }}]({{ execution.url }})
+
+                ---
+
+                **STATUS: {{ variables.run_status }}.** {{ variables.collected }} sandbox report(s) retrieved{% if variables.is_malicious %}, at least one flagged **MALWARE**{% endif %}.
+
+                {%- if variables.fetch_incomplete %}
+
+                > **Incomplete:** retrieval stopped early because a GTI API request failed; results below may be missing further reports.
+                {%- endif %}
+                {%- if variables.truncated and variables.fetch_incomplete != true %}
+
+                > **Unexpectedly large result set:** stopped after {{ variables.collected }} reports as a safety limit; GTI still had more to page through. Re-run standalone with `cursor: {{ variables.page_cursor }}` to continue.
+                {%- endif %}
+
+                {%- for section in variables.note_sections %}
+                {{ section }}
+                {% endfor %}
+
+          - name: write_note
+            type: if
+            condition: "${{ variables.existing_note_id != blank }}"
+            steps:
+              - name: update_note
+                type: kibana.request
+                with:
+                  method: PATCH
+                  path: /api/note
+                  headers:
+                    kbn-xsrf: "true"
+                    Content-Type: application/json
+                  body:
+                    noteId: "{{ variables.existing_note_id }}"
+                    note:
+                      eventId: "{{ variables.target_id }}"
+                      timelineId: ""
+                      note: "{{ variables.note_text }}"
+                on-failure:
+                  continue: true
+            else:
+              - name: create_note
+                type: kibana.request
+                with:
+                  method: PATCH
+                  path: /api/note
+                  headers:
+                    kbn-xsrf: "true"
+                    Content-Type: application/json
+                  body:
+                    note:
+                      eventId: "{{ variables.target_id }}"
+                      timelineId: ""
+                      note: "{{ variables.note_text }}"
+                on-failure:
+                  continue: true
+
+          - name: tag_alert
+            type: security.setAlertTags
+            with:
+              alert_ids: "{{ variables.target_id }}"
+              tags_to_add:
+                - "gti:file-sandbox"
+            on-failure:
+              continue: true
+
+      # Path 3: no alert to annotate.
+      - name: report_standalone
+        type: if
+        condition: "${{ variables.target_id == blank and variables.collected > 0 }}"
+        steps:
+          - name: log_document_reference
+            type: console
+            with:
+              message: |-
+                STATUS: {{ variables.run_status }} - GTI file sandbox behaviour for {{ variables.observable }}: {{ variables.collected }} report(s) retrieved{% if variables.is_malicious %}, at least one flagged MALWARE{% endif %}.
+                {%- if variables.fetch_incomplete %}
+                (retrieval stopped early due to a GTI API error; results may be incomplete)
+                {%- endif %}
+                {%- if variables.truncated and variables.fetch_incomplete != true %}
+                (safety limit reached after {{ variables.collected }} reports; GTI still had more — re-run with cursor: {{ variables.page_cursor }} to continue)
+                {%- endif %}
+                Indexed to {{ consts.index }}, one document per report.
