@@ -147,14 +147,24 @@ steps:
           {%- assign node = event.alerts[0] -%}
           {%- for p in parts -%}{%- assign node = node[p] -%}{%- endfor -%}
           {%- if node != blank -%}
-            {%- assign len = node | size -%}
-            {%- if len == 32 or len == 40 or len == 64 -%}
-              {%- unless seen contains node -%}
-                {{ sep }}{"field":"{{ f | strip }}","value":"{{ node }}"}
-                {%- assign sep = ',' -%}
-                {%- assign seen = seen | push: node -%}
-              {%- endunless -%}
+            {%- assign node_str = node | join: ',' -%}
+            {%- if node_str == node -%}
+              {%- assign candidates = consts.empty_arr | push: node -%}
+            {%- else -%}
+              {%- assign candidates = node -%}
             {%- endif -%}
+            {%- for candidate in candidates -%}
+              {%- if candidate != blank -%}
+                {%- assign len = candidate | size -%}
+                {%- if len == 32 or len == 40 or len == 64 -%}
+                  {%- unless seen contains candidate -%}
+                    {{ sep }}{"field":"{{ f | strip }}","value":"{{ candidate }}"}
+                    {%- assign sep = ',' -%}
+                    {%- assign seen = seen | push: candidate -%}
+                  {%- endunless -%}
+                {%- endif -%}
+              {%- endif -%}
+            {%- endfor -%}
           {%- endif -%}
         {%- endfor -%}
       {%- elsif inputs.file_hash != blank -%}
