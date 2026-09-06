@@ -66,7 +66,7 @@ steps:
   # -------------------------------------------------------------------------
   - name: for_each_discovery
     type: foreach
-    foreach: event.alerts
+    foreach: "{{ event.alerts | json }}"
     steps:
 
       # -------------------------------------------------------------------------
@@ -117,7 +117,7 @@ steps:
       # -------------------------------------------------------------------------
       - name: foreach_alert_in_ad
         type: foreach
-        foreach: foreach.item.attack_discovery.alert_ids
+        foreach: "{{ foreach.item.attack_discovery.alert_ids | json }}"
         steps:
 
           # -------------------------------------------------------------------------
@@ -157,8 +157,8 @@ steps:
                 - alertId: '{{ foreach.item }}'
                   index: .alerts-security.alerts-default
                   rule:
-                    name: '{{ steps.get_details.output.hits.hits._source.kibana.alert.rule.name }}'
-                    id: '{{ steps.get_details.output.hits.hits._source.kibana.alert.rule.uuid }}'
+                    name: '{{ steps.get_details.output.hits.hits[0]._source.kibana.alert.rule.name }}'
+                    id: '{{ steps.get_details.output.hits.hits[0]._source.kibana.alert.rule.uuid }}'
 
       # -------------------------------------------------------------------------
       # STEP 6: triage_agent
@@ -293,7 +293,7 @@ steps:
           path: /api/endpoint/action/isolate
           body:
             endpoint_ids:
-              - 345d5ffc-80a8-413c-9a5d-829687e8a5f2
+              - '{{ consts.endpoint_id }}'
             comment: >-
               Based on my analysis so far, I've isolated the host in question pending further investigation and
               analysis. As a next step, I'll notify the team.
@@ -405,7 +405,7 @@ steps:
                         "text": "💻 View Host",
                         "emoji": true
                       },
-                      "url": "{{consts.kibana}}/app/security/administration/endpoints?agent_ids=345d5ffc-80a8-413c-9a5d-829687e8a5f2"
+                      "url": "{{consts.kibana}}/app/security/administration/endpoints?agent_ids={{consts.endpoint_id}}"
                     },
                     {
                       "type": "button",
