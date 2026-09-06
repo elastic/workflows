@@ -66,13 +66,13 @@ steps:
   # -------------------------------------------------------------------------
   - name: for_each_discovery
     type: foreach
-    foreach: event.alerts
+    foreach: '{{event.alerts}}'
     steps:
 
       # -------------------------------------------------------------------------
       # STEP 2: create_case
       # -------------------------------------------------------------------------
-      # Creates a new case using the Kibana Cases API (POST /api/cases).
+      # Creates a new case via kibana.createCase (POST /api/cases).
       # Cases provide a workspace for investigating and tracking security
       # incidents.
       # Required: title, description, owner (e.g., "securitySolution"), tags,
@@ -82,7 +82,7 @@ steps:
       # - References current item in foreach loop
       # -------------------------------------------------------------------------
       - name: create_case
-        type: cases.createCase
+        type: kibana.createCase
         with:
           owner: securitySolution
           title: '[Attack Discovery] {{foreach.item.attack_discovery.title_with_replacements}}'
@@ -108,6 +108,11 @@ steps:
           settings:
             syncAlerts: false
           severity: high
+          connector:
+            id: none
+            name: none
+            type: .none
+            fields: null
 
       # -------------------------------------------------------------------------
       # STEP 3: foreach_alert_in_ad
@@ -117,7 +122,7 @@ steps:
       # -------------------------------------------------------------------------
       - name: foreach_alert_in_ad
         type: foreach
-        foreach: foreach.item.attack_discovery.alert_ids
+        foreach: '{{for_each_discovery.item.attack_discovery.alert_ids}}'
         steps:
 
           # -------------------------------------------------------------------------
@@ -141,7 +146,7 @@ steps:
           # -------------------------------------------------------------------------
           # STEP 5: add_to_case
           # -------------------------------------------------------------------------
-          # Attaches a security alert to a case via cases.addAlerts.
+          # Attaches a security alert to a case via kibana.request (POST /api/cases/.../comments).
           # Links the alert to the case for consolidated investigation tracking.
           # Required fields: case_id, alerts[].alertId, alerts[].index,
           # alerts[].rule (id and name).
@@ -150,15 +155,20 @@ steps:
           # - References current item in foreach loop
           # -------------------------------------------------------------------------
           - name: add_to_case
-            type: cases.addAlerts
+            type: kibana.request
             with:
-              case_id: '{{ steps.create_case.output.case.id }}'
-              alerts:
-                - alertId: '{{ foreach.item }}'
-                  index: .alerts-security.alerts-default
-                  rule:
-                    name: '{{ steps.get_details.output.hits.hits._source.kibana.alert.rule.name }}'
-                    id: '{{ steps.get_details.output.hits.hits._source.kibana.alert.rule.uuid }}'
+              method: POST
+              path: /api/cases/{{ steps.create_case.output.id }}/comments
+              body:
+                type: alert
+                alertId: '{{ foreach.item }}'
+                index: .alerts-security.alerts-default
+                rule:
+                  name: '{{ steps.get_details.output.hits.hits._source.kibana.alert.rule.name }}'
+                  id: '{{ steps.get_details.output.hits.hits._source.kibana.alert.rule.uuid }}'
+                owner: securitySolution
+              headers:
+                kbn-xsrf: string
 
       # -------------------------------------------------------------------------
       # STEP 6: triage_agent
@@ -217,17 +227,23 @@ steps:
       # -------------------------------------------------------------------------
       # STEP 7: add_analysis_to_case
       # -------------------------------------------------------------------------
-      # Adds a comment to a case via cases.addComment.
+      # Adds a comment to a case via kibana.request (POST /api/cases/.../comments).
       # Comments document investigation findings, analyst notes, or action
       # summaries.
       # Liquid syntax used:
       # - References output from previous step(s)
       # -------------------------------------------------------------------------
       - name: add_analysis_to_case
-        type: cases.addComment
+        type: kibana.request
         with:
-          case_id: '{{ steps.create_case.output.case.id }}'
-          comment: '{{ steps.triage_agent.output.data.data }}'
+          method: POST
+          path: /api/cases/{{ steps.create_case.output.id }}/comments
+          body:
+            type: user
+            owner: securitySolution
+            comment: '{{ steps.triage_agent.output.data.data }}'
+          headers:
+            kbn-xsrf: string
 
       # -------------------------------------------------------------------------
       # STEP 8: get_host_details
@@ -298,7 +314,7 @@ steps:
               Based on my analysis so far, I've isolated the host in question pending further investigation and
               analysis. As a next step, I'll notify the team.
             case_ids:
-              - '{{ steps.create_case.output.case.id }}'
+              - '{{ steps.create_case.output.id }}'
           headers:
             kbn-xsrf: string
 
@@ -369,7 +385,7 @@ steps:
                   "elements": [
                     {
                       "type": "mrkdwn",
-                      "text": "Case ID: `{{steps.create_case.output.case.id}}` | {{foreach.item.attack_discovery.alerts_context_count}} related alerts | MITRE: {{foreach.item.attack_discovery.mitre_attack_tactics}}"
+                      "text": "Case ID: `{{steps.create_case.output.id}}` | {{foreach.item.attack_discovery.alerts_context_count}} related alerts | MITRE: {{foreach.item.attack_discovery.mitre_attack_tactics}}"
                     }
                   ]
                 },
@@ -396,7 +412,7 @@ steps:
                         "text": "📁 Go to Case",
                         "emoji": true
                       },
-                      "url": "{{consts.kibana}}/app/security/cases/{{steps.create_case.output.case.id}}"
+                      "url": "{{consts.kibana}}/app/security/cases/{{steps.create_case.output.id}}"
                     },
                     {
                       "type": "button",
