@@ -148,8 +148,7 @@ steps:
           # -------------------------------------------------------------------------
           # Attaches a security alert to a case via kibana.request (POST /api/cases/.../comments).
           # Links the alert to the case for consolidated investigation tracking.
-          # Required fields: case_id, alerts[].alertId, alerts[].index,
-          # alerts[].rule (id and name).
+          # Body: type alert, alertId, index, rule (id/name), owner.
           # Liquid syntax used:
           # - References output from previous step(s)
           # - References current item in foreach loop
