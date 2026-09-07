@@ -92,4 +92,4 @@ steps:
         channel: '{{ inputs.channel_id }}'
         text: '{{ inputs.fallback_text }}'
         blocks: '[{{ inputs.blocks_json }}]'
-      timeout: 30s
+    timeout: 30s

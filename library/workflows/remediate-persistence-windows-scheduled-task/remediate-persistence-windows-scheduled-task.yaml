@@ -1,0 +1,137 @@
+template-metadata:
+  slug: remediate-persistence-windows-scheduled-task
+  version: "1.0.0"
+  availability: ">=9.5.0"
+  name: "Remediate Scheduled Task Persistence"
+  description: >-
+    Find Windows scheduled-task persistence (files created under
+    C:\Windows\System32\Tasks) via ES|QL on logs-endpoint.*, correlated with
+    Malicious Behavior Prevention alerts in the same 5-minute window on the
+    same agent/host. For each hit, skip tasks already deleted per the
+    response-actions history, then remove the task with schtasks /Delete
+    (using file.name as the task name). Runs on a 15-minute schedule, or
+    attach it as a custom workflow action on the "Endpoint Security (Elastic
+    Defend)" rule to run on every behavior alert.
+  solutions: [security]
+  categories: [response]
+
+name: Remediate Scheduled Task Persistence
+description: |
+  Query logs-endpoint.* for scheduled task persistence correlated with endpoint
+  alerts within 5-minute windows, skip tasks already deleted per response actions
+  history, then remove the task via schtasks /Delete.
+
+triggers:
+  - type: manual
+    inputs:
+      - name: esql_query
+        type: string
+        description: ES|QL returning agent.id, host.id, file.path, file.name per row.
+        required: true
+        default: |
+          FROM logs-endpoint.*
+          | WHERE @timestamp > NOW() - 15 minutes and
+          (message like "Malicious Behavior Prevention Alert*" OR (event.category == "file" and process.name == "svchost.exe" and file.path like """C:\\Windows\\System32\\Tasks\\*""" and MV_CONTAINS(event.action, "creation")))
+          | EVAL is_endpoint_alert = CASE(message like "Malicious Behavior Prevention Alert*", agent.id, NULL), is_task_persistence = CASE(event.category == "file" and process.name == "svchost.exe" and file.path like """C:\\Windows\\System32\\Tasks\\*""", agent.id, NULL)
+          | STATS endpoint_alerts_count = COUNT_DISTINCT(is_endpoint_alert), persistence_count = COUNT_DISTINCT(is_task_persistence), file.path = VALUES(file.path), file.name = VALUES(file.name) by agent.id, host.id, DATE_TRUNC(5 minutes, @timestamp)
+          | WHERE endpoint_alerts_count >= 1 and persistence_count >= 1
+          | STATS BY agent.id, host.id, file.path, file.name
+      - name: history_lookback
+        type: string
+        description: How far back to search response actions history (Date Math, e.g. now-1d).
+        default: now-1d
+  - type: scheduled
+    with:
+      every: 15m
+
+steps:
+  # ES|QL output columns consumed below via foreach.item[N]:
+  #   [0] agent.id  [1] host.id  [2] file.path  [3] file.name
+  - name: run_esql
+    type: elasticsearch.esql.query
+    with:
+      query: "{{ inputs.esql_query }}"
+
+  - name: process_hits
+    type: if
+    condition: steps.run_esql.output.values.length > 0
+    steps:
+      - name: per_persistence_hit
+        type: foreach
+        foreach: "{{ steps.run_esql.output.values }}"
+        steps:
+          - name: set_hit_context
+            type: data.set
+            with:
+              file_path: "{{ foreach.item[2] | downcase }}"
+              task_name: >-
+                {% if foreach.item[3] != '' and foreach.item[3] != null %}{{ foreach.item[3] }}{% else %}{% assign fp = foreach.item[2] %}{% assign parts = fp | split: '\' %}{{ parts | last }}{% endif %}
+
+          - name: log_hit
+            type: console
+            with:
+              message: "Checking scheduled task persistence — agent {% if foreach.item[0] != '' and foreach.item[0] != null %}{{ foreach.item[0] }}{% else %}{{ foreach.item[1] }}{% endif %}, task {{ steps.set_hit_context.output.task_name }}, path {{ foreach.item[2] }} (row {{ foreach.index }})."
+
+          - name: check_execute_history
+            type: kibana.request
+            with:
+              method: GET
+              path: "/api/endpoint/action"
+              query:
+                agentIds: "{% if foreach.item[0] != '' and foreach.item[0] != null %}{{ foreach.item[0] }}{% else %}{{ foreach.item[1] }}{% endif %}"
+                commands: execute
+                startDate: "{{ inputs.history_lookback }}"
+                endDate: now
+                pageSize: 1
+              headers:
+                kbn-xsrf: "true"
+            on-failure:
+              continue: true
+
+          - name: capture_history
+            type: data.set
+            with:
+              should_skip: "{% if steps.check_execute_history.output.total == 0 %}false{% else %}{% for action in steps.check_execute_history.output.data limit:1 %}{% assign fp = steps.set_hit_context.output.file_path %}{% assign tn = steps.set_hit_context.output.task_name | downcase %}{% assign hc = action.parameters.command | downcase %}{% assign cm = action.comment | downcase %}{% if hc contains fp %}true{% elsif hc contains tn and hc contains 'schtasks' %}true{% elsif cm contains fp %}true{% elsif cm contains tn and cm contains 'scheduled task' %}true{% else %}false{% endif %}{% endfor %}{% endif %}"
+
+          - name: already_remediated
+            type: if
+            condition: 'steps.capture_history.output.should_skip: "true"'
+            steps:
+              - name: log_already_in_history
+                type: console
+                with:
+                  message: "Skipping task {{ steps.set_hit_context.output.task_name }} on agent {% if foreach.item[0] != '' and foreach.item[0] != null %}{{ foreach.item[0] }}{% else %}{{ foreach.item[1] }}{% endif %} — delete already in response actions history ({{ inputs.history_lookback }})."
+            else:
+              - name: delete_scheduled_task
+                type: kibana.request
+                with:
+                  method: POST
+                  path: "/api/endpoint/action/execute"
+                  headers:
+                    kbn-xsrf: "true"
+                  body:
+                    endpoint_ids:
+                      - "{% if foreach.item[0] != '' and foreach.item[0] != null %}{{ foreach.item[0] }}{% else %}{{ foreach.item[1] }}{% endif %}"
+                    comment: "Workflow Remediate Scheduled Task Persistence — delete task {{ steps.set_hit_context.output.task_name }} ({{ foreach.item[2] }})."
+                    parameters:
+                      command: 'schtasks /Delete /TN "{{ steps.set_hit_context.output.task_name }}" /F'
+                      timeout: 120
+                on-failure:
+                  continue: true
+
+              - name: log_remediation_result
+                type: console
+                with:
+                  message: "{% if steps.delete_scheduled_task.error %}Delete warning for task {{ steps.set_hit_context.output.task_name }}: {{ steps.delete_scheduled_task.error }}{% else %}schtasks /Delete submitted for {{ steps.set_hit_context.output.task_name }} (path: {{ foreach.item[2] }}).{% endif %}"
+
+    else:
+      - name: log_no_hits
+        type: console
+        with:
+          message: "No scheduled task persistence correlated with endpoint alerts in the configured ES|QL window."
+
+  - name: log_summary
+    type: console
+    with:
+      message: |
+        Processed {{ steps.run_esql.output.values | size }} unique scheduled task persistence target(s). Check Security → Endpoints → Response actions history.

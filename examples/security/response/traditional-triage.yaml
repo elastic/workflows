@@ -241,7 +241,7 @@ steps:
           body:
             name: 'malware-incident-{{ ''now'' | date: ''%Y-%m-%d'' }}'
             is_private: false
-          timeout: 30s
+        timeout: 30s
 
       # -------------------------------------------------------------------------
       # STEP 10: lookup_user_by_email
@@ -258,7 +258,7 @@ steps:
         with:
           url: https://slack.com/api/users.lookupByEmail?email={{ steps.get_on_call.output.values[0][0] }}
           method: GET
-          timeout: 30s
+        timeout: 30s
 
       # -------------------------------------------------------------------------
       # STEP 11: invite-users-to-channel
@@ -280,7 +280,7 @@ steps:
           body:
             channel: '{{steps.create-slack-channel.output.data.channel.id}}'
             users: '{{ steps.lookup_user_by_email.output.data.user.id }}'
-          timeout: 30s
+        timeout: 30s
 
       # -------------------------------------------------------------------------
       # STEP 12: post-welcome-message
@@ -306,7 +306,7 @@ steps:
               <@{{ steps.lookup_user_by_email.output.data.user.id | replace: ',', '> <@' }}>  You have been added to
               this channel to deal with an <{{kibanaUrl}}/app/security/cases/{{steps.createCase.output.case.id}}|Elastic
               Security Case>
-          timeout: 30s
+        timeout: 30s
 
       # -------------------------------------------------------------------------
       # STEP 13: post_slack_message_rich_dynamic
@@ -344,7 +344,7 @@ steps:
               VirusTotal
               Report","emoji":true},"url":"https://www.virustotal.com/gui/file/{{event.alerts[0].file.hash.sha256}}"}]},{"type":"context","elements":[{"type":"mrkdwn","text":"⏱️
               Detected via Elastic Security | Automated Traditional Triage workflow"}]}]
-          timeout: 30s
+        timeout: 30s
 
       # -------------------------------------------------------------------------
       # STEP 14: suggest_oncall_user_profile

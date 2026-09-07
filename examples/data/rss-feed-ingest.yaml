@@ -84,10 +84,10 @@ steps:
       # -------------------------------------------------------------------------
       - name: fetch-rss
         type: http
+        timeout: "30s"
         with:
           url: "{{foreach.items[foreach.index]}}"
           method: GET
-          timeout: "30s"
 
       # -------------------------------------------------------------------------
       # STEP 3: parse_feed

@@ -1,0 +1,161 @@
+# =============================================================================
+# Workflow: Remediate Startup Persistence
+# Category: security/response
+#
+# Finds Startup-folder persistence (user AppData + ProgramData) via ES|QL on
+# logs-endpoint.*, correlating persistence with Malicious Behavior Prevention
+# alerts within 5-minute windows on the same agent/host, then for each hit:
+#   0. Checks newest get-file in response history (pageSize 1) for same file.path.
+#   1. get-file — downloads file.path (zip in response actions history).
+#   2. execute — deletes file.path from Startup (after 20s wait).
+#
+# ES|QL columns: [0] agent.id, [1] host.id, [2] file.path
+#
+# The workflow is set to run every 15m, you can also attach it as a custom workflow action to the "Endpoint Security (Elastic Defend)" https://www.elastic.co/guide/en/security/8.19/endpoint-security-elastic-defend.html SIEM rule so it triggers everytime a behavior alert is generated.
+#
+# =============================================================================
+version: "1"
+name: Remediate Startup Persistence
+description: |
+  Query logs-endpoint.* for user and ProgramData Startup-folder persistence
+  correlated with endpoint alerts within 5-minute windows, skip hosts/files already in response actions
+  history, download via get-file, wait 20s, then delete the startup file.
+enabled: false
+tags:
+  - security
+  - endpoint
+  - response
+  - remediation
+  - persistence
+
+triggers:
+  - type: manual
+    inputs:
+      - name: esql_query
+        type: string
+        description: ES|QL returning agent.id, host.id, file.path per row.
+        required: true
+        default: |
+          FROM logs-endpoint.*
+          | WHERE @timestamp > NOW() - 15 minutes and
+          (message like "Malicious Behavior Prevention Alert*" OR TO_LOWER(file.path) LIKE """?:\\users\\*\\appdata\\roaming\\microsoft\\windows\\start menu\\programs\\startup\\*""" OR TO_LOWER(file.path) LIKE """?:\\programdata\\microsoft\\windows\\start menu\\programs\\startup\\*""")
+          | EVAL is_endpoint_alert = CASE(message like "Malicious Behavior Prevention Alert*", agent.id, NULL), is_startup_persistence = CASE(TO_LOWER(file.path) LIKE """?:\\users\\*\\appdata\\roaming\\microsoft\\windows\\start menu\\programs\\startup\\*""" OR TO_LOWER(file.path) LIKE """?:\\programdata\\microsoft\\windows\\start menu\\programs\\startup\\*""", agent.id, NULL)
+          | STATS endpoint_alerts_count = COUNT_DISTINCT(is_endpoint_alert), persistence_count = COUNT_DISTINCT(is_startup_persistence), rules = VALUES(message), file.path = VALUES(file.path) by agent.id, host.id, DATE_TRUNC(5 minutes, @timestamp)
+          | WHERE endpoint_alerts_count >= 1 and persistence_count >= 1
+          | STATS BY agent.id, host.id, file.path
+      - name: history_lookback
+        type: string
+        description: How far back to search response actions history (Date Math, e.g. now-1d).
+        default: now-1d
+  - type: scheduled
+    with:
+      every: 15m
+
+steps:
+  - name: run_esql
+    type: elasticsearch.esql.query
+    with:
+      query: "{{ inputs.esql_query }}"
+
+  - name: process_hits
+    type: if
+    condition: steps.run_esql.output.values.length > 0
+    steps:
+      - name: per_persistence_hit
+        type: foreach
+        foreach: "{{ steps.run_esql.output.values }}"
+        steps:
+          - name: set_hit_context
+            type: data.set
+            with:
+              file_path: "{{ foreach.item[2] | downcase }}"
+
+          - name: log_hit
+            type: console
+            with:
+              message: "Checking startup persistence — agent {% if foreach.item[0] != '' and foreach.item[0] != null %}{{ foreach.item[0] }}{% else %}{{ foreach.item[1] }}{% endif %}, file {{ foreach.item[2] }} (row {{ foreach.index }})."
+
+          - name: check_get_file_history
+            type: kibana.request
+            with:
+              method: GET
+              path: "/api/endpoint/action"
+              query:
+                agentIds: "{% if foreach.item[0] != '' and foreach.item[0] != null %}{{ foreach.item[0] }}{% else %}{{ foreach.item[1] }}{% endif %}"
+                commands: get-file
+                startDate: "{{ inputs.history_lookback }}"
+                endDate: now
+                pageSize: 1
+              headers:
+                kbn-xsrf: "true"
+            on-failure:
+              continue: true
+
+          - name: capture_history
+            type: data.set
+            with:
+              should_skip: "{% if steps.check_get_file_history.output.total == 0 %}false{% else %}{% for action in steps.check_get_file_history.output.data limit:1 %}{% assign fp = steps.set_hit_context.output.file_path %}{% assign hp = action.parameters.path | downcase %}{% assign hc = action.comment | downcase %}{% if hp == fp %}true{% elsif hc contains fp %}true{% else %}false{% endif %}{% endfor %}{% endif %}"
+
+          - name: already_archived
+            type: if
+            condition: 'steps.capture_history.output.should_skip: "true"'
+            steps:
+              - name: log_already_in_history
+                type: console
+                with:
+                  message: "Skipping {{ foreach.item[2] }} on agent {% if foreach.item[0] != '' and foreach.item[0] != null %}{{ foreach.item[0] }}{% else %}{{ foreach.item[1] }}{% endif %} — get-file already in response actions history ({{ inputs.history_lookback }})."
+            else:
+              - name: download_file
+                type: kibana.request
+                with:
+                  method: POST
+                  path: "/api/endpoint/action/get_file"
+                  headers:
+                    kbn-xsrf: "true"
+                  body:
+                    endpoint_ids:
+                      - "{% if foreach.item[0] != '' and foreach.item[0] != null %}{{ foreach.item[0] }}{% else %}{{ foreach.item[1] }}{% endif %}"
+                    comment: "Workflow Remediate Startup Persistence — download {{ foreach.item[2] }}."
+                    parameters:
+                      path: "{{ foreach.item[2] }}"
+                on-failure:
+                  continue: true
+
+              - name: wait_for_download
+                type: wait
+                with:
+                  duration: 20s
+
+              - name: delete_startup_file
+                type: kibana.request
+                with:
+                  method: POST
+                  path: "/api/endpoint/action/execute"
+                  headers:
+                    kbn-xsrf: "true"
+                  body:
+                    endpoint_ids:
+                      - "{% if foreach.item[0] != '' and foreach.item[0] != null %}{{ foreach.item[0] }}{% else %}{{ foreach.item[1] }}{% endif %}"
+                    comment: "Workflow Remediate Startup Persistence — remove startup file {{ foreach.item[2] }}."
+                    parameters:
+                      command: 'if exist "{{ foreach.item[2] }}" del /f /q "{{ foreach.item[2] }}"'
+                      timeout: 120
+                on-failure:
+                  continue: true
+
+              - name: log_remediation_result
+                type: console
+                with:
+                  message: "{% if steps.download_file.error %}Download warning for {{ foreach.item[2] }}: {{ steps.download_file.error }}{% else %}get-file submitted for {{ foreach.item[2] }} — download link will appear in response actions history.{% endif %} {% if steps.delete_startup_file.error %}Delete warning: {{ steps.delete_startup_file.error }}{% else %}Delete command submitted for {{ foreach.item[2] }}.{% endif %}"
+
+    else:
+      - name: log_no_hits
+        type: console
+        with:
+          message: "No startup persistence alerts found in the configured ES|QL window."
+
+  - name: log_summary
+    type: console
+    with:
+      message: |
+        Processed {{ steps.run_esql.output.values | size }} unique startup persistence target(s). Check Security → Endpoints → Response actions history.

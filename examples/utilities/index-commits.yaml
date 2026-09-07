@@ -15,7 +15,7 @@
 # Created: 2026-01-14
 # =============================================================================
 name: Index commits
-descriptions: |
+description: |
   This workflow indexes commits from a specified GitHub repository into an Elasticsearch index.
   This is needed to leverage Elasticsearch's powerful search capabilities for commit messages and metadata.
   We could later filter commits by date, author, or message content using Elasticsearch queries.

@@ -96,7 +96,7 @@ steps:
     with:
       url: https://slack.com/api/users.lookupByEmail?email={{ inputs.user_email }}
       method: GET
-      timeout: 30s
+    timeout: 30s
 
   # -------------------------------------------------------------------------
   # STEP 2: invite-users-to-channel

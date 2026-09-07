@@ -14,7 +14,7 @@
 # Created: 2026-01-14
 # =============================================================================
 name: Digest workflow
-descriptions: |
+description: |
   This workflow generates a weekly digest of user-facing changes made in the Workflows Execution Engine.
   It searches commit messages indexed in Elasticsearch for relevant updates from the past week,
   analyzes them using AI to create a concise summary, and posts the formatted update to a Slack channel.
