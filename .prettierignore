@@ -5,5 +5,7 @@ package-lock.json
 # Hand-authored content; format deliberately, not in bulk.
 examples/
 library/
+connectors/**/*.yaml
+connectors/**/*.svg
 docs/
 *.md

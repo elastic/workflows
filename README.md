@@ -41,6 +41,10 @@ Each template is a YAML file that combines:
 
 The build pipeline in this repo turns the source templates into per-Kibana-version catalogues and uploads them to a CDN. Kibana fetches the catalogue at install time, renders the install form, substitutes the operator's values, and persists the resulting workflow as a Kibana saved object.
 
+The repository also contains a separate declarative connector catalog. Connector
+definitions and icons are versioned, validated, and published independently so a
+connector change does not require rebuilding or deploying Kibana.
+
 ---
 
 ## Repository structure
@@ -53,9 +57,14 @@ elastic/workflows/
 │   │   │   └── ip-reputation-check.yaml
 │   │   └── …
 │   └── categories.yaml                     # closed-vocab category registry
+├── connectors/
+│   ├── schema.json                         # declarative connector schema
+│   ├── abuseipdb/                          # versioned YAML and SVG assets
+│   └── okta/
 ├── kibana-versions.json                    # policy file (latest, oldest, cataloguePer)
 ├── scripts/
-│   └── build-catalog.mjs                   # catalogue generator (Node 20+, ESM)
+│   ├── build-catalog.mjs                   # catalogue generator (Node 20+, ESM)
+│   └── build-connector-catalog.mjs         # connector catalogue generator
 ├── docs/
 │   ├── concepts.md                         # workflow engine concepts
 │   ├── schema.md                           # workflow YAML schema reference
@@ -122,13 +131,21 @@ Consumers see (all served under a `/library/` path prefix, leaving room for othe
 - `/library/v1/<version>/catalogs/templates.json` — the catalogue rows for a given Kibana version.
 - `/library/v1/templates/<slug>/<version>.yaml` — immutable, version-keyed template bodies.
 
-The catalogue is republished on every merge to `main`.
+Declarative connector consumers use:
+
+- `/connectors/v1/catalog.json` — active-version pointers plus every published definition hash.
+- `/connectors/v1/schema.json` — the authoring contract.
+- `/connectors/v1/connectors/<name>/<version>.yaml` — immutable connector definitions.
+- `/connectors/v1/connectors/<name>/<version>.svg` — versioned connector icons.
+
+Workflow templates and connectors have independent Buildkite publishers with
+path filters. A merge republishes only the catalog whose sources changed.
 
 ---
 
 ## Air-gapped deployments
 
-Kibana instances that cannot reach the CDN read the same catalogue from disk. Each [release](https://github.com/elastic/workflows/releases) carries a `workflows-library-<tag>.tar.gz` asset — a snapshot of the `/v1` tree published to the CDN — plus a `.sha256` sidecar to verify the download.
+Kibana instances that cannot reach the CDN read the workflow template catalogue from disk. Each [release](https://github.com/elastic/workflows/releases) carries a `workflows-library-<tag>.tar.gz` asset — a snapshot of the `/v1` tree published to the CDN — plus a `.sha256` sidecar to verify the download.
 
 ```bash
 sha256sum -c workflows-library-<tag>.tar.gz.sha256
@@ -143,6 +160,9 @@ workflowsManagement.library.bundlePath: /path/to/workflows-library
 
 `bundlePath` is mutually exclusive with `registryUrl` — setting both fails config validation. The bundle is read once at startup, so replacing the directory takes effect on the next Kibana restart.
 
+Declarative connectors still require an HTTP registry. Connector air-gap loading
+is not part of this draft.
+
 [`publish-bundle.yml`](./.github/workflows/publish-bundle.yml) cuts a bundle whenever the set of Kibana versions in the catalogue changes: a new minor branch appears in `elastic/kibana`, or the version declared in `main`'s `package.json` moves to the next minor. Both happen when a release branches, so every bundle carries an exact catalogue for every version current at the time. A weekly check compares against the previous release and does nothing when the version set is unchanged.
 
 Because that trigger tracks Kibana versions rather than template content, a bundle can lag behind recently merged templates. Maintainers can cut one at any time by running the workflow manually (**Actions → Publish air-gap bundle → Run workflow**) or by pushing a `v*` tag.
@@ -154,9 +174,15 @@ Because that trigger tracks Kibana versions rather than template content, a bund
 ```bash
 npm install
 npm run build:catalog
+npm run build:connectors
 ```
 
-Outputs to `dist/v1/`. The script fetches the live Kibana `main` semver and the list of supported named minors from `elastic/kibana`. For offline iteration, two env-var overrides skip the network calls — see the [Validating locally](./CONTRIBUTING.md#validating-locally) section of CONTRIBUTING.md.
+Workflow templates output to `dist/v1/`. Declarative connectors output to
+`dist/connectors/v1/`. The workflow script fetches the live Kibana `main` semver
+and the list of supported named minors from `elastic/kibana`. For offline
+iteration, two env-var overrides skip those network calls. See
+[Validating locally](./CONTRIBUTING.md#validating-locally) and the
+[connector catalog guide](./connectors/README.md).
 
 ---
 

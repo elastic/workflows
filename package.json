@@ -2,21 +2,26 @@
   "name": "@elastic/workflows-library",
   "version": "0.0.0",
   "private": true,
-  "description": "Source repo for the Kibana Workflow Template Library",
+  "description": "Source repo for Kibana workflow templates and declarative connectors",
   "license": "Apache-2.0",
   "type": "module",
   "engines": {
     "node": ">=20"
   },
   "scripts": {
+    "build": "npm run build:catalog && npm run build:connectors",
     "build:catalog": "node scripts/build-catalog.mjs",
+    "build:connectors": "node scripts/build-connector-catalog.mjs",
+    "check": "npm run lint && npm test && npm run build:connectors && KIBANA_MAIN_VERSION=9.6.0 KIBANA_NAMED_MINORS='' npm run build:catalog",
     "lint": "eslint .",
     "lint:fix": "eslint . --fix",
     "format": "prettier --write .",
-    "format:check": "prettier --check ."
+    "format:check": "prettier --check .",
+    "test": "node --test scripts/*.test.mjs"
   },
   "dependencies": {
-    "js-yaml": "^4.2.0",
+    "ajv": "^8.20.0",
+    "js-yaml": "^5.3.0",
     "semver": "^7.8.4"
   },
   "devDependencies": {

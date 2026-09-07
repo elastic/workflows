@@ -1,14 +1,8 @@
 ---
 # $yaml-language-server: $schema=https://raw.githubusercontent.com/buildkite/pipeline-schema/main/schema.json
 steps:
-  - label: "Build"
-    command: "true"
-
-  - label: "Test"
-    command: "true"
-
-  - label: "Deploy"
-    command: "true"
-
-  - label: "Publish"
-    command: "true"
+  - label: ':pipeline: Validate catalogs'
+    command: 'npm ci --ignore-scripts && npm run check'
+    timeout_in_minutes: 15
+    agents:
+      image: 'docker.elastic.co/ci-agent-images/kibana/chainguard-nodejs-20'

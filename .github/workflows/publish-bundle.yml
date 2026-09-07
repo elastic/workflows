@@ -69,8 +69,8 @@ jobs:
           if ! previous_tag="$(gh release view --json tagName --jq .tagName 2>/dev/null)"; then
             echo "No previous release; cutting the first bundle."
           else
-            gh release download "${previous_tag}" --pattern '*.tar.gz' --dir previous
-            tar -xzf previous/*.tar.gz -C previous
+            gh release download "${previous_tag}" --pattern 'workflows-library-*.tar.gz' --dir previous
+            tar -xzf previous/workflows-library-*.tar.gz -C previous
             previous_versions="$(jq -Sc '[.versions[] | {id, kibana}]' previous/v1/kibana-versions.json)"
             echo "Catalog versions in ${previous_tag}: ${previous_versions}"
 
@@ -109,16 +109,19 @@ jobs:
           # rather than failing. `--target` creates the tag for scheduled and
           # manual runs, where it does not exist yet.
           if gh release view "${TAG}" > /dev/null 2>&1; then
-            gh release upload "${TAG}" "${ASSET}" "${ASSET}.sha256" --clobber
+            gh release upload "${TAG}" \
+              "${ASSET}" "${ASSET}.sha256" \
+              --clobber
             exit 0
           fi
 
           # One archive serves every listed version — the bundle reader selects the
           # catalog matching the Kibana it runs in — so the versions belong in the
           # title, not the tag or the filename.
-          notes="$(printf 'Catalog bundle for air-gapped Kibana deployments.\n\nCovered Kibana versions: **%s**\n\nSee [Air-gapped deployments](https://github.com/elastic/workflows#air-gapped-deployments) for download, checksum verification, and `bundlePath` setup.\n' "${VERSIONS}")"
+          notes="$(printf 'Catalog bundle for air-gapped Kibana deployments.\n\nCovered Kibana versions: **%s**\n\nSee [Air-gapped deployments](https://github.com/elastic/workflows#air-gapped-deployments) for download and checksum verification.\n' "${VERSIONS}")"
 
-          gh release create "${TAG}" "${ASSET}" "${ASSET}.sha256" \
+          gh release create "${TAG}" \
+            "${ASSET}" "${ASSET}.sha256" \
             --target "${GITHUB_SHA}" \
             --title "Workflow Template Library ${TAG} — Kibana ${VERSIONS}" \
             --notes "${notes}"

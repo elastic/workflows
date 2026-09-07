@@ -14,6 +14,7 @@ Thanks for your interest in contributing. This document is the authoring guide f
   - [Install-time inputs (`install.form` + `__install__.*`)](#install-time-inputs-installform--__install__)
   - [Step types and connectors](#step-types-and-connectors)
   - [Style and idiomatic patterns](#style-and-idiomatic-patterns)
+- [Authoring a declarative connector](#authoring-a-declarative-connector)
 - [Validating locally](#validating-locally)
 - [Versioning](#versioning)
 - [Pull request flow](#pull-request-flow)
@@ -28,6 +29,8 @@ Thanks for your interest in contributing. This document is the authoring guide f
 3. **Extend the categories vocabulary.** When a new template genuinely needs a category not in `library/categories.yaml`, add the entry in the same PR.
 4. **Improve documentation.** Fix unclear wording, add examples, clarify the authoring rules.
 5. **Report issues.** File a GitHub issue for bugs, suggestions, or missing capabilities.
+6. **Add or update a declarative connector.** Add an immutable versioned YAML and
+   SVG pair under `connectors/<name>/`.
 
 ---
 
@@ -178,6 +181,29 @@ The catalog generator derives `stepTypes` and `triggerTypes` for each template �
 - **Body comments must survive install on their own.** At install time the entire `template-metadata` block — including `install.form` and every field label/description — is stripped away; only the workflow body and its comments are rendered into the operator's installed workflow. So **never write a body comment (or a runtime `console` message) that refers to `template-metadata`, an install-form field, or its label/description** — e.g. "(see install form)" or "enable the *Overwrite existing* option". Once installed, that thing no longer exists and the reference dangles. Instead, describe the value itself, and when you point the user at a knob to change, point at what survives into the installed YAML — the `consts:` entry or `inputs:` value they can edit (e.g. "set `overwrite_existing: true` in consts").
 - **Snake_case for workflow-body identifiers** (input names, step names): `ip_address`, `check_abuseipdb`, `format_results`. Kebab-case is reserved for `install.form` field names.
 - **Prefer the dedicated `data.*` step types over abusing `console` for value transformation.** Use `data.parseJson`, `data.set`, etc. when you want to compute or restructure data.
+
+---
+
+## Authoring a declarative connector
+
+Declarative connectors live under `connectors/<name>/` and are validated against
+[`connectors/schema.json`](./connectors/schema.json). See the
+[connector catalog guide](./connectors/README.md) for the source layout,
+versioning rules, generated output, and delivery paths.
+
+Every change creates a new semantic version. Existing versions remain published
+because Kibana connector instances can be pinned to them. Branded SVGs are
+separate versioned assets beside the YAML. The YAML records the relative path and
+SHA-256 hash.
+
+Run:
+
+```bash
+npm run build:connectors
+```
+
+The build fails on schema violations, file and version mismatches, incorrect
+hashes, oversized icons, path traversal, and active or external SVG content.
 
 ---
 

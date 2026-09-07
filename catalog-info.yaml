@@ -1,11 +1,13 @@
 # yaml-language-server: $schema=https://json.schemastore.org/catalog-info.json
 #
 # Backstage catalog definition for elastic/workflows. Declares the repo as a
-# Component plus two Buildkite pipelines:
+# Component plus three Buildkite pipelines:
 #   - `workflows` — the default repo pipeline (Renovate + catalog-info
 #     validation), scaffolded by the Backstage bootstrap.
 #   - `workflows / publish-catalog` — publishes the Workflow Template Library
 #     catalog to the CDN on merge to `main`.
+#   - `workflows / publish-connector-catalog` — publishes declarative connector
+#     definitions and icons independently.
 ---
 apiVersion: backstage.io/v1alpha1
 kind: Component
@@ -13,7 +15,7 @@ metadata:
   name: workflows-library
   description: >-
     Source repo for the Kibana Workflow Template Library: curated workflow
-    templates and the catalog publisher that ships them to the CDN.
+    templates, declarative connector definitions, and their catalog publishers.
   links:
     - title: Workflow Template Library epic
       url: https://github.com/elastic/security-team/issues/15748
@@ -41,10 +43,10 @@ spec:
     kind: Pipeline
     metadata:
       name: workflows
-      description: ""
+      description: ''
     spec:
       repository: elastic/workflows
-      pipeline_file: ".buildkite/pipeline.yml"
+      pipeline_file: '.buildkite/pipeline.yml'
       provider_settings:
         build_pull_request_forks: true
       teams:
@@ -52,6 +54,38 @@ spec:
           access_level: MANAGE_BUILD_AND_READ
         everyone:
           access_level: READ_ONLY
+---
+# Publishes declarative connector definitions and icons independently of templates.
+# yaml-language-server: $schema=https://gist.githubusercontent.com/elasticmachine/988b80dae436cafea07d9a4a460a011d/raw/rre.schema.json
+apiVersion: backstage.io/v1alpha1
+kind: Resource
+metadata:
+  name: bk-workflows-publish-connector-catalog
+  description: Publishes declarative connector definitions and icons to the CDN
+spec:
+  type: buildkite-pipeline
+  owner: group:workflows-eng
+  system: buildkite
+  implementation:
+    apiVersion: buildkite.elastic.dev/v1
+    kind: Pipeline
+    metadata:
+      name: workflows / publish-connector-catalog
+      description: Publishes declarative connector definitions and icons to the CDN
+    spec:
+      repository: elastic/workflows
+      pipeline_file: .buildkite/pipelines/publish_connector_catalog.yml
+      default_branch: main
+      branch_configuration: main
+      provider_settings:
+        build_branches: true
+        build_pull_requests: false
+        trigger_mode: code
+      teams:
+        everyone:
+          access_level: READ_ONLY
+        workflows-eng:
+          access_level: MANAGE_BUILD_AND_READ
 ---
 # Publishes the Workflow Template Library catalog to the CDN on merge to `main`.
 # yaml-language-server: $schema=https://gist.githubusercontent.com/elasticmachine/988b80dae436cafea07d9a4a460a011d/raw/rre.schema.json
@@ -76,7 +110,7 @@ spec:
       default_branch: main
       # Only build the main branch for the credentialed publish. Fork PRs are
       # not built on public repos (platform constraint); PR validation is a
-      # separate, secret-free GitHub Actions workflow.
+      # separate, secret-free default Buildkite pipeline.
       branch_configuration: main
       provider_settings:
         build_branches: true

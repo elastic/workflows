@@ -3,11 +3,20 @@
 # Registered via catalog-info.yaml (Backstage). Runs on merge to `main` and
 # publishes the generated catalog to the production CDN bucket.
 steps:
-  - label: ":cloud: Publish catalog → workflows.elastic.co"
+  - label: ':cloud: Publish catalog → workflows.elastic.co'
     command: .buildkite/scripts/publish_catalog.sh prod
     timeout_in_minutes: 20
+    if_changed:
+      - 'library/**/*'
+      - 'kibana-versions.json'
+      - 'scripts/build-catalog.mjs'
+      - 'package.json'
+      - 'package-lock.json'
+      - '.buildkite/scripts/publish_catalog.sh'
+      - '.buildkite/scripts/publish_common.sh'
+      - '.buildkite/pipelines/publish_catalog.yml'
     agents:
       # Kibana-owned CI image with node + Cloud SDK (gcloud) + vault preinstalled
       # (recommended by eng-prod). Kibana owns version bumps; we can move to a
       # newer nodejs image later since we only require node >= 20.
-      image: "docker.elastic.co/ci-agent-images/kibana/chainguard-nodejs-20"
+      image: 'docker.elastic.co/ci-agent-images/kibana/chainguard-nodejs-20'
