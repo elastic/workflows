@@ -27,7 +27,6 @@ enabled: true
 # ---------------------------------------------------------------------------
 triggers:
   - type: manual
-    enabled: true
     inputs:
       - name: snowflake_query
         default: SELECT * FROM SECURITY_EVENTS ORDER BY timestamp DESC LIMIT 10

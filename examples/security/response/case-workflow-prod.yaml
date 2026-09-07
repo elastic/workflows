@@ -110,7 +110,7 @@ steps:
       headers:
         Content-Type: application/json
         x-apikey: "{{ consts.vtkey }}"
-      timeout: 30s 
+    timeout: 30s 
 
   # -------------------------------------------------------------------------
   # STEP 3: lookup-url-via-urlscan
@@ -125,7 +125,7 @@ steps:
       method: GET
       headers:
         Content-Type: application/json
-      timeout: 30s 
+    timeout: 30s 
 
   # -------------------------------------------------------------------------
   # STEP 4: search-on-web

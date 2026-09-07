@@ -1,0 +1,192 @@
+template-metadata:
+  slug: disk-capacity-forecast-alert
+  version: "1.0.0"
+  availability: ">=9.5.0"
+  name: "Disk Capacity Forecast Alert"
+  description: >-
+    Run a daily ML forecast on an anomaly detection job and notify Slack when
+    the upper confidence bound crosses a capacity threshold at a future
+    timestamp. Polls until the forecast finishes, then searches forecast
+    results for breaching host/mount partitions.
+  solutions: [observability]
+  categories: [monitoring, notification]
+  install:
+    form:
+      - name: job-id
+        label: "ML anomaly detection job ID"
+        description: >-
+          The anomaly detection job to forecast (e.g. disk-usage-forecast).
+          Must already exist and be open.
+        inputType: text
+        required: true
+      - name: results-index
+        label: "ML results index"
+        description: >-
+          The index that holds this job's anomaly and forecast results
+          (e.g. .ml-anomalies-disk-usage-forecast).
+        inputType: esIndex
+        required: true
+      - name: slack-connector
+        label: "Slack (v2) connector"
+        description: >-
+          The Slack (v2) connector used to post breach alerts. Configure it
+          with a bot token that has chat:write scope for the target channel.
+        inputType: connector
+        connectorType: .slack2
+        required: true
+      - name: slack-channel
+        label: "Slack channel ID"
+        description: >-
+          Channel ID to post alerts to (e.g. C0123456789). The bot must
+          already be a member of this channel.
+        inputType: text
+        required: true
+
+name: Disk Capacity Forecast Alert
+description: >
+  Daily ML forecast on an anomaly detection job; alert Slack when the upper
+  confidence bound crosses 90% at a future timestamp.
+
+consts:
+  job_id: __install__.job-id
+  results_index: __install__.results-index
+  slack_channel: __install__.slack-channel
+  forecast_duration: 14d
+  forecast_expires_in: 24h
+  # max_model_memory is capped at min(500mb, 40% of the job's model_memory_limit);
+  # values above that are auto-reduced. Raise the job memory for large fleets.
+  forecast_max_model_memory: 200mb
+  breach_threshold: 0.9
+  # Cap partitions listed in the alert; total count is still reported separately.
+  max_partitions_in_alert: 20
+
+triggers:
+  - type: scheduled
+    with:
+      rrule:
+        freq: DAILY
+        interval: 1
+        tzid: UTC
+        byhour: [6]
+        byminute: [0]
+
+steps:
+  - name: run_forecast
+    type: elasticsearch.request
+    with:
+      method: POST
+      path: "/_ml/anomaly_detectors/{{ consts.job_id }}/_forecast"
+      body:
+        duration: "{{ consts.forecast_duration }}"
+        expires_in: "{{ consts.forecast_expires_in }}"
+        max_model_memory: "{{ consts.forecast_max_model_memory }}"
+
+  # Poll until the forecast has finished and its result docs are searchable,
+  # instead of a fixed sleep. A high-cardinality forecast can take well over 5s;
+  # the request-stats doc flips to forecast_status:finished when it is done.
+  - name: wait_for_forecast
+    type: while
+    condition: "steps.check_forecast.output.hits.total.value < 1"
+    max-iterations:
+      limit: 60
+      on-limit: fail
+    steps:
+      - name: backoff
+        type: wait
+        with:
+          duration: 2s
+      - name: check_forecast
+        type: elasticsearch.request
+        with:
+          method: POST
+          path: "/{{ consts.results_index }}/_search"
+          body:
+            size: 0
+            query:
+              bool:
+                filter:
+                  - term:
+                      job_id: "{{ consts.job_id }}"
+                  - term:
+                      result_type: model_forecast_request_stats
+                  - term:
+                      forecast_id: "{{ steps.run_forecast.output.forecast_id }}"
+                  - term:
+                      forecast_status: finished
+
+  - name: search_breaches
+    type: elasticsearch.request
+    with:
+      method: POST
+      path: "/{{ consts.results_index }}/_search"
+      body:
+        size: 0
+        # Combine host + mount into one key so we can count distinct affected
+        # partitions (host x mount) regardless of how many buckets each spans.
+        runtime_mappings:
+          host_mount:
+            type: keyword
+            script:
+              source: "emit(doc['partition_field_value'].value + '|' + doc['by_field_value'].value)"
+        query:
+          bool:
+            filter:
+              - term:
+                  job_id: "{{ consts.job_id }}"
+              - term:
+                  result_type: model_forecast
+              - term:
+                  forecast_id: "{{ steps.run_forecast.output.forecast_id }}"
+              - range:
+                  forecast_upper:
+                    gte: "{{ consts.breach_threshold }}"
+              - range:
+                  timestamp:
+                    gte: now
+        aggs:
+          # True count of distinct breaching host/mount pairs (not truncated).
+          total_affected:
+            cardinality:
+              field: host_mount
+          # Bounded, deterministic top-N ordered by urgency (soonest breach).
+          # multi_terms (unlike composite size:N) can order by a sub-metric,
+          # so the listed partitions are the most urgent, not alphabetical.
+          top_partitions:
+            multi_terms:
+              size: "{{ consts.max_partitions_in_alert }}"
+              terms:
+                - field: partition_field_value
+                - field: by_field_value
+              order:
+                earliest_breach: asc
+            aggs:
+              earliest_breach:
+                min:
+                  field: timestamp
+              peak_forecast:
+                max:
+                  field: forecast_upper
+
+  - name: notify_if_breach
+    type: if
+    condition: "steps.search_breaches.output.hits.total.value > 0"
+    steps:
+      - name: slack_alert
+        type: slack2.sendMessage
+        connector-id: __install__.slack-connector
+        with:
+          channel: "{{ consts.slack_channel }}"
+          text: |
+            Disk capacity forecast alert (job: {{ consts.job_id }})
+            Forecast ID: {{ steps.run_forecast.output.forecast_id }}
+            Future breach buckets (forecast_upper >= {{ consts.breach_threshold }}): {{ steps.search_breaches.output.hits.total.value }} across {{ steps.search_breaches.output.aggregations.total_affected.value }} partition(s)
+            Horizon: {{ consts.forecast_duration }}
+
+            Showing top {{ steps.search_breaches.output.aggregations.top_partitions.buckets | size }} partition(s), soonest breach first:
+            {% for b in steps.search_breaches.output.aggregations.top_partitions.buckets %}- {{ b.key[0] }} {{ b.key[1] }} — peak {{ b.peak_forecast.value | times: 100 | round: 1 }}%, first crosses on {{ b.earliest_breach.value_as_string | date: "%Y-%m-%d %H:%M UTC" }} ({{ b.doc_count }} future bucket(s))
+            {% endfor %}
+    else:
+      - name: no_breach_log
+        type: console
+        with:
+          message: "No disk forecast breaches above {{ consts.breach_threshold }} for {{ consts.job_id }}"

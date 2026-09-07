@@ -126,6 +126,29 @@ The catalogue is republished on every merge to `main`.
 
 ---
 
+## Air-gapped deployments
+
+Kibana instances that cannot reach the CDN read the same catalogue from disk. Each [release](https://github.com/elastic/workflows/releases) carries a `workflows-library-<tag>.tar.gz` asset — a snapshot of the `/v1` tree published to the CDN — plus a `.sha256` sidecar to verify the download.
+
+```bash
+sha256sum -c workflows-library-<tag>.tar.gz.sha256
+tar -xzf workflows-library-<tag>.tar.gz -C /path/to/workflows-library
+```
+
+Point Kibana at the extracted directory in `kibana.yml`:
+
+```yaml
+workflowsManagement.library.bundlePath: /path/to/workflows-library
+```
+
+`bundlePath` is mutually exclusive with `registryUrl` — setting both fails config validation. The bundle is read once at startup, so replacing the directory takes effect on the next Kibana restart.
+
+[`publish-bundle.yml`](./.github/workflows/publish-bundle.yml) cuts a bundle whenever the set of Kibana versions in the catalogue changes: a new minor branch appears in `elastic/kibana`, or the version declared in `main`'s `package.json` moves to the next minor. Both happen when a release branches, so every bundle carries an exact catalogue for every version current at the time. A weekly check compares against the previous release and does nothing when the version set is unchanged.
+
+Because that trigger tracks Kibana versions rather than template content, a bundle can lag behind recently merged templates. Maintainers can cut one at any time by running the workflow manually (**Actions → Publish air-gap bundle → Run workflow**) or by pushing a `v*` tag.
+
+---
+
 ## Building the catalogue locally
 
 ```bash

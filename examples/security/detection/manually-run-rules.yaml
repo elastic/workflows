@@ -97,6 +97,7 @@ steps:
       - name: run_rule_manually
         type: http
         connector-id: REPLACE_WITH_CONNECTOR_ID
+        timeout: 30s
         with:
           url: >-
             https://your-deployment.elastic-cloud.com
@@ -104,7 +105,6 @@ steps:
           headers:
             kbn-xsrf: kibana
             x-elastic-internal-origin: Kibana
-          timeout: 30s
           body:
             - rule_id: '{{foreach.item}}'
               ranges:
