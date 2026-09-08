@@ -78,17 +78,20 @@ export const extractLiquidErrorPosition = (text, errorMessage) => {
     offset += Math.max(0, col - 1);
 
     const remainingText = text.substring(offset);
-    let end = offset + 1;
-    if (remainingText.startsWith('{{')) {
-      const closeMatch = remainingText.indexOf('}}');
-      end = offset + (closeMatch > -1 ? closeMatch + 2 : Math.min(50, remainingText.length));
-    } else if (remainingText.startsWith('{%')) {
-      const closeMatch = remainingText.indexOf('%}');
-      end = offset + (closeMatch > -1 ? closeMatch + 2 : Math.min(50, remainingText.length));
-    } else {
-      const wordMatch = remainingText.match(/^\S+/);
-      end = offset + (wordMatch ? wordMatch[0].length : DEFAULT_ERROR_HIGHLIGHT_EXTENSION);
-    }
+    const end = remainingText.startsWith('{{')
+      ? (() => {
+          const closeMatch = remainingText.indexOf('}}');
+          return offset + (closeMatch > -1 ? closeMatch + 2 : Math.min(50, remainingText.length));
+        })()
+      : remainingText.startsWith('{%')
+        ? (() => {
+            const closeMatch = remainingText.indexOf('%}');
+            return offset + (closeMatch > -1 ? closeMatch + 2 : Math.min(50, remainingText.length));
+          })()
+        : (() => {
+            const wordMatch = remainingText.match(/^\S+/);
+            return offset + (wordMatch ? wordMatch[0].length : DEFAULT_ERROR_HIGHLIGHT_EXTENSION);
+          })();
 
     return { start: Math.max(0, offset), end: Math.min(text.length, end) };
   }

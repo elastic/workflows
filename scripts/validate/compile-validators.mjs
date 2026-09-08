@@ -38,7 +38,8 @@ export const compileVariant = (doc, variant) => {
     const message = error instanceof Error ? error.message : String(error);
     throw new Error(
       `Failed to compile the "${variant}" workflow schema. The artifact may be stale or ` +
-        `predate native discriminator support. Underlying ajv error: ${message}`
+        `predate native discriminator support. Underlying ajv error: ${message}`,
+      { cause: error }
     );
   }
 };
