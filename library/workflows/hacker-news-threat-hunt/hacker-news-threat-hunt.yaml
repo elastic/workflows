@@ -4,7 +4,7 @@ template-metadata:
   availability: '>=9.5.0'
   name: 'The Hacker News Threat Hunt'
   description: >-
-    Read the The Hacker News RSS feed, extract threat intelligence,
+    Read The Hacker News RSS feed, extract threat intelligence,
     and use an Agent Builder agent to hunt for related activity in your
     Elasticsearch data. Create a Security case with the briefing, hunt
     results, and detection recommendations. Runs manually or every 24 hours.
@@ -31,7 +31,7 @@ template-metadata:
 
 name: The Hacker News Threat Hunt
 description: >-
-  Analyze up to ten The Hacker News feed articles, hunt for related
+  Analyze up to ten articles from The Hacker News feed, hunt for related
   activity in the last 24 hours, and record the results in a Security case.
   Each run creates a new case; articles can appear in more than one run.
 enabled: true
