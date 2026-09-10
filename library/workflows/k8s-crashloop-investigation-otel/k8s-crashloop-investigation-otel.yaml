@@ -1,0 +1,555 @@
+version: '1'
+name: K8s CrashLoopBackOff Investigation (OTel)
+description: >
+  Automatically investigates a Kubernetes CrashLoopBackOff or OOMKilled alert
+  on clusters using the OTel ingest path (EDOT / kube-stack). Queries pod
+  context, ML anomaly results, upstream health, and recent changes, then uses
+  AI to synthesize a root cause hypothesis before anyone opens a dashboard.
+enabled: true
+tags:
+  - kubernetes
+  - observability
+  - investigation
+  - otel
+
+consts:
+  # OTel-receiver-namespaced indices (EDOT default)
+  k8s_pod_metrics_index: "metrics-kubeletstatsreceiver.otel-*"
+  k8s_cluster_metrics_index: "metrics-k8sclusterreceiver.otel-*"
+  k8s_logs_index: "logs-*.otel-*"
+  k8s_events_index: "logs-k8seventsreceiver.otel-*"
+  apm_txn_metrics_index: "metrics-service_transaction.1m.otel-default"
+  ml_anomalies_index: ".ml-anomalies-*"
+  # Ships with the kubernetes_otel integration (kubernetes_otel-metrics-ml.json).
+  # Detector: high_mean k8s.pod.memory.working_set BY k8s.deployment.name PARTITION k8s.namespace.name.
+  # So in .ml-anomalies-*, the alerting workload is by_field_value and the namespace is
+  # partition_field_value (NOT service_name as the never-shipped k8s_pod_memory_growth assumed).
+  ml_memory_job: "k8s_workload_memory_anomaly"
+  upstream_error_multiplier: 5
+  upstream_latency_multiplier: 3
+  recent_change_window_minutes: 120
+  # OOM is inferred from memory_limit_utilization (%) at/above this threshold when the
+  # k8sclusterreceiver last_terminated_reason field is absent (it is on some EDOT ingest
+  # paths). kubeletstats memory_limit_utilization is reliable, so a pod crashlooping with
+  # memory pinned at its limit is treated as OOMKilled.
+  oom_memory_util_threshold: 90
+  # Sustained-OOM: treat memory as OOMKilled only when it stays pegged (>= 90%) for at least this
+  # fraction of samples in the window, not on a single transient MAX spike (which false-positives).
+  oom_memory_sustained_fraction: 0.5
+
+triggers:
+  # Inputs are declared on the manual trigger: the strict workflow schema disallows a
+  # root-level `inputs` block. The same names are populated from the alert event at
+  # runtime, so {{ inputs.* }} resolves for both the manual and alert paths.
+  - type: manual
+    inputs:
+      properties:
+        service_name:
+          type: string
+          description: "K8s deployment / service name of the alerting service"
+        namespace:
+          type: string
+          description: "K8s namespace of the alerting service"
+        pod_name:
+          type: string
+          description: "Name of the specific pod that triggered the alert"
+        alert_timestamp:
+          type: string
+          description: "ISO8601 timestamp of the alert firing"
+  - type: alert
+
+steps:
+
+  # =========================================================================
+  # STEP 0 — Normalize inputs from either trigger
+  # =========================================================================
+  # Manual runs provide named inputs (under the manual trigger). The native
+  # Kibana "Workflows" alert action instead delivers the alert as
+  # event.alerts[*] (no input mapping). Take the named input when present,
+  # else fall back to the alert event's grouping fields.
+  #
+  # The grouping-field paths below are not arbitrary: an alert rule's group-by keys are
+  # surfaced on the event under `kibana.alert.grouping.<field>`, and the field names used
+  # here — k8s.pod.name, k8s.container.name, k8s.namespace.name — are the OTel Kubernetes
+  # semantic-convention resource attributes:
+  #   https://opentelemetry.io/docs/specs/semconv/resource/k8s/
+  # The EDOT / kube-stack ingest path sets these on every k8s signal, and the shipped
+  # CrashLoopBackOff / OOMKilled rules group by them, so a triggering alert surfaces them
+  # at exactly these paths. If a rule groups on different fields, adjust these defaults.
+  - name: resolve_inputs
+    type: data.set
+    with:
+      pod_name: "{{ inputs.pod_name | default: event.alerts[0].kibana.alert.grouping.k8s.pod.name | default: 'MISSING' }}"
+      service_name: "{{ inputs.service_name | default: event.alerts[0].kibana.alert.grouping.k8s.container.name | default: 'MISSING' }}"
+      namespace: "{{ inputs.namespace | default: event.alerts[0].kibana.alert.grouping.k8s.namespace.name | default: 'MISSING' }}"
+      # Empty (not MISSING) when unset, so the ES|QL anchor below falls back to NOW() for ad-hoc runs.
+      alert_timestamp: "{{ inputs.alert_timestamp | default: event.alerts[0].kibana.alert.start | default: '' }}"
+
+  # (The "inputs resolved?" guard is not a separate step: it gates no control flow —
+  # if pod/namespace are MISSING the WHERE clauses simply match nothing and the run
+  # degrades to a clean "insufficient data" RCA — so it is computed inline in the final
+  # synthesis prompt below rather than in its own data.set step.)
+
+  # =========================================================================
+  # STEP 1 — Characterize the triggering event
+  # =========================================================================
+  # k8sclusterreceiver emits k8s.container.restarts and k8s.container.status.last_terminated_reason.
+  # kubeletstatsreceiver emits k8s.pod.memory_limit_utilization / k8s.pod.cpu_limit_utilization as ratios.
+  - name: characterize_restarts
+    type: elasticsearch.esql.query
+    with:
+      query: |
+        FROM metrics-k8sclusterreceiver.otel-*
+        | WHERE k8s.pod.name == "{{ steps.resolve_inputs.output.pod_name }}"
+          AND k8s.namespace.name == "{{ steps.resolve_inputs.output.namespace }}"
+        | EVAL _anchor = CASE("{{ steps.resolve_inputs.output.alert_timestamp }}" != "", TO_DATETIME("{{ steps.resolve_inputs.output.alert_timestamp }}"), NOW())
+        | WHERE @timestamp > _anchor - 1 hour AND @timestamp <= _anchor
+        | STATS restart_count = MAX(k8s.container.restarts)
+      format: json
+    on-failure:
+      continue: true
+
+  # Sparse field isolated in its own step: k8s.container.status.last_terminated_reason is
+  # unmapped on some EDOT ingest paths, and an unmapped column fails the whole ES|QL query.
+  # Keeping it separate means a hard-fail here never costs us restart_count above.
+  - name: characterize_term_reason
+    type: elasticsearch.esql.query
+    with:
+      query: |
+        FROM metrics-k8sclusterreceiver.otel-*
+        | WHERE k8s.pod.name == "{{ steps.resolve_inputs.output.pod_name }}"
+          AND k8s.namespace.name == "{{ steps.resolve_inputs.output.namespace }}"
+        | EVAL _anchor = CASE("{{ steps.resolve_inputs.output.alert_timestamp }}" != "", TO_DATETIME("{{ steps.resolve_inputs.output.alert_timestamp }}"), NOW())
+        | WHERE @timestamp > _anchor - 1 hour AND @timestamp <= _anchor
+        | STATS last_term_reason = VALUES(k8s.container.status.last_terminated_reason)
+        | EVAL last_term_reason = MV_FIRST(last_term_reason)
+      format: json
+    on-failure:
+      continue: true
+
+  - name: characterize_utilization
+    type: elasticsearch.esql.query
+    with:
+      query: |
+        FROM metrics-kubeletstatsreceiver.otel-*
+        | WHERE k8s.pod.name == "{{ steps.resolve_inputs.output.pod_name }}"
+          AND k8s.namespace.name == "{{ steps.resolve_inputs.output.namespace }}"
+        | EVAL _anchor = CASE("{{ steps.resolve_inputs.output.alert_timestamp }}" != "", TO_DATETIME("{{ steps.resolve_inputs.output.alert_timestamp }}"), NOW())
+        | WHERE @timestamp > _anchor - 15 minutes AND @timestamp <= _anchor
+        | EVAL mem_pegged = CASE(k8s.pod.memory_limit_utilization >= 0.90, 1, 0)
+        | STATS
+            memory_util_pct = ROUND(MAX(k8s.pod.memory_limit_utilization) * 100, 1),
+            cpu_util_pct    = ROUND(MAX(k8s.pod.cpu_limit_utilization) * 100, 1),
+            mem_total       = COUNT(k8s.pod.memory_limit_utilization),
+            mem_pegged      = SUM(mem_pegged)
+        | EVAL memory_pegged_fraction = ROUND(mem_pegged::double / mem_total, 2)
+        | KEEP memory_util_pct, cpu_util_pct, memory_pegged_fraction, mem_pegged, mem_total
+      format: json
+    on-failure:
+      continue: true
+
+  # CPU-throttling proxy: fraction of sample buckets where container-level
+  # cpu_limit_utilization was pinned >= 0.95. Sustained high values here
+  # correlate with cgroup CPU throttling even when a dedicated
+  # throttled.time counter isn't exported by the kubelet.
+  - name: characterize_throttling
+    type: elasticsearch.esql.query
+    with:
+      query: |
+        FROM metrics-kubeletstatsreceiver.otel-*
+        | WHERE k8s.pod.name == "{{ steps.resolve_inputs.output.pod_name }}"
+          AND k8s.namespace.name == "{{ steps.resolve_inputs.output.namespace }}"
+          AND k8s.container.name == "{{ steps.resolve_inputs.output.service_name }}"
+        | EVAL _anchor = CASE("{{ steps.resolve_inputs.output.alert_timestamp }}" != "", TO_DATETIME("{{ steps.resolve_inputs.output.alert_timestamp }}"), NOW())
+        | WHERE @timestamp > _anchor - 15 minutes AND @timestamp <= _anchor
+        | EVAL pegged = CASE(k8s.container.cpu_limit_utilization >= 0.95, 1, 0)
+        | STATS
+            total_samples = COUNT(k8s.container.cpu_limit_utilization),
+            pegged_samples = SUM(pegged),
+            max_cpu_util = ROUND(MAX(k8s.container.cpu_limit_utilization) * 100, 1)
+        | EVAL throttle_fraction = ROUND(pegged_samples::double / total_samples, 2)
+        | KEEP throttle_fraction, max_cpu_util, pegged_samples, total_samples
+      format: json
+    on-failure:
+      continue: true
+
+  # OOM detection robust to ingest gaps. The real last_terminated_reason is preferred,
+  # but k8sclusterreceiver does not emit it on every EDOT ingest path. So we fall back to
+  # kubeletstats memory_limit_utilization: a pod crashlooping with memory pinned at its
+  # limit (>= oom_memory_util_threshold) is treated as OOMKilled.
+  # characterize_term_reason.values[0] = [last_term_reason] (own step; sparse-field-isolated);
+  # characterize_utilization.values[0] = [memory_util_pct, cpu_util_pct].
+  - name: set_term_reason
+    type: data.set
+    with:
+      memory_util_pct: "{{ steps.characterize_utilization.output.values[0][0] | default: 0 }}"
+      memory_pegged_fraction: "{{ steps.characterize_utilization.output.values[0][2] | default: 0 }}"
+      # Sustained-OOM: OOMKilled only if the real termination reason says so, OR memory stayed
+      # pegged for >= oom_memory_sustained_fraction of the window (not a single transient MAX spike).
+      term_reason: "{% if steps.characterize_term_reason.output.values[0][0] == 'OOMKilled' or steps.characterize_utilization.output.values[0][2] >= consts.oom_memory_sustained_fraction %}OOMKilled{% else %}{{ steps.characterize_term_reason.output.values[0][0] | default: '' }}{% endif %}"
+
+  # Branch on OOMKilled (replaces exit-code 137 check from the legacy workflow)
+  - name: route_by_term_reason
+    type: if
+    condition: "steps.set_term_reason.output.term_reason: OOMKilled"
+    steps:
+
+      # =======================================================================
+      # STEP 2a — Memory investigation: consult ML anomaly results
+      # =======================================================================
+      - name: check_ml_memory_anomaly
+        type: elasticsearch.search
+        with:
+          index: ".ml-anomalies-*"
+          query:
+            bool:
+              must:
+                - term:
+                    job_id: "{{ consts.ml_memory_job }}"
+                # Record-level results carry the by/partition granularity; bucket
+                # results would only tell us "something in the namespace" anomalied.
+                - term:
+                    result_type: "record"
+                # by_field = k8s.deployment.name (the alerting workload), partition = namespace.
+                - term:
+                    by_field_value: "{{ steps.resolve_inputs.output.service_name }}"
+                - term:
+                    partition_field_value: "{{ steps.resolve_inputs.output.namespace }}"
+                - range:
+                    timestamp:
+                      # Anchored: honors a supplied alert_timestamp; falls back to 'now' for ad-hoc runs.
+                      gte: "{{ steps.resolve_inputs.output.alert_timestamp | default: 'now' }}||-1h"
+                      lte: "{{ steps.resolve_inputs.output.alert_timestamp | default: 'now' }}||+5m"
+              filter:
+                # record_score is the record-level anomaly score (anomaly_score is bucket-only).
+                - range:
+                    record_score:
+                      gte: 50
+          size: 1
+          # unmapped_type lets the sort degrade to zero hits (not a hard search error) when the
+          # ML job has never produced records, so record_score is unmapped in .ml-anomalies-*.
+          sort:
+            - record_score:
+                order: desc
+                unmapped_type: double
+        on-failure:
+          continue: true
+
+      - name: set_anomaly_count
+        type: data.set
+        with:
+          anomaly_count: "{{ steps.check_ml_memory_anomaly.output.hits.total.value | default: 0 }}"
+
+      - name: branch_on_leak_signal
+        type: if
+        condition: "steps.set_anomaly_count.output.anomaly_count > 0"
+        steps:
+          - name: flag_leak_suspected
+            type: data.set
+            with:
+              leak_suspected: "true"
+              anomaly_score: "{{ steps.check_ml_memory_anomaly.output.hits.hits[0]._source.record_score }}"
+        else:
+          - name: flag_load_driven_oom
+            type: data.set
+            with:
+              leak_suspected: "false"
+              oom_note: "memory spike appears load-driven, no ML anomaly found"
+
+    else:
+      # Not OOM — investigate application logs
+      # =======================================================================
+      # STEP 2b — Log investigation: retrieve + AI classify
+      # =======================================================================
+      - name: get_recent_logs
+        type: elasticsearch.esql.query
+        with:
+          query: |
+            FROM logs-*.otel-*
+            | WHERE k8s.pod.name == "{{ steps.resolve_inputs.output.pod_name }}"
+              AND k8s.namespace.name == "{{ steps.resolve_inputs.output.namespace }}"
+            | EVAL _anchor = CASE("{{ steps.resolve_inputs.output.alert_timestamp }}" != "", TO_DATETIME("{{ steps.resolve_inputs.output.alert_timestamp }}"), NOW())
+            | WHERE @timestamp <= _anchor AND @timestamp > _anchor - 1 hour
+            | SORT @timestamp DESC
+            | LIMIT 200
+            | KEEP @timestamp, body.text, severity_text, k8s.container.name
+          format: json
+        on-failure:
+          continue: true
+
+      - name: set_log_count
+        type: data.set
+        with:
+          log_count: "{{ steps.get_recent_logs.output.values | size | default: 0 }}"
+
+      - name: branch_on_logs_available
+        type: if
+        condition: "steps.set_log_count.output.log_count > 0"
+        steps:
+          - name: classify_log_pattern
+            type: ai.classify
+            with:
+              input: "{{ steps.get_recent_logs.output | json }}"
+              categories:
+                - connection_refused
+                - dependency_unavailable
+                - out_of_memory
+                - timeout
+                - panic_or_segfault
+                - unrecognized
+              instructions: |
+                You are classifying Kubernetes container logs immediately before a crash.
+                Identify the dominant error pattern from the log lines provided.
+                Choose the single best category. If no clear pattern is found, return "unrecognized".
+              includeRationale: true
+        else:
+          - name: set_no_logs_classification
+            type: data.set
+            with:
+              log_classification_category: "no_logs_available"
+              log_classification_rationale: >
+                No container logs were found in the hour before the alert.
+                Container may have crashed before writing logs, or log shipping is broken.
+                Check if pod was scheduled, and verify EDOT logs collector is healthy.
+
+  # =========================================================================
+  # STEP 3 — Scope: is the failure isolated, or is the environment degraded?
+  # =========================================================================
+  # Robust across ingest paths: a dependency->health join is unreliable OOTB because
+  # span.destination.service.resource (an RPC service name or host:port) does not map
+  # cleanly to service.name. Instead, compare EVERY APM service's error rate + mean
+  # latency now vs. its 7-day baseline. Only the alerting service degraded -> likely a
+  # local root cause; several services degraded together -> a shared/upstream cause.
+  # Needs only service.name, present on every OTel/EDOT ingest path.
+  # Deterministic materiality: one query joins each service's current window against its own
+  # same-hour-7-days-ago baseline and counts how many services exceed the error/latency
+  # multipliers. Reproducible (the count is computed in ES|QL, not eyeballed by the model).
+  # Output columns: [degraded_services, total_services, degraded_list].
+  - name: get_env_scope
+    type: elasticsearch.esql.query
+    with:
+      query: |
+        FROM metrics-service_transaction.1m.otel-default
+        | EVAL _anchor = CASE("{{ steps.resolve_inputs.output.alert_timestamp }}" != "", TO_DATETIME("{{ steps.resolve_inputs.output.alert_timestamp }}"), NOW())
+        | WHERE (@timestamp > _anchor - 1 hour AND @timestamp <= _anchor)
+             OR (@timestamp > _anchor - 169 hours AND @timestamp < _anchor - 168 hours)
+        | EVAL win = CASE(@timestamp > _anchor - 1 hour, "cur", "base")
+        | STATS
+            cur_ev   = COUNT(transaction.duration.summary) WHERE win == "cur",
+            cur_ok   = SUM(event.success_count) WHERE win == "cur",
+            cur_lat  = AVG(transaction.duration.summary) WHERE win == "cur",
+            base_ev  = COUNT(transaction.duration.summary) WHERE win == "base",
+            base_ok  = SUM(event.success_count) WHERE win == "base",
+            base_lat = AVG(transaction.duration.summary) WHERE win == "base"
+          BY service.name
+        | WHERE cur_ev > 0
+        | EVAL cur_err  = ROUND((cur_ev - cur_ok) / cur_ev * 100, 2),
+               base_err = CASE(base_ev > 0, ROUND((base_ev - base_ok) / base_ev * 100, 2), null),
+               cur_ms   = ROUND(cur_lat / 1000, 2),
+               base_ms  = CASE(base_ev > 0, ROUND(base_lat / 1000, 2), null)
+        | EVAL degraded = CASE(
+               (base_err > 0 AND cur_err > base_err * {{ consts.upstream_error_multiplier }})
+            OR (base_ms  > 0 AND cur_ms  > base_ms  * {{ consts.upstream_latency_multiplier }}), 1, 0)
+        | STATS
+            degraded_services = SUM(degraded),
+            total_services    = COUNT(*),
+            degraded_list     = VALUES(CASE(degraded == 1, service.name, null))
+      format: json
+    on-failure:
+      continue: true
+
+  # Guard: no services with current traffic -> nothing to assess (APM not instrumented / no traffic).
+  - name: set_env_row_count
+    type: data.set
+    with:
+      degraded_services: "{{ steps.get_env_scope.output.values[0][0] | default: 0 }}"
+      total_services: "{{ steps.get_env_scope.output.values[0][1] | default: 0 }}"
+
+  - name: branch_on_env_data
+    type: if
+    condition: "steps.set_env_row_count.output.total_services > 0"
+    steps:
+      - name: assess_environment_health
+        type: ai.classify
+        with:
+          input: |
+            Alerting service: {{ steps.resolve_inputs.output.service_name }}
+            Scope was computed deterministically in ES|QL (thresholds: {{ consts.upstream_error_multiplier }}x error rate
+            or {{ consts.upstream_latency_multiplier }}x mean latency vs the same hour 7 days ago):
+            - services degraded: {{ steps.set_env_row_count.output.degraded_services }} of {{ steps.set_env_row_count.output.total_services }}
+            - degraded services (names): {{ steps.get_env_scope.output.values[0][2] | json }}
+          categories:
+            - isolated_to_alerting_service
+            - widespread_degradation
+          instructions: |
+            The degraded-service count above was computed deterministically; use it directly.
+            Return "widespread_degradation" if the count is 2 or more, OR if the single degraded
+            service is one OTHER than {{ steps.resolve_inputs.output.service_name }} — this points to
+            a shared or upstream cause. Return "isolated_to_alerting_service" if the count is 0, or
+            the only degraded service IS {{ steps.resolve_inputs.output.service_name }} — a local
+            root cause. In your rationale, name the degraded services.
+          includeRationale: true
+    else:
+      - name: set_env_insufficient_data
+        type: data.set
+        with:
+          environment_assessment_category: "insufficient_data"
+          environment_assessment_rationale: >
+            No APM transaction metrics were available to compare. Either APM is not instrumented
+            in this environment or no traffic was produced in the comparison windows. Scope
+            (isolated vs widespread) cannot be determined from signals.
+
+  # =========================================================================
+  # STEP 4 — Correlate with recent K8s changes
+  # =========================================================================
+  - name: get_recent_changes
+    type: elasticsearch.esql.query
+    with:
+      query: |
+        FROM logs-k8seventsreceiver.otel-*
+        | WHERE resource.attributes.k8s.namespace.name == "{{ steps.resolve_inputs.output.namespace }}"
+        | EVAL _anchor = CASE("{{ steps.resolve_inputs.output.alert_timestamp }}" != "", TO_DATETIME("{{ steps.resolve_inputs.output.alert_timestamp }}"), NOW())
+        | WHERE @timestamp > _anchor - 2 hours AND @timestamp <= _anchor
+          AND attributes.k8s.event.reason IN (
+              "Pulling", "Pulled",
+              "Created", "Started",
+              "SuccessfulRescale",
+              "Evicted",
+              "FailedScheduling",
+              "BackOff",
+              "Killing"
+          )
+        | SORT @timestamp DESC
+        | KEEP @timestamp,
+               attributes.k8s.event.reason,
+               body.text,
+               resource.attributes.k8s.object.name
+        | LIMIT 20
+      format: json
+    on-failure:
+      continue: true
+
+  # =========================================================================
+  # STEP 5 — AI synthesis: root cause summary
+  # =========================================================================
+  - name: synthesize_findings
+    type: ai.summarize
+    with:
+      input: |
+        ## Investigation context for {{ steps.resolve_inputs.output.service_name }} in {{ steps.resolve_inputs.output.namespace }}
+
+        ### Alert
+        Alert timestamp: {{ steps.resolve_inputs.output.alert_timestamp }} (empty = ad-hoc "triage now" run)
+        Pod: {{ steps.resolve_inputs.output.pod_name }}
+        Inputs resolved: {% if steps.resolve_inputs.output.pod_name == 'MISSING' or steps.resolve_inputs.output.namespace == 'MISSING' %}false{% else %}true{% endif %}
+
+        ### Step 1 — Pod characterization
+        Restart data: {{ steps.characterize_restarts.output | json }}
+        Termination-reason data: {{ steps.characterize_term_reason.output | json }}
+        Utilization (memory / cpu vs limits): {{ steps.characterize_utilization.output | json }}
+        Last terminated reason: {{ steps.set_term_reason.output.term_reason }}
+
+        ### Step 2 — Memory / Log investigation
+        {% if steps.set_anomaly_count.output.anomaly_count > 0 %}
+        ML memory anomaly detected. Anomaly score: {{ steps.check_ml_memory_anomaly.output.hits.hits[0]._source.record_score }}
+        Leak suspected: true
+        {% elsif steps.flag_load_driven_oom.output.oom_note %}
+        ML memory anomaly check: no anomaly found. {{ steps.flag_load_driven_oom.output.oom_note }}
+        Leak suspected: false
+        {% endif %}
+        {% if steps.classify_log_pattern.output.category %}
+        Log pattern classification: {{ steps.classify_log_pattern.output.category }}
+        Rationale: {{ steps.classify_log_pattern.output.rationale }}
+        {% elsif steps.set_no_logs_classification.output.log_classification_category %}
+        Log pattern classification: {{ steps.set_no_logs_classification.output.log_classification_category }}
+        Rationale: {{ steps.set_no_logs_classification.output.log_classification_rationale }}
+        {% endif %}
+
+        ### Step 3 — CPU throttling
+        {% if steps.characterize_throttling.output.values[0] %}
+        Fraction of samples with cpu_limit_utilization >= 0.95 (last 15m): {{ steps.characterize_throttling.output.values[0][0] }}
+        Peak container CPU utilization vs limit: {{ steps.characterize_throttling.output.values[0][1] }}%
+        Pegged samples: {{ steps.characterize_throttling.output.values[0][2] }} of {{ steps.characterize_throttling.output.values[0][3] }}
+        {% else %}
+        No throttling data available.
+        {% endif %}
+
+        ### Step 4 — Scope (isolated vs widespread)
+        {% if steps.assess_environment_health.output.category %}
+        Assessment: {{ steps.assess_environment_health.output.category }}
+        Rationale: {{ steps.assess_environment_health.output.rationale }}
+        {% else %}
+        Assessment: {{ steps.set_env_insufficient_data.output.environment_assessment_category }}
+        Rationale: {{ steps.set_env_insufficient_data.output.environment_assessment_rationale }}
+        {% endif %}
+
+        ### Step 5 — Recent K8s events
+        {{ steps.get_recent_changes.output | json }}
+
+      instructions: |
+        You are an SRE assistant synthesizing a Kubernetes incident investigation.
+
+        HOW TO REASON (do this before writing):
+        1. The alerting pod's OWN signals are primary. Anchor the root cause on its
+           termination reason, restart count, memory/CPU utilization, throttling, logs,
+           and memory ML -- in that order. If memory utilization is high or the
+           termination reason is OOMKilled, the most likely cause is THIS pod's own
+           memory limit or leak -- name that, not an external one.
+        2. Treat the environment-scope finding as CONTEXT, not cause. "Widespread
+           degradation" elsewhere is correlation, not proof of a shared root cause.
+           Attribute the alerting pod's failure to an upstream or shared cause ONLY if
+           BOTH hold: (a) the pod's own signals do not explain the failure, AND (b) the
+           co-degraded services degraded BEFORE this pod (temporal precedence). Absent
+           that, name the local cause and list the others under SCOPE as co-occurring.
+        3. Do not manufacture a "cascading failure" story from coincidental, concurrent
+           degradation. When unsure, prefer the simplest local explanation and lower the
+           confidence rather than inventing a shared-infrastructure narrative.
+
+        Produce a structured root cause summary in exactly this format:
+
+        ---
+        ROOT CAUSE HYPOTHESIS (confidence: high | medium | low)
+
+        [One paragraph synthesizing the evidence chain. Name the specific
+        service, the symptom, and the most likely cause. Be concrete.]
+
+        EVIDENCE
+        - [Finding from pod characterization: termination reason, restart count, utilization %]
+        - [Finding from memory ML or log classification]
+        - [Finding from environment scope: isolated to this service vs widespread]
+        - [Finding from recent changes, if any found]
+
+        PROBABLE CAUSE: [Single most likely cause in one sentence]
+
+        RECOMMENDED NEXT STEPS
+        1. [Most immediately actionable step]
+        2. [Secondary step]
+        3. [Optional third step if warranted]
+
+        SCOPE / BLAST RADIUS
+        [From the environment scope assessment: state whether the failure is isolated to the
+         alerting service or part of a wider degradation. Name any co-degraded services.]
+
+        CONFIDENCE NOTE
+        [Only include if confidence is medium or low. Explain what signal is missing.]
+        ---
+
+        Do not add commentary outside this format.
+      maxLength: 1500
+
+  # =========================================================================
+  # STEP 6 — Expose the result as the workflow output
+  # =========================================================================
+  # Surface the RCA as the workflow's output (status / resource / classification /
+  # summary) so it appears in the execution Overview and is consumable by callers or
+  # composed workflows — consistent with the aws-*-investigation-otel templates.
+  # Without this, the summary is reachable only by opening the synthesize_findings step.
+  - name: output_result
+    type: workflow.output
+    with:
+      status: "investigated"
+      pod: "{{ steps.resolve_inputs.output.pod_name }}"
+      namespace: "{{ steps.resolve_inputs.output.namespace }}"
+      service: "{{ steps.resolve_inputs.output.service_name }}"
+      classification: "{{ steps.set_term_reason.output.term_reason }}"
+      summary: "{{ steps.synthesize_findings.output.content }}"
