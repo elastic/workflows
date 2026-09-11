@@ -2,9 +2,14 @@
 #
 # Registered via catalog-info.yaml (Backstage). Runs on merge to `main` and
 # publishes the generated catalog to the production CDN bucket.
+#
+# To publish a staging preview instead, create a build by hand with
+# `PUBLISH_TARGET=staging` in its environment. The target is interpolated when
+# the pipeline is uploaded, so the resolved bucket shows up in the step label;
+# `publish_catalog.sh` rejects anything other than `prod` or `staging`.
 steps:
-  - label: ":cloud: Publish catalog → workflows.elastic.co"
-    command: .buildkite/scripts/publish_catalog.sh prod
+  - label: ":cloud: Publish catalog → ${PUBLISH_TARGET:-prod} CDN"
+    command: .buildkite/scripts/publish_catalog.sh ${PUBLISH_TARGET:-prod}
     timeout_in_minutes: 20
     agents:
       # Kibana-owned CI image with node + Cloud SDK (gcloud) + vault preinstalled
