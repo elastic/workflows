@@ -1,8 +1,11 @@
 #!/usr/bin/env bash
 #
-# Publishes the Workflow Template Library catalog to its CDN-backed GCS bucket.
+# Publishes the Workflow Template Library catalog to its CDN-backed GCS buckets.
 #
-# Usage: publish_catalog.sh <prod|staging>
+# Usage: publish_catalog.sh [prod|staging ...]   (default: every target)
+#
+# Every target is served from one build of the catalog, so the CDNs cannot
+# drift apart: deployments pointed at either host see the same templates.
 #
 # Runs on a Buildkite agent, which already has repo-scoped Vault access
 # (kv/ci-shared/workflows-library/gcs-publish) via the standard agent env
@@ -13,31 +16,44 @@
 
 set -euo pipefail
 
-TARGET="${1:-prod}"
+# No arguments publishes everywhere, prod first so a problem with another
+# bucket cannot hold up the catalog customers actually read.
+if [[ $# -gt 0 ]]; then
+  TARGETS=("$@")
+else
+  TARGETS=(prod staging)
+fi
 
 # The catalog is served under a `/library/` path prefix (e.g.
 # https://workflows.elastic.co/library/v1/...) so the same host/bucket can host
 # other content (public schemas, managed workflows, ...) under sibling prefixes.
-# `library/v1` is a real object-key prefix in the bucket, not a CDN rewrite.
-case "$TARGET" in
-  prod)
-    BUCKET="elastic-workflows-library-prod"
-    DEST="library/v1"
-    CDN_BASE="https://workflows.elastic.co/library/v1"
-    ;;
-  staging)
-    # Staging is for maintainer-pushed branches only (fork PRs are not built on
-    # public repos). Published at the same path; a maintainer branch overwrites
-    # the previous staging preview.
-    BUCKET="elastic-workflows-library-staging"
-    DEST="library/v1"
-    CDN_BASE="https://workflows-staging.elastic.co/library/v1"
-    ;;
-  *)
-    echo "Unknown target '${TARGET}' (expected 'prod' or 'staging')" >&2
+# `library/v1` is a real object-key prefix in the bucket, not a CDN rewrite, and
+# is the same for every target — they differ only by bucket and public host.
+DEST="library/v1"
+
+# Echoes "<bucket> <cdn base>" for a target; non-zero for an unknown name.
+target_config() {
+  case "$1" in
+    prod)
+      echo "elastic-workflows-library-prod https://workflows.elastic.co/library/v1"
+      ;;
+    staging)
+      echo "elastic-workflows-library-staging https://workflows-staging.elastic.co/library/v1"
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+# Reject unknown targets before building anything or reading credentials.
+for target in "${TARGETS[@]}"; do
+  if ! target_config "${target}" > /dev/null; then
+    echo "Unknown target '${target}' (expected 'prod' or 'staging')" >&2
     exit 1
-    ;;
-esac
+  fi
+done
+echo "Publishing to: ${TARGETS[*]}"
 
 # Vault is a network service; the CI docs recommend retrying its CLI calls.
 retry() {
@@ -74,19 +90,23 @@ set +x  # defensive: make sure the service-account key is never traced
 trap 'gcloud auth revoke --all 2>/dev/null || true' EXIT
 gcloud auth activate-service-account --key-file <(echo "${GCS_SA_KEY}")
 
-echo "--- Publish dist/v1 → gs://${BUCKET}/${DEST}"
 # Mirror the tree with `gcloud storage rsync` (the recommended CLI; gsutil's
 # rsync is deprecated and unreliable on some platforms).
 # `--delete-unmatched-destination-objects` removes objects for templates deleted
 # from the repo. Short TTL per the catalog cache contract: body URLs are stable
 # but NOT immutable, so no `immutable` cache directive.
-gcloud storage rsync dist/v1 "gs://${BUCKET}/${DEST}" \
-  --recursive \
-  --delete-unmatched-destination-objects \
-  --cache-control="public, max-age=300"
+for target in "${TARGETS[@]}"; do
+  read -r bucket cdn_base <<< "$(target_config "${target}")"
 
-echo "--- Annotate build"
-buildkite-agent annotate --style "success" --context "catalog-publish" \
-  "Published to ${CDN_BASE}/ — verify: \`curl -s ${CDN_BASE}/main/catalogs/templates.json | jq '.templates[].slug'\`"
+  echo "--- Publish dist/v1 → gs://${bucket}/${DEST}"
+  gcloud storage rsync dist/v1 "gs://${bucket}/${DEST}" \
+    --recursive \
+    --delete-unmatched-destination-objects \
+    --cache-control="public, max-age=300"
+
+  # Per-target context; a shared one would overwrite the previous annotation.
+  buildkite-agent annotate --style "success" --context "catalog-publish-${target}" \
+    "Published to ${cdn_base}/ — verify: \`curl -s ${cdn_base}/main/catalogs/templates.json | jq '.templates[].slug'\`"
+done
 
 echo "--- Done"
