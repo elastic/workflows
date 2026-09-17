@@ -1,0 +1,70 @@
+template-metadata:
+  slug: alert-notification-group-slack
+  version: "1.0.0"
+  availability: ">=9.5.0"
+  name: "Alert Notification Group to Slack"
+  description: >-
+    Post a Slack digest for a notification group dispatched by an alerting
+    action policy. Summarises every alert in the group with its
+    status, severity, and originating rule, so responders receive one
+    message per group instead of one per alert.
+  categories: [notification]
+  install:
+    form:
+      - name: slack-connector
+        label: "Slack (v2) connector"
+        description: >-
+          The Slack (v2) connector used to post the digest. Configure it with
+          a bot token that has chat:write scope for the target channel.
+        inputType: connector
+        connectorType: .slack2
+        required: true
+      - name: slack-channel
+        label: "Slack channel ID"
+        description: >-
+          Channel ID to post the digest to (e.g. C0123456789). The bot must
+          already be a member of this channel.
+        inputType: text
+        required: true
+
+name: Alert Notification Group to Slack
+description: Post a Slack digest summarising every alert episode in a dispatched notification group.
+
+consts:
+  slack_channel: __install__.slack-channel
+
+triggers:
+  # An action policy dispatches one run per notification group and passes the
+  # group as `payload`. The $ref resolves to the built-in notification-group
+  # schema, which also drives editor completion for `inputs.payload.*`.
+  - type: manual
+    inputs:
+      properties:
+        payload:
+          $ref: '#/kibana/definitions/alertingV2NotificationGroup'
+      required:
+        - payload
+      additionalProperties: false
+
+steps:
+  # Episodes are listed in dispatch order. Severity is optional and rule_id is
+  # null for externally-sourced alerts, so both are rendered conditionally; the
+  # rule name is resolved through the payload's rule map.
+  - name: post_group_digest
+    type: slack2.sendMessage
+    connector-id: __install__.slack-connector
+    with:
+      channel: "{{ consts.slack_channel }}"
+      text: |
+        *{{ inputs.payload.episodes | size }} alert episode(s)* — policy `{{ inputs.payload.policyId }}`
+        {%- if inputs.payload.groupKey %}
+        > Group: {{ inputs.payload.groupKey | json }}
+        {%- endif %}
+
+        {% for e in inputs.payload.episodes -%}
+        • `{{ e.episode_id }}` — *{{ e.episode_status }}*{% if e.severity %} · {{ e.severity }}{% endif %}{% if e.rule_id %} · {{ inputs.payload.rules[e.rule_id].name }}{% endif %} · last event {{ e.last_event_timestamp | date: "%Y-%m-%d %H:%M UTC" }}
+        {% endfor %}
+    on-failure:
+      retry:
+        max-attempts: 2
+        delay: 3s
