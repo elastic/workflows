@@ -1,0 +1,448 @@
+version: '1'
+name: Censys Host Enrichment
+description: >-
+  Enrich an alert with Censys Platform host data for every available IP
+  field (host.ip, source.ip, destination.ip) independently. By default each
+  IP is looked up with the SOC-optimized censys.getHostEnrichment endpoint,
+  falling back to censys.getHost if the enrichment endpoint returns an error
+  (e.g. the organization lacks access to it); set consts.use_host_enrichment
+  to false to always use censys.getHost. Each field is
+  written back under censys.host_enrichment.<field> on the alert
+  document as the full Censys host resource (result.resource), e.g.
+  censys.host_enrichment.host, .source, .destination. The dedicated
+  host_enrichment namespace keeps this workflow's output separate from
+  the other workflows. Manual runs use inputs.host and enrich under
+  censys.host_enrichment.host only - when inputs.alert_index and
+  inputs.alert_id are also provided the enrichment is written back to
+  that document, otherwise the full host resource is logged to the
+  workflow console.
+tags:
+  - censys
+  - enrichment
+  - security
+  - threat-intel
+enabled: true
+
+# Empty list used as a safe fallback (`| default: consts.empty_arr`) whenever a
+# Censys response leaves out an optional array such as services, labels, or DNS
+# names. Keeps later steps from failing on missing data.
+consts:
+  connector_id: "<connector-id>"
+  # use_host_enrichment is true: try getHostEnrichment first, fall back to
+  # getHost on error. use_host_enrichment is false: always use getHost.
+  use_host_enrichment: true
+  empty_arr: []
+
+triggers:
+  - type: manual
+    inputs:
+      - name: host
+        type: string
+        required: false
+        description: >-
+          IPv4 or IPv6 address. Used only on manual runs to enrich
+          censys.host_enrichment.host.* with that IP. Ignored on alert
+          triggers.
+      - name: alert_index
+        type: string
+        required: false
+        description: >-
+          Optional Elasticsearch index. When provided together with
+          alert_id on a manual run, the manual enrichment is written back
+          to that document under censys.host_enrichment.host.*. Ignored
+          on alert triggers.
+      - name: alert_id
+        type: string
+        required: false
+        description: >-
+          Optional Elasticsearch document ID. When provided together with
+          alert_index on a manual run, the manual enrichment is written
+          back to that document under censys.host_enrichment.host.*.
+          Ignored on alert triggers.
+  # NOTE: On alert triggers this workflow reads event.alerts[0], i.e. only the
+  # FIRST alert in the batch. When adding this workflow as a rule action, enable
+  # the "Run per alert" toggle so the rule invokes the workflow once per alert
+  # and every alert's data is processed (otherwise only the first is enriched).
+  - type: alert
+
+
+steps:
+  # Decide which IPs to look up, as a list of {field, ip} pairs.
+  #   • Alert run  - one entry per non-blank IP on the alert (host.ip,
+  #     source.ip, destination.ip), each enriched separately. Manual inputs
+  #     are ignored.
+  #   • Manual run - a single entry for the IP typed into `host`.
+  # The `field` value (host/source/destination) decides where the result is
+  # written later, under censys.host_enrichment.<field>.
+  - name: build_targets
+    type: data.parseJson
+    source: |-
+      [
+      {%- if event.alerts[0] != blank -%}
+        {%- assign sep = '' -%}
+        {%- if event.alerts[0].host.ip != blank -%}{{ sep }}{"field":"host","ip":"{{ event.alerts[0].host.ip }}"}{%- assign sep = ',' -%}{%- endif -%}
+        {%- if event.alerts[0].source.ip != blank -%}{{ sep }}{"field":"source","ip":"{{ event.alerts[0].source.ip }}"}{%- assign sep = ',' -%}{%- endif -%}
+        {%- if event.alerts[0].destination.ip != blank -%}{{ sep }}{"field":"destination","ip":"{{ event.alerts[0].destination.ip }}"}{%- endif -%}
+      {%- elsif inputs.host != blank -%}
+        {"field":"host","ip":"{{ inputs.host }}"}
+      {%- endif -%}
+      ]
+    with: {}
+
+  # Work out which alert document to write results back to: the
+  # alert's own index/id on alert runs, or the optional alert_index/alert_id
+  # inputs on manual runs. If either is missing, the write steps are skipped
+  # and the result is logged to the console instead (see log_when_no_target_doc).
+  - name: resolve_target_doc
+    type: data.set
+    with:
+      target_index: "{{ event.alerts[0]._index | default: inputs.alert_index }}"
+      target_id: "{{ event.alerts[0]._id | default: inputs.alert_id }}"
+
+  # Run the full enrichment below once per IP picked by build_targets.
+  # `foreach.item` holds the current {field, ip} pair.
+  - name: enrich_each_field
+    type: foreach
+    foreach: "${{ steps.build_targets.output }}"
+    steps:
+
+      # Prefer getHostEnrichment; fall back to getHost on error (or when
+      # use_host_enrichment is false). Step names must stay get_host_enrichment /
+      # get_host (dashboards count step_name; names must be unique, so one
+      # get_host covers both the disabled and fallback paths).
+      - name: fetch_enrichment_preferred
+        type: if
+        condition: "${{ consts.use_host_enrichment == true }}"
+        steps:
+          - name: get_host_enrichment
+            type: censys.getHostEnrichment
+            connector-id: "{{ consts.connector_id }}"
+            with:
+              host: "{{ foreach.item.ip }}"
+            on-failure:
+              continue: true
+
+          # getHostEnrichment failed - most often an access-related error
+          # (401/403/409) on orgs without the enrichment entitlement, but any
+          # error triggers the fallback so the workflow still enriches instead
+          # of failing. Retry the lookup with the classic getHost endpoint.
+          - name: fallback_to_get_host
+            type: if
+            condition: "${{ steps.get_host_enrichment.error != blank }}"
+            steps:
+              - name: log_fallback_to_get_host
+                type: console
+                with:
+                  message: |-
+                    censys.getHostEnrichment failed for {{ foreach.item.field }} ({{ foreach.item.ip }}); falling back to censys.getHost.
+                    {{ steps.get_host_enrichment.error | json }}
+
+      # getHost when enrichment is off or get_host_enrichment failed.
+      - name: fetch_get_host
+        type: if
+        condition: "${{ consts.use_host_enrichment != true or steps.get_host_enrichment.error != blank }}"
+        steps:
+          - name: get_host
+            type: censys.getHost
+            connector-id: "{{ consts.connector_id }}"
+            with:
+              host: "{{ foreach.item.ip }}"
+            on-failure:
+              continue: true
+
+      # Prefer enrichment result, else getHost.
+      - name: stash_iter
+        type: data.set
+        with:
+          host: "${{ steps.get_host_enrichment.output.result.resource | default: steps.get_host.output.result.resource }}"
+          field_name: "{{ foreach.item.field }}"
+
+      # If every Censys lookup for this IP failed, log it and move on to the
+      # next IP. This prevents writing an empty enrichment and note to the alert.
+      - name: skip_on_fetch_error
+        type: if
+        condition: "${{ variables.host == blank }}"
+        steps:
+          - name: log_fetch_error
+            type: console
+            with:
+              message: |-
+                Censys lookup failed for {{ foreach.item.field }} ({{ foreach.item.ip }}); skipping enrichment.
+          - name: skip_iteration
+            type: loop.continue
+
+      # Keep only the service fields we store/display (port, protocol, vulns,
+      # labels, threats, etc.). The default guards against a missing services list.
+      - name: normalize_services
+        type: data.map
+        items: "${{ variables.host.services | default: consts.empty_arr }}"
+        with:
+          fields:
+            port: "${{ item.port }}"
+            protocol: "${{ item.protocol }}"
+            transport_protocol: "{{ item.transport_protocol }}"
+            scan_time: "${{ item.scan_time }}"
+            vulns: "{{ item.vulns | default: consts.empty_arr | map: 'id' | join: ', ' }}"
+            labels:
+              $map: { items: "${{ item.labels | default: consts.empty_arr }}", item: "label" }
+              value: "${{ label.value }}"
+            threats:
+              $map: { items: "${{ item.threats | default: consts.empty_arr }}", item: "threat" }
+              name: "${{ threat.name }}"
+              type: "${{ threat.type }}"
+              tactic: "${{ threat.tactic }}"
+              id: "${{ threat.id }}"
+            # Note display: "name - type - tactic (id)" per threat. type and
+            # tactic are arrays, so each value is title-cased
+            # (COMMAND_AND_CONTROL → Command And Control) and the values are
+            # comma-separated; threats are separated by <br> so each one starts
+            # on its own line inside the Threats table cell. "" when none.
+            # `split` stringifies an array, so every array must be iterated
+            # element by element - splitting the array directly concatenates
+            # values ("Security Toolremote Access Tool").
+            threats_display: |-
+              {%- assign threats_list = item.threats | default: consts.empty_arr -%}
+              {%- assign threat_sep = '' -%}
+              {%- for t in threats_list -%}
+                {%- assign type_display = '' -%}
+                {%- assign type_sep = '' -%}
+                {%- assign type_values = t.type | default: consts.empty_arr -%}
+                {%- for type_value in type_values -%}
+                  {%- assign type_text = '' -%}
+                  {%- assign word_sep = '' -%}
+                  {%- assign type_words = type_value | split: '_' -%}
+                  {%- for word in type_words -%}
+                    {%- assign word_text = word | capitalize -%}
+                    {%- assign type_text = type_text | append: word_sep | append: word_text -%}
+                    {%- assign word_sep = ' ' -%}
+                  {%- endfor -%}
+                  {%- assign type_display = type_display | append: type_sep | append: type_text -%}
+                  {%- assign type_sep = ', ' -%}
+                {%- endfor -%}
+                {%- assign tactic_display = '' -%}
+                {%- assign tactic_sep = '' -%}
+                {%- assign tactic_values = t.tactic | default: consts.empty_arr -%}
+                {%- for tactic_value in tactic_values -%}
+                  {%- assign tactic_text = '' -%}
+                  {%- assign word_sep = '' -%}
+                  {%- assign tactic_words = tactic_value | split: '_' -%}
+                  {%- for word in tactic_words -%}
+                    {%- assign word_text = word | capitalize -%}
+                    {%- assign tactic_text = tactic_text | append: word_sep | append: word_text -%}
+                    {%- assign word_sep = ' ' -%}
+                  {%- endfor -%}
+                  {%- assign tactic_display = tactic_display | append: tactic_sep | append: tactic_text -%}
+                  {%- assign tactic_sep = ', ' -%}
+                {%- endfor -%}
+                {{- threat_sep -}}{{ t.name }} — {{ type_display }} — {{ tactic_display }} ({{ t.id }})
+                {%- assign threat_sep = '<br>' -%}
+              {%- endfor -%}
+        on-failure:
+          continue: true
+
+      # Keep only the text value of each host-level label.
+      - name: normalize_host_labels
+        type: data.map
+        items: "${{ variables.host.labels | default: consts.empty_arr }}"
+        with:
+          fields:
+            value: "${{ item.value }}"
+        on-failure:
+          continue: true
+
+      # Write the full Censys host resource (result.resource) onto the alert
+      # under the field it came from: censys.host_enrichment.host / .source /
+      # .destination. The outer `if` only runs when a target document exists;
+      # the `switch` picks the slot by field name. Manual runs with no alert
+      # document skip this and log to the console.
+      - name: dispatch_writes
+        type: if
+        condition: "${{ variables.target_index != blank and variables.target_id != blank }}"
+        steps:
+          - name: route_by_field
+            type: switch
+            expression: "{{ variables.field_name }}"
+            cases:
+              - match: "host"
+                steps:
+                  - name: do_write_host
+                    type: elasticsearch.update
+                    with:
+                      index: "{{ variables.target_index }}"
+                      id: "{{ variables.target_id }}"
+                      doc:
+                        censys:
+                          host_enrichment:
+                            host: "${{ variables.host }}"
+                    on-failure:
+                      continue: true
+              - match: "source"
+                steps:
+                  - name: do_write_source
+                    type: elasticsearch.update
+                    with:
+                      index: "{{ variables.target_index }}"
+                      id: "{{ variables.target_id }}"
+                      doc:
+                        censys:
+                          host_enrichment:
+                            source: "${{ variables.host }}"
+                    on-failure:
+                      continue: true
+              - match: "destination"
+                steps:
+                  - name: do_write_destination
+                    type: elasticsearch.update
+                    with:
+                      index: "{{ variables.target_index }}"
+                      id: "{{ variables.target_id }}"
+                      doc:
+                        censys:
+                          host_enrichment:
+                            destination: "${{ variables.host }}"
+                    on-failure:
+                      continue: true
+            default:
+              - name: log_unknown_field
+                type: console
+                with:
+                  message: "Host enrichment: unexpected field_name '{{ variables.field_name }}', no write performed."
+
+      # Add a readable note to the alert summarizing what Censys returned for
+      # this IP - Summary, GreyNoise, IPInfo (combined network+privacy from
+      # array objects with source IPINFO; missing fields default to false),
+      # Mallory, and Services tables. One note per enriched field. Skipped on
+      # manual runs that have no alert document.
+      - name: add_note_branch
+        type: if
+        condition: "${{ variables.target_index != blank and variables.target_id != blank }}"
+        steps:
+          - name: add_alert_note
+            type: kibana.request
+            with:
+              method: PATCH
+              path: /api/note
+              body:
+                note:
+                  timelineId: ""
+                  eventId: "{{ variables.target_id }}"
+                  note: |-
+                    ## Host Enrichment - `censys.host_enrichment.{{ variables.field_name }}`
+
+                    **Host:** `{{ variables.host.ip }}` - [View on Censys](https://platform.censys.io/hosts/{{ variables.host.ip | url_encode }})
+
+                    ### Summary
+
+                    | Field | Value |
+                    | :--- | :--- |
+                    | IP | `{{ variables.host.ip }}` |
+                    | Service Count | {{ variables.host.service_count }} |
+                    | AS Name | {{ variables.host.autonomous_system.name }} |
+                    | AS Number | {{ variables.host.autonomous_system.asn }} |
+                    | AS Description | {{ variables.host.autonomous_system.description }} |
+                    | AS BGP Prefix | {{ variables.host.autonomous_system.bgp_prefix }} |
+                    | AS Country Code | {{ variables.host.autonomous_system.country_code }} |
+                    | WHOIS Network | {{ variables.host.whois.network.name }} |
+                    | WHOIS Network Handle | {{ variables.host.whois.network.handle }} |
+                    | WHOIS Organization | {{ variables.host.whois.organization.name }} |
+                    | WHOIS Organization Address | {{ variables.host.whois.organization.address }} |
+                    | City | {{ variables.host.location.city }} |
+                    | Province | {{ variables.host.location.province }} |
+                    | Postal Code | {{ variables.host.location.postal_code }} |
+                    | Country | {{ variables.host.location.country }}{% if variables.host.location.country_code != blank %} ({{ variables.host.location.country_code }}){% endif %} |
+                    | Continent | {{ variables.host.location.continent }} |
+                    | Coordinates | {% if variables.host.location.coordinates.latitude != blank and variables.host.location.coordinates.longitude != blank %}{{ variables.host.location.coordinates.latitude }}, {{ variables.host.location.coordinates.longitude }}{% endif %} |
+                    | Host Labels | {{ steps.normalize_host_labels.output | map: 'value' | join: ', ' }} |
+                    | DNS Names | {{ variables.host.dns.names | default: consts.empty_arr | join: ', ' }} |
+                    | Forward DNS Names | {{ variables.host.dns.forward_dns.names | default: consts.empty_arr | join: ', ' }} |
+                    | Reverse DNS Names | {{ variables.host.dns.reverse_dns.names | default: consts.empty_arr | join: ', ' }} |
+                    | Network CIDRs | {{ variables.host.whois.network.cidrs | default: consts.empty_arr | join: ', ' }} |
+
+                    {%- if variables.host.greynoise != blank %}
+
+                    ### GreyNoise
+
+                    | Field | Value |
+                    | :--- | :--- |
+                    | Classification | {{ variables.host.greynoise.classification }} |
+                    | Threat Actor | {{ variables.host.greynoise.actor }} |
+                    | Last Seen Scanned | {{ variables.host.greynoise.last_observed_time }} |
+                    {%- endif %}
+
+                    {%- assign ipinfo_network = variables.host.network | default: consts.empty_arr | where: "source", "IPINFO" | first -%}
+                    {%- assign ipinfo_privacy = variables.host.privacy | default: consts.empty_arr | where: "source", "IPINFO" | first -%}
+                    {%- if ipinfo_network != blank or ipinfo_privacy != blank %}
+
+                    ### IPInfo
+
+                    | Field | Value |
+                    | :--- | :--- |
+                    | Network Hosting | {{ ipinfo_network.hosting | default: false }} |
+                    | Network Mobile | {{ ipinfo_network.mobile | default: false }} |
+                    | Network Satellite | {{ ipinfo_network.satellite | default: false }} |
+                    | Privacy Anonymous | {{ ipinfo_privacy.anonymous | default: false }} |
+                    | Privacy Tor | {{ ipinfo_privacy.tor | default: false }} |
+                    | Privacy Proxy | {{ ipinfo_privacy.proxy | default: false }} |
+                    | Privacy Relay | {{ ipinfo_privacy.relay | default: false }} |
+                    | Privacy VPN | {{ ipinfo_privacy.vpn | default: false }} |
+                    {%- endif %}
+
+                    {%- assign m = variables.host.third_party.mallory | default: consts.empty_arr | first -%}
+                    {%- if m != blank %}
+
+                    ### Mallory
+
+                    {%- assign opinion = m.opinions | default: consts.empty_arr | first -%}
+                    {%- if opinion != blank %}
+
+                    | Field | Value |
+                    | :--- | :--- |
+                    | Name | `{{ m.observable.name }}` |
+                    | Type | {{ m.observable.type }} |
+                    | Last Update At | {{ m.updated_at }} |
+                    | Description | {{ m.observable.description }} |
+                    | Verdict | {{ opinion.verdict | capitalize }} |
+                    | Confidence | {% if opinion.confidence != blank %}{{ opinion.confidence }}{% else %}-{% endif %} |
+                    | Mallory's Source | {{ opinion.source }} |
+                    {%- else %}
+
+                    | Field | Value |
+                    | :--- | :--- |
+                    | Name | `{{ m.observable.name }}` |
+                    | Type | {{ m.observable.type }} |
+                    | Last Update At | {{ m.updated_at }} |
+                    | Description | {{ m.observable.description }} |
+                    | Verdict | - |
+                    | Confidence | - |
+                    | Mallory's Source | - |
+                    {%- endif %}
+                    {%- endif %}
+
+                    {%- assign services_count = steps.normalize_services.output | size -%}
+                    {%- if services_count > 0 %}
+
+                    ### Services ({{ services_count }})
+
+                    | Port | Protocol | Transport | Labels | Threats | Vulnerabilities | Scan Time |
+                    | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+                    {%- for s in steps.normalize_services.output %}
+                    | {{ s.port }} | {{ s.protocol }} | {{ s.transport_protocol }} | {{ s.labels | default: consts.empty_arr | map: 'value' | join: ', ' }} | {{ s.threats_display }} | {{ s.vulns }} | {{ s.scan_time }} |
+                    {%- endfor %}
+                    {%- endif %}
+            on-failure:
+              continue: true
+
+      # Fallback when there is no alert document to update (e.g. a manual run
+      # without alert_index/alert_id): print the enrichment to the console so
+      # the result is still visible.
+      - name: log_when_no_target_doc
+        type: if
+        condition: "${{ variables.target_index == blank or variables.target_id == blank }}"
+        steps:
+          - name: console_log_enrichment
+            type: console
+            with:
+              message: |-
+                Censys enrichment for {{ variables.field_name }} ({{ variables.host.ip }}):
+                View on Censys: https://platform.censys.io/hosts/{{ variables.host.ip | url_encode }}
+                {{ variables.host | json }}
