@@ -5,7 +5,7 @@ template-metadata:
   name: "Alert Notification Group to Slack"
   description: >-
     Post a Slack digest for a notification group dispatched by an alerting
-    action policy. Summarises every alert episode in the group with its
+    action policy. Summarises every alert in the group with its
     status, severity, and originating rule, so responders receive one
     message per group instead of one per alert.
   categories: [notification]
