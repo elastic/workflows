@@ -250,6 +250,21 @@ steps:
         on-failure:
           continue: true
 
+      # Flatten the nested reputation.evidence[].feature object into flat rows
+      # for the note's Evidence table. The default guards against a missing
+      # evidence list (or missing reputation).
+      - name: normalize_evidence
+        type: data.map
+        items: "${{ variables.host.reputation.evidence | default: consts.empty_arr }}"
+        with:
+          fields:
+            name: "${{ item.feature.name }}"
+            value: "${{ item.feature.value }}"
+            contribution: "${{ item.feature.contribution }}"
+            category: "${{ item.feature.category }}"
+        on-failure:
+          continue: true
+
       # Write the full Censys host resource (result.resource) onto the alert
       # under the field it came from: censys.host_enrichment.host / .source /
       # .destination. The outer `if` only runs when a target document exists;
@@ -357,6 +372,41 @@ steps:
                     | Forward DNS Names | {{ variables.host.dns.forward_dns.names | default: consts.empty_arr | join: ', ' }} |
                     | Reverse DNS Names | {{ variables.host.dns.reverse_dns.names | default: consts.empty_arr | join: ', ' }} |
                     | Network CIDRs | {{ variables.host.whois.network.cidrs | default: consts.empty_arr | join: ', ' }} |
+
+                    {%- if variables.host.reputation != blank %}
+
+                    ### Reputation
+
+                    | Field | Value |
+                    | :--- | :--- |
+                    | Label | {{ variables.host.reputation.label }} |
+                    | Score | {{ variables.host.reputation.score | times: 100 | round: 2 }} |
+                    | Score Suppressed | {% if variables.host.reputation.score_suppressed != blank %}{{ variables.host.reputation.score_suppressed }}{% else %}false{% endif %} |
+
+                    {%- assign class_prob_count = variables.host.reputation.class_probabilities | default: consts.empty_arr | size -%}
+                    {%- if class_prob_count > 0 %}
+
+                    #### Class Probabilities
+
+                    | Label | Probability (%) |
+                    | :--- | :--- |
+                    {%- for cp in variables.host.reputation.class_probabilities %}
+                    | {{ cp.label }} | {{ cp.probability | times: 100 | round: 2 }} |
+                    {%- endfor %}
+                    {%- endif %}
+
+                    {%- assign evidence_count = steps.normalize_evidence.output | size -%}
+                    {%- if evidence_count > 0 %}
+
+                    #### Evidence ({{ evidence_count }})
+
+                    | Feature | Value | Contribution (%) | Category |
+                    | :--- | :--- | :--- | :--- |
+                    {%- for e in steps.normalize_evidence.output %}
+                    | {{ e.name }} | {{ e.value }} | {% if e.contribution > 0 %}+{% endif %}{{ e.contribution | times: 100 | round: 2 }} | {{ e.category }} |
+                    {%- endfor %}
+                    {%- endif %}
+                    {%- endif %}
 
                     {%- if variables.host.greynoise != blank %}
 
