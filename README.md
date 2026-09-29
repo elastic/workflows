@@ -42,8 +42,9 @@ Each template is a YAML file that combines:
 The build pipeline in this repo turns the source templates into per-Kibana-version catalogues and uploads them to a CDN. Kibana fetches the catalogue at install time, renders the install form, substitutes the operator's values, and persists the resulting workflow as a Kibana saved object.
 
 The repository also contains a separate declarative connector catalog. Connector
-definitions and icons are versioned, validated, and published independently so a
-connector change does not require rebuilding or deploying Kibana.
+contracts, type metadata, and icons are versioned, validated, signed, and
+published independently so a connector change does not require rebuilding or
+deploying Kibana.
 
 ---
 
@@ -58,13 +59,19 @@ elastic/workflows/
 │   │   └── …
 │   └── categories.yaml                     # closed-vocab category registry
 ├── connectors/
-│   ├── schema.json                         # declarative connector schema
-│   ├── abuseipdb/                          # versioned YAML and SVG assets
+│   ├── schema.json                         # connector contract schema
+│   ├── metadata.schema.json                # type-metadata schema
+│   ├── signing-keys/                       # public Ed25519 catalog keys
+│   ├── abuseipdb/                          # MAJOR.MINOR YAML, metadata.yaml, icon.svg
 │   └── okta/
 ├── kibana-versions.json                    # policy file (latest, oldest, cataloguePer)
 ├── scripts/
 │   ├── build-catalog.mjs                   # catalogue generator (Node 20+, ESM)
-│   └── build-connector-catalog.mjs         # connector catalogue generator
+│   ├── build-connector-catalog.mjs         # connector catalogue generator
+│   ├── check-connector-contract-compat.mjs
+│   ├── check-published-connector-catalog.mjs
+│   ├── sign-connector-catalog.mjs
+│   └── fetch-published-connector-catalog.mjs
 ├── docs/
 │   ├── concepts.md                         # workflow engine concepts
 │   ├── schema.md                           # workflow YAML schema reference
@@ -133,10 +140,12 @@ Consumers see (all served under a `/library/` path prefix, leaving room for othe
 
 Declarative connector consumers use:
 
-- `/connectors/v1/catalog.json` — active-version pointers plus every published definition hash.
-- `/connectors/v1/schema.json` — the authoring contract.
-- `/connectors/v1/connectors/<name>/<version>.yaml` — immutable connector definitions.
-- `/connectors/v1/connectors/<name>/<version>.svg` — versioned connector icons.
+- `/connectors/v1/catalog.json` — signed index of every published `id@version` plus `typeMetadata`.
+- `/connectors/v1/catalog.json.sig` — detached Ed25519 signature over `catalog.json`.
+- `/connectors/v1/schema.json` — the contract authoring schema.
+- `/connectors/v1/metadata.schema.json` — the type-metadata authoring schema.
+- `/connectors/v1/connectors/<name>/<MAJOR.MINOR>.yaml` — immutable connector contracts.
+- `/connectors/v1/connectors/<name>/icons/sha256-<hex>.svg` — content-addressed connector icons.
 
 Workflow templates and connectors have independent Buildkite publishers with
 path filters. A merge republishes only the catalog whose sources changed.

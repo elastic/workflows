@@ -29,8 +29,9 @@ Thanks for your interest in contributing. This document is the authoring guide f
 3. **Extend the categories vocabulary.** When a new template genuinely needs a category not in `library/categories.yaml`, add the entry in the same PR.
 4. **Improve documentation.** Fix unclear wording, add examples, clarify the authoring rules.
 5. **Report issues.** File a GitHub issue for bugs, suggestions, or missing capabilities.
-6. **Add or update a declarative connector.** Add an immutable versioned YAML and
-   SVG pair under `connectors/<name>/`.
+6. **Add or update a declarative connector.** Add an immutable `MAJOR.MINOR`
+   contract YAML, a `metadata.yaml`, and an icon under `connectors/<name>/`.
+   See [Authoring a declarative connector](#authoring-a-declarative-connector).
 
 ---
 
@@ -187,23 +188,31 @@ The catalog generator derives `stepTypes` and `triggerTypes` for each template â
 ## Authoring a declarative connector
 
 Declarative connectors live under `connectors/<name>/` and are validated against
-[`connectors/schema.json`](./connectors/schema.json). See the
-[connector catalog guide](./connectors/README.md) for the source layout,
-versioning rules, generated output, and delivery paths.
+[`connectors/schema.json`](./connectors/schema.json) (the contract) and
+[`connectors/metadata.schema.json`](./connectors/metadata.schema.json) (the type
+metadata). See the [connector catalog guide](./connectors/README.md) for the
+source layout, quoting rule for `version`, Compatible Versioning (`MAJOR.MINOR`),
+additive minor rules, metadata rules, generated output, and delivery paths.
 
-Every change creates a new semantic version. Existing versions remain published
-because Kibana connector instances can be pinned to them. Branded SVGs are
-separate versioned assets beside the YAML. The YAML records the relative path and
-SHA-256 hash.
+Each contract version is an immutable `MAJOR.MINOR` YAML file. Display name,
+description, license, feature ids, and the icon file name live in one
+`metadata.yaml` per type. The build hashes the SVG and publishes it at
+`connectors/<name>/icons/sha256-<hex>.svg`. Existing versions remain published
+because Kibana connector instances can be pinned to them.
+
+A new major (`>= 2`) needs a `CHANGELOG.md` entry `## N.0` whose section
+contains the word `Breaking`.
 
 Run:
 
 ```bash
 npm run build:connectors
+npm run check:connectors
 ```
 
-The build fails on schema violations, file and version mismatches, incorrect
-hashes, oversized icons, path traversal, and active or external SVG content.
+The build fails on schema violations, unquoted or patch versions, file and
+version mismatches, missing metadata, oversized or unsafe SVG, non-additive
+minors, and unjustified majors.
 
 ---
 

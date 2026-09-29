@@ -8,8 +8,13 @@ steps:
     timeout_in_minutes: 20
     if_changed:
       - 'connectors/**/*'
+      - 'connectors/signing-keys/**'
       - 'scripts/build-connector-catalog.mjs'
       - 'scripts/check-connector-catalog-immutability.mjs'
+      - 'scripts/check-connector-contract-compat.mjs'
+      - 'scripts/check-published-connector-catalog.mjs'
+      - 'scripts/fetch-published-connector-catalog.mjs'
+      - 'scripts/sign-connector-catalog.mjs'
       - 'scripts/verify-connector-catalog-assets.mjs'
       - 'package.json'
       - 'package-lock.json'

@@ -88,3 +88,19 @@ authenticate_gcs_publisher() {
   trap 'gcloud auth revoke --all 2>/dev/null || true' EXIT
   gcloud auth activate-service-account --key-file <(echo "${service_account_key}")
 }
+
+fetch_signing_key_to_file() {
+  local dest=$1
+  local secret_path="kv/ci-shared/workflows-library/connector-catalog-signing"
+  echo "--- Fetch connector catalog signing key from Vault"
+  local private_key
+  set +x
+  private_key="$(retry 5 5 vault kv get -field=private_key "${secret_path}")"
+  if [[ -z "${private_key}" ]]; then
+    echo "Vault returned empty signing key (${secret_path}, field private_key)" >&2
+    exit 1
+  fi
+  umask 077
+  printf '%s\n' "${private_key}" >"${dest}"
+  chmod 600 "${dest}"
+}

@@ -471,9 +471,10 @@ export const buildConnectorCatalog = async ({
     schemaPath,
     metadataSchemaPath,
   });
-  const published = publishedCatalogPath
-    ? JSON.parse(await readFile(publishedCatalogPath, 'utf8'))
-    : null;
+  const published =
+    publishedCatalogPath && publishedCatalogPath !== 'none'
+      ? JSON.parse(await readFile(publishedCatalogPath, 'utf8'))
+      : null;
   const manifest = buildManifest({ connectors, published, channel });
 
   await rm(outDir, { recursive: true, force: true });
