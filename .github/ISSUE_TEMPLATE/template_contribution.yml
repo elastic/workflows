@@ -1,0 +1,19 @@
+name: Contribute a template
+description: Propose a workflow template you want to contribute.
+title: '[Template contribution]: '
+body:
+  - type: markdown
+    attributes:
+      value: Read the [contribution guide](https://github.com/elastic/workflows/blob/main/CONTRIBUTING.md) for template requirements and validation steps.
+  - type: textarea
+    id: use_case
+    attributes:
+      label: What does your template do?
+      description: Describe the task, expected result, and required integrations.
+    validations:
+      required: true
+  - type: textarea
+    id: contribution
+    attributes:
+      label: Template YAML or pull request
+      description: Share your draft YAML or a link to your pull request, if available.
