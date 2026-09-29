@@ -1,0 +1,8 @@
+displayName: Okta
+description: Read-only Okta users and System Log actions from a catalog-loaded YAML definition
+icon: icon.svg
+minimumLicense: enterprise
+isTechnicalPreview: true
+supportedFeatureIds:
+  - workflows
+  - agentBuilder

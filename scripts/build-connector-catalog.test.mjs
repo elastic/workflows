@@ -1,30 +1,20 @@
 import assert from 'node:assert/strict';
-import { createHash } from 'node:crypto';
 import { copyFile, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
-import { buildConnectorCatalog } from './build-connector-catalog.mjs';
+import { buildConnectorCatalog, computeCatalogVersion } from './build-connector-catalog.mjs';
 import { assertConnectorCatalogIsImmutable } from './check-connector-catalog-immutability.mjs';
-import { verifyConnectorCatalogAssets } from './verify-connector-catalog-assets.mjs';
 
 const currentDir = path.dirname(fileURLToPath(import.meta.url));
 const schemaPath = path.resolve(currentDir, '../connectors/schema.json');
+const metadataSchemaPath = path.resolve(currentDir, '../connectors/metadata.schema.json');
 const icon = '<svg xmlns="http://www.w3.org/2000/svg"><path d="M0 0h1v1H0z"/></svg>';
-const iconHash = `sha256:${createHash('sha256').update(icon).digest('hex')}`;
 
-const definition = `schemaVersion: 1
-id: .declarative-test
-version: 1.0.0
-metadata:
-  displayName: Test
-  description: Test connector
-  icon:
-    path: 1.0.0.svg
-    contentHash: ${iconHash}
-  minimumLicense: basic
-  supportedFeatureIds: [workflows]
+const contract = `schemaVersion: 1
+id: .test
+version: "1.0"
 config:
   type: object
   additionalProperties: false
@@ -46,75 +36,208 @@ test:
     url: https://example.com/ping
 `;
 
+const metadata = `displayName: Test
+description: Test connector
+icon: icon.svg
+minimumLicense: gold
+supportedFeatureIds: [workflows]
+`;
+
 const createFixture = async () => {
   const repoRoot = await mkdtemp(path.join(os.tmpdir(), 'connector-catalog-'));
   const connectorDir = path.join(repoRoot, 'connectors/test');
   await mkdir(connectorDir, { recursive: true });
   await copyFile(schemaPath, path.join(repoRoot, 'connectors/schema.json'));
-  await writeFile(path.join(connectorDir, '1.0.0.yaml'), definition);
-  await writeFile(path.join(connectorDir, '1.0.0.svg'), icon);
+  await copyFile(metadataSchemaPath, path.join(repoRoot, 'connectors/metadata.schema.json'));
+  await writeFile(path.join(connectorDir, '1.0.yaml'), contract);
+  await writeFile(path.join(connectorDir, 'metadata.yaml'), metadata);
+  await writeFile(path.join(connectorDir, 'icon.svg'), icon);
   return repoRoot;
 };
 
-test('builds a deterministic catalog with versioned definitions and icons', async (context) => {
+test('builds a deterministic catalog with typeMetadata and content-addressed icons', async (context) => {
   const repoRoot = await createFixture();
   context.after(() => rm(repoRoot, { recursive: true, force: true }));
   const connectorDir = path.join(repoRoot, 'connectors/test');
   await writeFile(
-    path.join(connectorDir, '1.1.0.yaml'),
-    definition
-      .replace('version: 1.0.0', 'version: 1.1.0')
-      .replace('path: 1.0.0.svg', 'path: 1.1.0.svg')
+    path.join(connectorDir, '1.1.yaml'),
+    contract.replace('version: "1.0"', 'version: "1.1"')
   );
-  await writeFile(path.join(connectorDir, '1.1.0.svg'), icon);
 
   const first = await buildConnectorCatalog({ repoRoot });
-  const second = await buildConnectorCatalog({ repoRoot });
-  const catalog = JSON.parse(
-    await readFile(path.join(repoRoot, 'dist/connectors/v1/catalog.json'), 'utf8')
-  );
+  const catalogPath = path.join(repoRoot, 'dist/connectors/v1/catalog.json');
+  const firstBytes = await readFile(catalogPath, 'utf8');
+  const catalog = JSON.parse(firstBytes);
+  await buildConnectorCatalog({ repoRoot });
+  const secondBytes = await readFile(catalogPath, 'utf8');
 
-  assert.equal(first.catalogVersion, second.catalogVersion);
-  assert.deepEqual(catalog.activeVersions, {
-    '.declarative-test': '1.1.0',
-  });
-  assert.deepEqual(catalog.connectors, [
-    {
-      id: '.declarative-test',
-      version: '1.1.0',
-      definitionUrl: 'connectors/test/1.1.0.yaml',
-      contentHash: first.rows[0].contentHash,
-    },
-    {
-      id: '.declarative-test',
-      version: '1.0.0',
-      definitionUrl: 'connectors/test/1.0.0.yaml',
-      contentHash: first.rows[1].contentHash,
-    },
+  assert.deepEqual(Object.keys(catalog), [
+    'schemaVersion',
+    'catalogVersion',
+    'sequence',
+    'typeMetadata',
+    'connectors',
   ]);
+  assert.equal(catalog.schemaVersion, 1);
+  assert.equal(catalog.sequence, 1);
+  assert.equal('previousCatalogVersion' in catalog, false);
+  assert.equal(firstBytes, secondBytes);
+  assert.equal(catalog.catalogVersion, computeCatalogVersion(catalog));
+  assert.equal(first.manifest.catalogVersion, catalog.catalogVersion);
+
+  const iconHash = catalog.typeMetadata['.test'].icon.contentHash;
+  const hex = iconHash.replace(/^sha256:/, '');
+  const publishedIconPath = `connectors/test/icons/sha256-${hex}.svg`;
+  assert.equal(catalog.typeMetadata['.test'].icon.path, publishedIconPath);
   assert.equal(
-    await readFile(path.join(repoRoot, 'dist/connectors/v1/connectors/test/1.0.0.svg'), 'utf8'),
+    await readFile(path.join(repoRoot, 'dist/connectors/v1', publishedIconPath), 'utf8'),
     icon
   );
-  assert.match(
-    await readFile(path.join(repoRoot, 'dist/connectors/v1/connectors/test/1.1.0.yaml'), 'utf8'),
-    /version: 1\.1\.0/
+  assert.deepEqual(
+    catalog.connectors.map(({ version }) => version),
+    ['1.0', '1.1']
   );
-  await verifyConnectorCatalogAssets({
-    catalog,
-    assetRoot: path.join(repoRoot, 'dist/connectors/v1'),
-  });
+  assert.match(
+    await readFile(path.join(repoRoot, 'dist/connectors/v1/connectors/test/1.1.yaml'), 'utf8'),
+    /version: "1\.1"/
+  );
 });
 
-test('rejects an icon whose bytes do not match the definition hash', async (context) => {
+test('rejects an unquoted MAJOR.MINOR version that YAML parses as a number', async (context) => {
   const repoRoot = await createFixture();
   context.after(() => rm(repoRoot, { recursive: true, force: true }));
-  await writeFile(path.join(repoRoot, 'connectors/test/1.0.0.svg'), '<svg/>');
+  await writeFile(
+    path.join(repoRoot, 'connectors/test/1.0.yaml'),
+    contract.replace('version: "1.0"', 'version: 1.0')
+  );
+
+  await assert.rejects(buildConnectorCatalog({ repoRoot }), /quote/);
+});
+
+test('rejects a patch version', async (context) => {
+  const repoRoot = await createFixture();
+  context.after(() => rm(repoRoot, { recursive: true, force: true }));
+  await writeFile(
+    path.join(repoRoot, 'connectors/test/1.0.yaml'),
+    contract.replace('version: "1.0"', 'version: "1.0.0"')
+  );
+
+  await assert.rejects(buildConnectorCatalog({ repoRoot }), /1\.0\.0|must match/);
+});
+
+test('rejects a version with a leading zero', async (context) => {
+  const repoRoot = await createFixture();
+  context.after(() => rm(repoRoot, { recursive: true, force: true }));
+  await writeFile(
+    path.join(repoRoot, 'connectors/test/01.0.yaml'),
+    contract.replace('version: "1.0"', 'version: "01.0"')
+  );
+  await rm(path.join(repoRoot, 'connectors/test/1.0.yaml'));
+
+  await assert.rejects(buildConnectorCatalog({ repoRoot }), /01\.0|must match/);
+});
+
+test('rejects a file name that does not match the version', async (context) => {
+  const repoRoot = await createFixture();
+  context.after(() => rm(repoRoot, { recursive: true, force: true }));
+  await writeFile(
+    path.join(repoRoot, 'connectors/test/1.0.yaml'),
+    contract.replace('version: "1.0"', 'version: "1.1"')
+  );
+
+  await assert.rejects(buildConnectorCatalog({ repoRoot }), /file name must match version 1\.1/);
+});
+
+test('rejects a .declarative- connector id', async (context) => {
+  const repoRoot = await createFixture();
+  context.after(() => rm(repoRoot, { recursive: true, force: true }));
+  await writeFile(
+    path.join(repoRoot, 'connectors/test/1.0.yaml'),
+    contract.replace('id: .test', 'id: .declarative-test')
+  );
+
+  await assert.rejects(buildConnectorCatalog({ repoRoot }), /\.declarative-/);
+});
+
+test('rejects a connector directory without metadata.yaml', async (context) => {
+  const repoRoot = await createFixture();
+  context.after(() => rm(repoRoot, { recursive: true, force: true }));
+  await rm(path.join(repoRoot, 'connectors/test/metadata.yaml'));
+
+  await assert.rejects(buildConnectorCatalog({ repoRoot }), /metadata\.yaml/);
+});
+
+test('rejects metadata with a basic license', async (context) => {
+  const repoRoot = await createFixture();
+  context.after(() => rm(repoRoot, { recursive: true, force: true }));
+  await writeFile(
+    path.join(repoRoot, 'connectors/test/metadata.yaml'),
+    metadata.replace('minimumLicense: gold', 'minimumLicense: basic')
+  );
 
   await assert.rejects(
     buildConnectorCatalog({ repoRoot }),
-    /icon content does not match metadata\.icon\.contentHash/
+    /minimumLicense|must be equal to one of the allowed values/
   );
+});
+
+test('rejects a contract that still carries a metadata block', async (context) => {
+  const repoRoot = await createFixture();
+  context.after(() => rm(repoRoot, { recursive: true, force: true }));
+  await writeFile(
+    path.join(repoRoot, 'connectors/test/1.0.yaml'),
+    contract.replace(
+      'version: "1.0"\nconfig:',
+      'version: "1.0"\nmetadata:\n  contentHash: sha256:deadbeef\nconfig:'
+    )
+  );
+
+  await assert.rejects(buildConnectorCatalog({ repoRoot }), /additional properties|metadata/);
+});
+
+test('drops 0.x rows and orphaned metadata on the prod channel', async (context) => {
+  const repoRoot = await createFixture();
+  context.after(() => rm(repoRoot, { recursive: true, force: true }));
+  await writeFile(
+    path.join(repoRoot, 'connectors/test/0.1.yaml'),
+    contract.replace('version: "1.0"', 'version: "0.1"')
+  );
+  await rm(path.join(repoRoot, 'connectors/test/1.0.yaml'));
+
+  const staging = await buildConnectorCatalog({ repoRoot, channel: 'staging' });
+  assert.equal(staging.manifest.connectors[0].version, '0.1');
+  assert.ok(staging.manifest.typeMetadata['.test']);
+
+  const prod = await buildConnectorCatalog({ repoRoot, channel: 'prod' });
+  assert.deepEqual(prod.manifest.connectors, []);
+  assert.deepEqual(prod.manifest.typeMetadata, {});
+});
+
+test('advances sequence from a published catalog input', async (context) => {
+  const repoRoot = await createFixture();
+  context.after(() => rm(repoRoot, { recursive: true, force: true }));
+  const publishedPath = path.join(repoRoot, 'published-catalog.json');
+  await writeFile(
+    publishedPath,
+    `${JSON.stringify(
+      {
+        schemaVersion: 1,
+        catalogVersion: 'sha256:published',
+        sequence: 4,
+        typeMetadata: {},
+        connectors: [],
+      },
+      null,
+      2
+    )}\n`
+  );
+
+  const result = await buildConnectorCatalog({
+    repoRoot,
+    publishedCatalogPath: publishedPath,
+  });
+  assert.equal(result.manifest.sequence, 5);
+  assert.equal(result.manifest.previousCatalogVersion, 'sha256:published');
 });
 
 test('rejects SVG styles that can load external resources', async (context) => {
@@ -122,12 +245,7 @@ test('rejects SVG styles that can load external resources', async (context) => {
   context.after(() => rm(repoRoot, { recursive: true, force: true }));
   const unsafeIcon =
     '<svg xmlns="http://www.w3.org/2000/svg"><style>@import url(https://example.com/x.css)</style></svg>';
-  const unsafeHash = `sha256:${createHash('sha256').update(unsafeIcon).digest('hex')}`;
-  await writeFile(path.join(repoRoot, 'connectors/test/1.0.0.svg'), unsafeIcon);
-  await writeFile(
-    path.join(repoRoot, 'connectors/test/1.0.0.yaml'),
-    definition.replace(iconHash, unsafeHash)
-  );
+  await writeFile(path.join(repoRoot, 'connectors/test/icon.svg'), unsafeIcon);
 
   await assert.rejects(
     buildConnectorCatalog({ repoRoot }),
@@ -139,8 +257,8 @@ test('rejects schemas that Kibana cannot materialize', async (context) => {
   const repoRoot = await createFixture();
   context.after(() => rm(repoRoot, { recursive: true, force: true }));
   await writeFile(
-    path.join(repoRoot, 'connectors/test/1.0.0.yaml'),
-    definition.replace('config:\n  type: object', 'config:\n  type: string')
+    path.join(repoRoot, 'connectors/test/1.0.yaml'),
+    contract.replace('config:\n  type: object', 'config:\n  type: string')
   );
 
   await assert.rejects(
@@ -153,8 +271,8 @@ test('rejects required schema fields that have no property definition', async (c
   const repoRoot = await createFixture();
   context.after(() => rm(repoRoot, { recursive: true, force: true }));
   await writeFile(
-    path.join(repoRoot, 'connectors/test/1.0.0.yaml'),
-    definition.replace(
+    path.join(repoRoot, 'connectors/test/1.0.yaml'),
+    contract.replace(
       'config:\n  type: object\n  additionalProperties: false',
       'config:\n  type: object\n  additionalProperties: false\n  required: [missing]'
     )
@@ -170,8 +288,8 @@ test('rejects defaults that do not match their schema type', async (context) => 
   const repoRoot = await createFixture();
   context.after(() => rm(repoRoot, { recursive: true, force: true }));
   await writeFile(
-    path.join(repoRoot, 'connectors/test/1.0.0.yaml'),
-    definition.replace(
+    path.join(repoRoot, 'connectors/test/1.0.yaml'),
+    contract.replace(
       'config:\n  type: object\n  additionalProperties: false',
       'config:\n  type: object\n  additionalProperties: false\n  properties:\n    retries:\n      type: integer\n      default: wrong'
     )
@@ -187,8 +305,8 @@ test('rejects defaults that violate schema constraints', async (context) => {
   const repoRoot = await createFixture();
   context.after(() => rm(repoRoot, { recursive: true, force: true }));
   await writeFile(
-    path.join(repoRoot, 'connectors/test/1.0.0.yaml'),
-    definition.replace(
+    path.join(repoRoot, 'connectors/test/1.0.yaml'),
+    contract.replace(
       'config:\n  type: object\n  additionalProperties: false',
       'config:\n  type: object\n  additionalProperties: false\n  properties:\n    endpoint:\n      type: string\n      format: uri\n      default: not-a-valid-url'
     )
@@ -204,8 +322,8 @@ test('rejects type-specific fields on other schema types', async (context) => {
   const repoRoot = await createFixture();
   context.after(() => rm(repoRoot, { recursive: true, force: true }));
   await writeFile(
-    path.join(repoRoot, 'connectors/test/1.0.0.yaml'),
-    definition.replace(
+    path.join(repoRoot, 'connectors/test/1.0.yaml'),
+    contract.replace(
       'config:\n  type: object\n  additionalProperties: false',
       'config:\n  type: object\n  additionalProperties: false\n  properties:\n    retries:\n      type: integer\n      minLength: 1'
     )
@@ -278,19 +396,5 @@ test('rejects changes to an already published connector version', () => {
         },
       ],
     })
-  );
-});
-
-test('rejects remote assets that do not match the candidate catalog', async (context) => {
-  const repoRoot = await createFixture();
-  context.after(() => rm(repoRoot, { recursive: true, force: true }));
-  await buildConnectorCatalog({ repoRoot });
-  const assetRoot = path.join(repoRoot, 'dist/connectors/v1');
-  const catalog = JSON.parse(await readFile(path.join(assetRoot, 'catalog.json'), 'utf8'));
-  await writeFile(path.join(assetRoot, 'connectors/test/1.0.0.svg'), '<svg/>');
-
-  await assert.rejects(
-    verifyConnectorCatalogAssets({ catalog, assetRoot }),
-    /Published connector icon .* has wrong bytes/
   );
 });

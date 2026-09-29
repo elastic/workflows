@@ -1,17 +1,6 @@
 schemaVersion: 1
-id: .declarative-okta
-version: 1.0.0
-metadata:
-  displayName: Okta (Declarative PoC)
-  description: Read-only Okta users and System Log actions from a catalog-loaded YAML definition
-  icon:
-    path: 1.0.0.svg
-    contentHash: sha256:61285080a6b979ac58e3a9f3c07ed506ee9075db01bd088bfdeaa1a57bdb9f84
-  minimumLicense: enterprise
-  isTechnicalPreview: true
-  supportedFeatureIds:
-    - workflows
-    - agentBuilder
+id: .okta
+version: "1.0"
 config:
   type: object
   additionalProperties: false

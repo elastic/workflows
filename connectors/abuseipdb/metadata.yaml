@@ -1,0 +1,8 @@
+displayName: AbuseIPDB
+description: IP reputation checking with optional verbose reports and abuse reporting
+icon: icon.svg
+minimumLicense: gold
+isTechnicalPreview: true
+supportedFeatureIds:
+  - workflows
+  - agentBuilder

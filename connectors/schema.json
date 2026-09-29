@@ -1,10 +1,10 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://workflows.elastic.co/connectors/v1/schema.json",
-  "title": "Elastic declarative connector definition",
+  "title": "Elastic declarative connector contract",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schemaVersion", "id", "version", "metadata", "config", "auth", "actions", "test"],
+  "required": ["schemaVersion", "id", "version", "config", "auth", "actions", "test"],
   "properties": {
     "schemaVersion": {
       "const": 1
@@ -16,10 +16,7 @@
     },
     "version": {
       "type": "string",
-      "pattern": "^\\d+\\.\\d+\\.\\d+$"
-    },
-    "metadata": {
-      "$ref": "#/$defs/metadata"
+      "pattern": "^(0|[1-9]\\d*)\\.(0|[1-9]\\d*)$"
     },
     "config": {
       "$ref": "#/$defs/objectJsonSchema"
@@ -55,69 +52,6 @@
     }
   },
   "$defs": {
-    "metadata": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["displayName", "description", "minimumLicense", "supportedFeatureIds"],
-      "properties": {
-        "displayName": {
-          "type": "string",
-          "minLength": 1,
-          "maxLength": 128
-        },
-        "description": {
-          "type": "string",
-          "minLength": 1,
-          "maxLength": 1024
-        },
-        "icon": {
-          "type": "object",
-          "additionalProperties": false,
-          "required": ["path", "contentHash"],
-          "properties": {
-            "path": {
-              "type": "string",
-              "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*\\.svg$",
-              "maxLength": 512
-            },
-            "contentHash": {
-              "$ref": "#/$defs/contentHash"
-            }
-          }
-        },
-        "docsUrl": {
-          "type": "string",
-          "maxLength": 2048
-        },
-        "minimumLicense": {
-          "enum": ["basic", "gold", "platinum", "enterprise"]
-        },
-        "isTechnicalPreview": {
-          "type": "boolean"
-        },
-        "supportedFeatureIds": {
-          "type": "array",
-          "minItems": 1,
-          "maxItems": 32,
-          "uniqueItems": true,
-          "items": {
-            "enum": [
-              "alerting",
-              "cases",
-              "uptime",
-              "siem",
-              "generativeAIForSecurity",
-              "generativeAIForObservability",
-              "generativeAIForSearchPlayground",
-              "endpointSecurity",
-              "workflows",
-              "agentBuilder",
-              "contextEngine"
-            ]
-          }
-        }
-      }
-    },
     "auth": {
       "oneOf": [
         {
@@ -540,10 +474,6 @@
           }
         }
       ]
-    },
-    "contentHash": {
-      "type": "string",
-      "pattern": "^sha256:[a-f0-9]{64}$"
     }
   }
 }

@@ -1,17 +1,6 @@
 schemaVersion: 1
-id: .declarative-abuseipdb
-version: 1.1.0
-metadata:
-  displayName: AbuseIPDB (Declarative PoC)
-  description: IP reputation checking with optional verbose reports and abuse reporting
-  icon:
-    path: 1.1.0.svg
-    contentHash: sha256:c2ed2c5ebe15e0b513f760b11b0bdd149236d298f06612f468368901ce19e012
-  minimumLicense: gold
-  isTechnicalPreview: true
-  supportedFeatureIds:
-    - workflows
-    - agentBuilder
+id: .abuseipdb
+version: "1.0"
 config:
   type: object
   additionalProperties: false
@@ -30,15 +19,10 @@ config:
         validate:
           allowedHosts: true
 auth:
-  types:
-    - type: api_key_header
-      defaults:
-        headerField: Key
-      overrides:
-        meta:
-          Key:
-            label: API key
-            placeholder: local-poc-key
+  type: api_key_header
+  header: Key
+  label: API key
+  placeholder: local-poc-key
 actions:
   checkIp:
     description: Check the reputation of an IPv4 address.
@@ -60,13 +44,6 @@ actions:
           maximum: 365
           default: 90
           description: Maximum report age in days
-        verbose:
-          type: boolean
-          default: false
-          description: Include reports from countries outside the top-level summary
-        someOtherParam:
-          type: string
-          description: Just to demonstrate how it all connects
     request:
       method: GET
       baseUrl: "{{ config.baseUrl }}"
@@ -74,8 +51,6 @@ actions:
       query:
         ipAddress: "{{ input.ipAddress }}"
         maxAgeInDays: "{{ input.maxAgeInDays }}"
-        verbose: "{{ input.verbose }}"
-        someOtherParam: "{{ input.someOtherParam }}"
       retry:
         statusCodes:
           - 429
@@ -129,6 +104,5 @@ test:
     query:
       ipAddress: 8.8.8.8
       maxAgeInDays: 1
-      verbose: false
     response:
       dataPath: data

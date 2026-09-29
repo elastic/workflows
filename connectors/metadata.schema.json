@@ -1,0 +1,56 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://workflows.elastic.co/connectors/v1/metadata.schema.json",
+  "title": "Elastic declarative connector type metadata",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["displayName", "description", "icon", "minimumLicense", "supportedFeatureIds"],
+  "properties": {
+    "displayName": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128
+    },
+    "description": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 1024
+    },
+    "docsUrl": {
+      "type": "string",
+      "format": "uri",
+      "maxLength": 2048
+    },
+    "icon": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*\\.svg$"
+    },
+    "minimumLicense": {
+      "enum": ["gold", "platinum", "enterprise"]
+    },
+    "isTechnicalPreview": {
+      "type": "boolean"
+    },
+    "supportedFeatureIds": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 32,
+      "uniqueItems": true,
+      "items": {
+        "enum": [
+          "alerting",
+          "cases",
+          "uptime",
+          "siem",
+          "generativeAIForSecurity",
+          "generativeAIForObservability",
+          "generativeAIForSearchPlayground",
+          "endpointSecurity",
+          "workflows",
+          "agentBuilder",
+          "contextEngine"
+        ]
+      }
+    }
+  }
+}
