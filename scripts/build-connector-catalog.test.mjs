@@ -5,7 +5,12 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 import { buildConnectorCatalog, computeCatalogVersion } from './build-connector-catalog.mjs';
-import { assertConnectorCatalogIsImmutable } from './check-connector-catalog-immutability.mjs';
+import {
+  assertConnectorCatalogIsImmutable,
+  assertPublishedCatalogCompatible,
+  assertTypeMetadataIsAdditive,
+} from './check-connector-catalog-immutability.mjs';
+import { verifyConnectorCatalogAssets } from './verify-connector-catalog-assets.mjs';
 
 const currentDir = path.dirname(fileURLToPath(import.meta.url));
 const schemaPath = path.resolve(currentDir, '../connectors/schema.json');
@@ -398,66 +403,159 @@ test('rejects a new major whose changelog section lacks Breaking', async (contex
   await assert.rejects(buildConnectorCatalog({ repoRoot }), /Breaking/);
 });
 
-test('rejects changes to an already published connector version', () => {
+test('rejects incompatible published catalog updates', () => {
+  const row = {
+    id: '.test',
+    version: '1.0',
+    definitionUrl: 'connectors/test/1.0.yaml',
+    contentHash: 'sha256:old',
+  };
+  const typeMetadata = {
+    '.test': {
+      displayName: 'Test',
+      description: 'desc',
+      minimumLicense: 'gold',
+      supportedFeatureIds: ['workflows'],
+    },
+  };
   const published = {
-    activeVersions: { '.declarative-test': '1.0.0' },
-    connectors: [
-      {
-        id: '.declarative-test',
-        version: '1.0.0',
-        definitionUrl: 'connectors/test/1.0.0.yaml',
-        contentHash: 'sha256:old',
-      },
-    ],
+    schemaVersion: 1,
+    catalogVersion: 'sha256:published',
+    sequence: 4,
+    typeMetadata,
+    connectors: [row],
+  };
+  const compatibleNext = {
+    schemaVersion: 1,
+    catalogVersion: 'sha256:next',
+    sequence: 5,
+    previousCatalogVersion: 'sha256:published',
+    typeMetadata,
+    connectors: [row],
   };
 
   assert.throws(
     () =>
       assertConnectorCatalogIsImmutable(published, {
-        activeVersions: { '.declarative-test': '1.0.0' },
-        connectors: [
-          {
-            id: '.declarative-test',
-            version: '1.0.0',
-            definitionUrl: 'connectors/test/1.0.0.yaml',
-            contentHash: 'sha256:new',
-          },
-        ],
+        ...compatibleNext,
+        connectors: [],
+      }),
+    /cannot be removed/
+  );
+  assert.throws(
+    () =>
+      assertConnectorCatalogIsImmutable(published, {
+        ...compatibleNext,
+        connectors: [{ ...row, contentHash: 'sha256:new' }],
       }),
     /cannot be changed/
   );
   assert.throws(
     () =>
       assertConnectorCatalogIsImmutable(published, {
-        activeVersions: { '.declarative-test': '1.0.0' },
-        connectors: [
-          {
-            id: '.declarative-test',
-            version: '1.0.0',
-            definitionUrl: 'connectors/renamed/1.0.0.yaml',
-            contentHash: 'sha256:old',
-          },
-        ],
+        ...compatibleNext,
+        connectors: [{ ...row, definitionUrl: 'connectors/renamed/1.0.yaml' }],
       }),
     /cannot be changed/
   );
+  assert.throws(
+    () => assertPublishedCatalogCompatible(published, { ...compatibleNext, sequence: 6 }),
+    /sequence must be 5/
+  );
+  assert.throws(
+    () =>
+      assertPublishedCatalogCompatible(published, {
+        ...compatibleNext,
+        previousCatalogVersion: 'sha256:wrong',
+      }),
+    /previousCatalogVersion/
+  );
   assert.doesNotThrow(() =>
-    assertConnectorCatalogIsImmutable(published, {
-      activeVersions: { '.declarative-test': '1.1.0' },
-      connectors: [
-        {
-          id: '.declarative-test',
-          version: '1.1.0',
-          definitionUrl: 'connectors/test/1.1.0.yaml',
-          contentHash: 'sha256:new',
-        },
-        {
-          id: '.declarative-test',
-          version: '1.0.0',
-          definitionUrl: 'connectors/test/1.0.0.yaml',
-          contentHash: 'sha256:old',
-        },
-      ],
+    assertPublishedCatalogCompatible(null, {
+      schemaVersion: 1,
+      catalogVersion: 'sha256:next',
+      sequence: 1,
+      typeMetadata,
+      connectors: [row],
     })
+  );
+  assert.throws(() => assertPublishedCatalogCompatible(null, compatibleNext), /sequence 1/);
+});
+
+test('rejects non-additive type metadata changes against a published catalog', () => {
+  const publishedMeta = {
+    displayName: 'Test',
+    description: 'desc',
+    minimumLicense: 'enterprise',
+    supportedFeatureIds: ['workflows'],
+  };
+  const published = {
+    typeMetadata: { '.test': publishedMeta },
+    connectors: [],
+  };
+
+  assert.doesNotThrow(() =>
+    assertTypeMetadataIsAdditive(published, {
+      typeMetadata: {
+        '.test': {
+          ...publishedMeta,
+          supportedFeatureIds: ['workflows', 'agentBuilder'],
+        },
+      },
+    })
+  );
+  assert.throws(
+    () =>
+      assertTypeMetadataIsAdditive(published, {
+        typeMetadata: {
+          '.test': { ...publishedMeta, supportedFeatureIds: [] },
+        },
+      }),
+    /supportedFeatureIds/
+  );
+  assert.doesNotThrow(() =>
+    assertTypeMetadataIsAdditive(published, {
+      typeMetadata: { '.test': { ...publishedMeta, minimumLicense: 'gold' } },
+    })
+  );
+  assert.throws(
+    () =>
+      assertTypeMetadataIsAdditive(
+        { typeMetadata: { '.test': { ...publishedMeta, minimumLicense: 'gold' } } },
+        { typeMetadata: { '.test': { ...publishedMeta, minimumLicense: 'platinum' } } }
+      ),
+    /minimumLicense/
+  );
+  assert.throws(
+    () => assertTypeMetadataIsAdditive(published, { typeMetadata: {} }),
+    /cannot be removed/
+  );
+  assert.doesNotThrow(() =>
+    assertTypeMetadataIsAdditive(published, {
+      typeMetadata: { '.test': { ...publishedMeta, displayName: 'Renamed' } },
+    })
+  );
+});
+
+test('rejects remote assets that do not match the candidate catalog', async (context) => {
+  const repoRoot = await createFixture();
+  context.after(() => rm(repoRoot, { recursive: true, force: true }));
+  await buildConnectorCatalog({ repoRoot });
+  const assetRoot = path.join(repoRoot, 'dist/connectors/v1');
+  const catalog = JSON.parse(await readFile(path.join(assetRoot, 'catalog.json'), 'utf8'));
+  const iconPath = path.join(assetRoot, catalog.typeMetadata['.test'].icon.path);
+  await writeFile(iconPath, '<svg/>');
+
+  await assert.rejects(
+    verifyConnectorCatalogAssets({ catalog, assetRoot }),
+    /Published connector icon .* has wrong bytes/
+  );
+
+  await buildConnectorCatalog({ repoRoot });
+  const restored = JSON.parse(await readFile(path.join(assetRoot, 'catalog.json'), 'utf8'));
+  await writeFile(path.join(assetRoot, restored.connectors[0].definitionUrl), 'corrupted: true\n');
+  await assert.rejects(
+    verifyConnectorCatalogAssets({ catalog: restored, assetRoot }),
+    /Published connector definition .* has wrong bytes/
   );
 });

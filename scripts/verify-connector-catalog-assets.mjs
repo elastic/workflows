@@ -30,16 +30,16 @@ export const verifyConnectorCatalogAssets = async ({ catalog, assetRoot }) => {
         `Published connector definition ${entry.id}@${entry.version} has wrong identity`
       );
     }
+  }
 
-    if (definition.metadata.icon) {
-      const iconPath = resolveCatalogPath(
-        path.dirname(definitionPath),
-        definition.metadata.icon.path
-      );
-      const iconRaw = await readFile(iconPath);
-      if (sha256(iconRaw) !== definition.metadata.icon.contentHash) {
-        throw new Error(`Published connector icon ${entry.id}@${entry.version} has wrong bytes`);
-      }
+  for (const [id, metadata] of Object.entries(catalog.typeMetadata ?? {})) {
+    if (!metadata.icon) {
+      continue;
+    }
+    const iconPath = resolveCatalogPath(assetRoot, metadata.icon.path);
+    const iconRaw = await readFile(iconPath);
+    if (sha256(iconRaw) !== metadata.icon.contentHash) {
+      throw new Error(`Published connector icon ${id} has wrong bytes`);
     }
   }
 };

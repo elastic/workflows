@@ -33,3 +33,4 @@ workflows-library-*.tar.gz.sha256
 .env.*
 *.key
 *.pem
+!connectors/signing-keys/*.pem
