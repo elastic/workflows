@@ -7,6 +7,12 @@ import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import Ajv2020 from 'ajv/dist/2020.js';
 import * as yaml from 'js-yaml';
+import {
+  assertAdditiveMinor,
+  assertMajorJustified,
+  assertVersionOrdering,
+  selectBaseline,
+} from './check-connector-contract-compat.mjs';
 
 const MAX_ICON_BYTES = 64 * 1024;
 const SPEC_VERSION_PATTERN = /^(0|[1-9]\d*)\.(0|[1-9]\d*)$/;
@@ -294,6 +300,19 @@ const loadConnector = async ({
       parsed,
       contentHash: sha256(raw),
     });
+  }
+
+  assertVersionOrdering(contracts, sourceDir);
+  await assertMajorJustified({
+    slug,
+    connectorDir: sourceDir,
+    majors: contracts.map((contract) => contract.major),
+  });
+  for (const contract of contracts) {
+    const baseline = selectBaseline(contracts, contract);
+    if (baseline) {
+      assertAdditiveMinor(baseline, contract);
+    }
   }
 
   return {

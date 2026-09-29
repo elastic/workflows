@@ -335,6 +335,69 @@ test('rejects type-specific fields on other schema types', async (context) => {
   );
 });
 
+const withVerboseConfig = contract.replace(
+  'config:\n  type: object\n  additionalProperties: false',
+  'config:\n  type: object\n  additionalProperties: false\n  properties:\n    verbose:\n      type: boolean'
+);
+
+test('rejects a non-additive minor that removes a config property', async (context) => {
+  const repoRoot = await createFixture();
+  context.after(() => rm(repoRoot, { recursive: true, force: true }));
+  await writeFile(path.join(repoRoot, 'connectors/test/1.0.yaml'), withVerboseConfig);
+  await writeFile(
+    path.join(repoRoot, 'connectors/test/1.1.yaml'),
+    contract.replace('version: "1.0"', 'version: "1.1"')
+  );
+
+  await assert.rejects(buildConnectorCatalog({ repoRoot }), /config\.properties\.verbose/);
+});
+
+test('allows a justified major that is not additive over the previous major', async (context) => {
+  const repoRoot = await createFixture();
+  context.after(() => rm(repoRoot, { recursive: true, force: true }));
+  await writeFile(path.join(repoRoot, 'connectors/test/1.0.yaml'), withVerboseConfig);
+  await writeFile(
+    path.join(repoRoot, 'connectors/test/2.0.yaml'),
+    contract.replace('version: "1.0"', 'version: "2.0"')
+  );
+  await writeFile(
+    path.join(repoRoot, 'connectors/test/CHANGELOG.md'),
+    '## 2.0\n\nBreaking: removed verbose.\n'
+  );
+
+  const result = await buildConnectorCatalog({ repoRoot });
+  assert.deepEqual(
+    result.manifest.connectors.map(({ version }) => version),
+    ['1.0', '2.0']
+  );
+});
+
+test('rejects a new major without CHANGELOG.md', async (context) => {
+  const repoRoot = await createFixture();
+  context.after(() => rm(repoRoot, { recursive: true, force: true }));
+  await writeFile(
+    path.join(repoRoot, 'connectors/test/2.0.yaml'),
+    contract.replace('version: "1.0"', 'version: "2.0"')
+  );
+
+  await assert.rejects(buildConnectorCatalog({ repoRoot }), /CHANGELOG\.md/);
+});
+
+test('rejects a new major whose changelog section lacks Breaking', async (context) => {
+  const repoRoot = await createFixture();
+  context.after(() => rm(repoRoot, { recursive: true, force: true }));
+  await writeFile(
+    path.join(repoRoot, 'connectors/test/2.0.yaml'),
+    contract.replace('version: "1.0"', 'version: "2.0"')
+  );
+  await writeFile(
+    path.join(repoRoot, 'connectors/test/CHANGELOG.md'),
+    '## 2.0\n\nRenamed a field.\n'
+  );
+
+  await assert.rejects(buildConnectorCatalog({ repoRoot }), /Breaking/);
+});
+
 test('rejects changes to an already published connector version', () => {
   const published = {
     activeVersions: { '.declarative-test': '1.0.0' },
