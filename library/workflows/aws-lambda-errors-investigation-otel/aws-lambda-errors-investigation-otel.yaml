@@ -1,6 +1,6 @@
 template-metadata:
   slug: aws-lambda-errors-investigation-otel
-  version: "1.0.0"
+  version: "1.1.0"
   availability: ">=9.5.0"
   name: "AWS Lambda error spike investigation (OTel)"
   description: >-
@@ -65,12 +65,16 @@ steps:
   #    failure fails the run rather than feeding empty output into the classifier.
   #    Zero invocations yields a null error_rate (not a fake 0%): CASE guards the
   #    division so low-volume rates are exact (1 error / 1 invocation = 100%).
+  #    `Resource IS NULL` pins the FunctionName-only dimension level: CloudWatch also
+  #    publishes every Lambda counter per FunctionName+Resource (version/alias), and
+  #    summing both levels doubles invocations and errors (proven live).
   - name: errors_incident
     type: elasticsearch.esql.query
     with:
       query: |
         FROM {{ consts.lambda_metrics_index }}
         | WHERE attributes.FunctionName == "{{ steps.resolve.output.function_name }}"
+          AND attributes.Resource IS NULL
           AND @timestamp >= TO_DATETIME("{{ steps.resolve.output.alert_timestamp }}") - {{ consts.incident_lookback }}
           AND @timestamp <= TO_DATETIME("{{ steps.resolve.output.alert_timestamp }}") + 5 minutes
         | STATS
@@ -89,6 +93,7 @@ steps:
       query: |
         FROM {{ consts.lambda_metrics_index }}
         | WHERE attributes.FunctionName == "{{ steps.resolve.output.function_name }}"
+          AND attributes.Resource IS NULL
           AND @timestamp >= TO_DATETIME("{{ steps.resolve.output.alert_timestamp }}") - {{ consts.baseline_lookback }}
           AND @timestamp <= TO_DATETIME("{{ steps.resolve.output.alert_timestamp }}") - {{ consts.baseline_lookend }}
         | STATS
@@ -164,9 +169,13 @@ steps:
           query: |
             FROM .alerts-*
             | WHERE kibana.alert.instance.id LIKE "*{{ steps.resolve.output.function_name }}*"
+              AND kibana.alert.start <= TO_DATETIME("{{ steps.resolve.output.alert_timestamp }}") + 5 minutes
               AND @timestamp >= TO_DATETIME("{{ steps.resolve.output.alert_timestamp }}") - {{ consts.incident_lookback }}
-              AND @timestamp <= TO_DATETIME("{{ steps.resolve.output.alert_timestamp }}") + 5 minutes
-            | KEEP kibana.alert.rule.name, kibana.alert.status, kibana.alert.reason, kibana.alert.start
+            | EVAL window_start = TO_DATETIME("{{ steps.resolve.output.alert_timestamp }}") - {{ consts.incident_lookback }},
+                   alert_relation = CASE(kibana.alert.start < window_start,
+                                         "pre-existing: started before the incident window",
+                                         "started during the incident window")
+            | KEEP kibana.alert.rule.name, kibana.alert.status, alert_relation, kibana.alert.start, kibana.alert.reason
             | SORT kibana.alert.start DESC
             | LIMIT 20
           format: json
@@ -187,30 +196,61 @@ steps:
             Incident: {{ steps.errors_incident.output | json }}
             Baseline: {{ steps.errors_baseline.output | json }}
             SLO status:    {{ steps.slo_context.output | json }}
-            Active alerts: {{ steps.active_alerts.output | json }}
+            Alerts on this resource (alert_relation says whether each pre-dates the incident window): {{ steps.active_alerts.output | json }}
           instructions: |
-            You are an SRE assistant synthesising an AWS Lambda incident investigation.
-            Produce a structured root-cause summary in EXACTLY these sections:
-            ROOT CAUSE HYPOTHESIS — one sentence naming the dominant failure mode.
+            You are an SRE assistant synthesising an AWS Lambda incident investigation. Report
+            only what the supplied step outputs show; every number you cite must appear in
+            them. Produce a structured root-cause summary in EXACTLY these sections:
+
+            Writing rules for the report: write for an on-call engineer in plain words. The
+            field and step names below are for YOUR reading only — never print them (write
+            "the error rate in the incident window", not "error_rate"; "the alert pre-dates
+            the incident window", not "alert_relation"). When you state a ratio, name both
+            numbers it divides ("1,903 invocations vs 686 at baseline, about 2.8x"). If
+            "Triggered by" is not "manual run", open SEVERITY & CALIBRATION by naming the
+            triggering alert and saying whether the classified failure mode explains it.
+
+            ROOT CAUSE HYPOTHESIS — one sentence naming the dominant failure mode. Do not
+              assert a downstream impact unless a supplied value directly shows it.
+
             EVIDENCE — errors, invocations, error_rate vs baseline_error_rate, throttles,
-              max_concurrency, max_duration.
-            SEVERITY & CALIBRATION — if an SLO is VIOLATED/DEGRADING (or its error budget is
-              materially consumed), or an alert is active for this resource, ANCHOR severity
-              and root cause on that calibrated signal and name the alert/SLO + its reason
-              (the shipped thresholds encode what is "bad" for this resource, which the raw
-              magnitude alone cannot establish). If no SLO/alert context is present or empty,
-              state the assessment rests on raw metrics alone with no SLO/alert corroboration
-              — do NOT invent one.
-            CAUSAL CHAIN — adjust to the evidence (e.g. arrival spike → concurrency exhausted →
-              throttles → dropped/failed invocations; or a failing dependency → error rate up).
-            RECOMMENDED NEXT STEPS — e.g. raise reserved/provisioned concurrency for throttling;
-              inspect function logs / the failing dependency for elevated_errors; for load_surge,
-              identify the traffic source, confirm concurrency headroom, and consider whether the
-              alert threshold should be rate-based for this workload; profile cold starts /
+              max_concurrency, max_duration. If a step returned no rows or an error, say
+              "not available" rather than treating it as zero.
+
+            SEVERITY & CALIBRATION — apply these rules literally:
+              1. An SLO or alert CORROBORATES the root cause only if BOTH hold: (a) it
+                 measures the same signal as the classified failure mode (errors / error
+                 rate, throttles, or duration for this function — not an unrelated one), and
+                 (b) its alert_relation says it started during the incident window, or the
+                 SLO's status changed in this window.
+              2. An alert whose alert_relation is "pre-existing" was already firing before
+                 the incident. List it under "Pre-existing context" with its start time and
+                 say explicitly that it is not corroboration and may be unrelated standing
+                 state. Never describe a pre-existing alert as a symptom of the incident.
+              3. A HEALTHY SLO is not corroboration; report it as scope.
+              4. If nothing satisfies rule 1, state that the assessment rests on raw metrics
+                 alone, with no SLO/alert corroboration. Do NOT invent one.
+              Then give the severity (low / moderate / high) with a one-line reason.
+
+            HYPOTHESIZED CAUSAL CHAIN — one link per line, cause to impact (e.g. arrival
+              spike → concurrency exhausted → throttles → failed invocations; or a failing
+              dependency → error rate up). Tag EVERY link [observed: <the metric or alert
+              that shows it>] or [inferred] when no supplied data shows it; use conditional
+              language for inferred links. If every link is observed, retitle the section
+              CAUSAL CHAIN.
+
+            RECOMMENDED NEXT STEPS — numbered. First the checks that confirm any [inferred]
+              link (function logs, the failing dependency), then remediation: raise
+              reserved/provisioned concurrency for throttling; for load_surge identify the
+              traffic source, confirm concurrency headroom, and consider whether the alert
+              threshold should be rate-based for this workload; profile cold starts /
               downstream calls for duration_degradation.
-            DOWNSTREAM IMPACT — what the failed/throttled invocations affect.
+
+            DOWNSTREAM IMPACT — what the failed/throttled invocations affect, marked
+              observed or expected in the same way.
+
             CONFIDENCE NOTE — only if ambiguous.
-          maxLength: 1500
+          maxLength: 2200
 
       # Expose the result as the workflow's output for callers / composing workflows.
       - name: output_result
