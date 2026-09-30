@@ -66,7 +66,7 @@ steps:
   # -------------------------------------------------------------------------
   - name: for_each_discovery
     type: foreach
-    foreach: event.alerts
+    foreach: '{{ event.alerts }}'
     steps:
 
       # -------------------------------------------------------------------------
@@ -85,26 +85,26 @@ steps:
         type: cases.createCase
         with:
           owner: securitySolution
-          title: '[Attack Discovery] {{foreach.item.attack_discovery.title_with_replacements}}'
+          title: '[Attack Discovery] {{foreach.item.kibana.alert.attack_discovery.title_with_replacements}}'
           description: |
             ## Attack Summary
-            {{foreach.item.attack_discovery.summary_markdown_with_replacements}}
+            {{foreach.item.kibana.alert.attack_discovery.summary_markdown_with_replacements}}
             ## Detailed Analysis
-            {{foreach.item.attack_discovery.details_markdown_with_replacements}}
+            {{foreach.item.kibana.alert.attack_discovery.details_markdown_with_replacements}}
             ## Affected Entities
-            {{foreach.item.attack_discovery.entity_summary_markdown_with_replacements}}
+            {{foreach.item.kibana.alert.attack_discovery.entity_summary_markdown_with_replacements}}
             ## Investigation Context
-            - **Discovery ID:** {{foreach.item.uuid}}
-            - **Detection Time:** {{foreach.item.start}}
-            - **Alert Count:** {{foreach.item.attack_discovery.alerts_context_count}}
-            - **Risk Score:** {{foreach.item.alert.risk_score}}
-            - **Rule:** {{foreach.item.rule.name}}
+            - **Discovery ID:** {{foreach.item.kibana.alert.uuid}}
+            - **Detection Time:** {{foreach.item.kibana.alert.start}}
+            - **Alert Count:** {{foreach.item.kibana.alert.attack_discovery.alerts_context_count}}
+            - **Risk Score:** {{foreach.item.kibana.alert.risk_score}}
+            - **Rule:** {{foreach.item.kibana.alert.rule.name}}
 
             ## View Full Discovery
 
-            {{foreach.item.url}}
+            {{foreach.item.kibana.alert.url}}
           tags:
-            - '{{foreach.item.attack_discovery.mitre_attack_tactics}}'
+            - '{{ foreach.item.kibana.alert.attack_discovery.mitre_attack_tactics | join: ", " }}'
           settings:
             syncAlerts: false
           severity: high
@@ -117,7 +117,7 @@ steps:
       # -------------------------------------------------------------------------
       - name: foreach_alert_in_ad
         type: foreach
-        foreach: foreach.item.attack_discovery.alert_ids
+        foreach: '{{ foreach.item.kibana.alert.attack_discovery.alert_ids }}'
         steps:
 
           # -------------------------------------------------------------------------
@@ -157,8 +157,8 @@ steps:
                 - alertId: '{{ foreach.item }}'
                   index: .alerts-security.alerts-default
                   rule:
-                    name: '{{ steps.get_details.output.hits.hits._source.kibana.alert.rule.name }}'
-                    id: '{{ steps.get_details.output.hits.hits._source.kibana.alert.rule.uuid }}'
+                    name: '{{ steps.get_details.output.hits.hits[0]._source.kibana.alert.rule.name }}'
+                    id: '{{ steps.get_details.output.hits.hits[0]._source.kibana.alert.rule.uuid }}'
 
       # -------------------------------------------------------------------------
       # STEP 6: triage_agent
@@ -227,7 +227,7 @@ steps:
         type: cases.addComment
         with:
           case_id: '{{ steps.create_case.output.case.id }}'
-          comment: '{{ steps.triage_agent.output.data.data }}'
+          comment: '{{ steps.triage_agent.output.data }}'
 
       # -------------------------------------------------------------------------
       # STEP 8: get_host_details
@@ -325,7 +325,7 @@ steps:
                   "type": "header",
                   "text": {
                     "type": "plain_text",
-                    "text": "🚨 Attack Discovery: {{foreach.item.attack_discovery.title_with_replacements}}",
+                    "text": "🚨 Attack Discovery: {{foreach.item.kibana.alert.attack_discovery.title_with_replacements}}",
                     "emoji": true
                   }
                 },
@@ -340,7 +340,7 @@ steps:
                   "type": "section",
                   "text": {
                     "type": "mrkdwn",
-                    "text": "*📝 Current Status:*\n \n• ✅ Security case created with {{foreach.item.attack_discovery.alerts_context_count}} related alerts consolidated for investigation\n• ✅ Initial threat analysis completed by AI security agent\n• ✅ Affected host `srv-win-defend-07` isolated from network pending further review\n• ✅ Forensic data collection and evidence preservation in progress\n• ✅ Incident response workflow initiated with automated triage complete"
+                    "text": "*📝 Current Status:*\n \n• ✅ Security case created with {{foreach.item.kibana.alert.attack_discovery.alerts_context_count}} related alerts consolidated for investigation\n• ✅ Initial threat analysis completed by AI security agent\n• ✅ Affected host `srv-win-defend-07` isolated from network pending further review\n• ✅ Forensic data collection and evidence preservation in progress\n• ✅ Incident response workflow initiated with automated triage complete"
                   }
                 },
                 {
@@ -348,19 +348,19 @@ steps:
                   "fields": [
                     {
                       "type": "mrkdwn",
-                      "text": "*Risk Score:* `{{foreach.item.risk_score}}`"
+                      "text": "*Risk Score:* `{{foreach.item.kibana.alert.risk_score}}`"
                     },
                     {
                       "type": "mrkdwn",
-                      "text": "*Alert Count:* {{foreach.item.attack_discovery.alerts_context_count}}"
+                      "text": "*Alert Count:* {{foreach.item.kibana.alert.attack_discovery.alerts_context_count}}"
                     },
                     {
                       "type": "mrkdwn",
-                      "text": "*Status:* {{foreach.item.status}}"
+                      "text": "*Status:* {{foreach.item.kibana.alert.workflow_status}}"
                     },
                     {
                       "type": "mrkdwn",
-                      "text": "*Time:* {{foreach.item.start}}"
+                      "text": "*Time:* {{foreach.item.kibana.alert.start}}"
                     }
                   ]
                 },
@@ -369,7 +369,7 @@ steps:
                   "elements": [
                     {
                       "type": "mrkdwn",
-                      "text": "Case ID: `{{steps.create_case.output.case.id}}` | {{foreach.item.attack_discovery.alerts_context_count}} related alerts | MITRE: {{foreach.item.attack_discovery.mitre_attack_tactics}}"
+                      "text": "Case ID: `{{steps.create_case.output.case.id}}` | {{foreach.item.kibana.alert.attack_discovery.alerts_context_count}} related alerts | MITRE: {{ foreach.item.kibana.alert.attack_discovery.mitre_attack_tactics | join: ', ' }}"
                     }
                   ]
                 },
@@ -387,7 +387,7 @@ steps:
                         "emoji": true
                       },
                       "style": "primary",
-                      "url": "{{foreach.item.url}}"
+                      "url": "{{foreach.item.kibana.alert.url}}"
                     },
                     {
                       "type": "button",
