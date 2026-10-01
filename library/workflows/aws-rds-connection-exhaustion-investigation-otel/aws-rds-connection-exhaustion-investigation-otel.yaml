@@ -1,14 +1,18 @@
 template-metadata:
   slug: aws-rds-connection-exhaustion-investigation-otel
-  version: "1.0.0"
+  version: "1.1.0"
   availability: ">=9.5.0"
   name: "AWS RDS connection exhaustion investigation (OTel)"
   description: >-
     Investigate an RDS instance that is refusing new connections. Compares
-    incident vs baseline DatabaseConnections, rules out CPU/memory/IO/storage
-    bottlenecks, correlates with downstream ALB 5xx, and synthesises a
-    root-cause summary. Requires AWS OTel metrics from the EDOT awscloudwatch
-    collector (metrics-aws.*.otel-*).
+    incident vs baseline DatabaseConnections, judges CPU/memory/IO/storage
+    against the instance's OWN pre-incident baseline, looks for the refusal
+    itself in the Postgres log and the fallout in the dependent service's
+    access log, separates alerts that pre-date the incident from ones that
+    fired during it, and synthesises a root-cause summary whose causal chain
+    marks every link as observed or inferred. Requires AWS OTel metrics from the
+    EDOT awscloudwatch collector (metrics-aws.*.otel-*); the log steps are
+    optional.
   solutions: [observability]
   categories: [root-cause-analysis, monitoring]
 
@@ -38,6 +42,13 @@ consts:
   baseline_lookend: "20 minutes"
   # Incident window padding around the alert timestamp.
   incident_lookback: "20 minutes"
+  # OPTIONAL log sources that turn inferred causal links into observed ones. Point these
+  # at wherever your RDS Postgres log (CloudWatch log group
+  # /aws/rds/instance/<id>/postgresql) and your application/access logs land. Both
+  # steps run with on-failure: continue, so an absent stream degrades the report to
+  # "inferred" rather than breaking the run.
+  rds_logs_index: "logs-aws_logs.rds*-*"
+  service_logs_index: "logs-aws_logs.ecs*-*"
 
 # The alert trigger fires only when a rule is connected to this workflow via the
 # "Run Workflow" rule action (.workflows system connector). Configure that action
@@ -120,7 +131,10 @@ steps:
       format: json
 
   # 3. Alternative DB bottlenecks — rule connection exhaustion IN by ruling these OUT.
-  #    If CPU/memory/IO are nominal while connections are pinned high, exhaustion is the cause.
+  #    "Nominal" is NOT an absolute judgement: a small instance can sit at 200 MB freeable
+  #    memory forever (and below a shipped alert's fixed 256 MB floor) while perfectly
+  #    healthy. So step 3b fetches the SAME metrics over the pre-incident baseline window
+  #    and the classifier/summariser compare each metric against ITS OWN baseline.
   - name: db_resource_metrics
     type: elasticsearch.esql.query
     with:
@@ -138,23 +152,107 @@ steps:
             max_disk_queue     = MAX(`metrics.amazonaws.com/AWS/RDS/DiskQueueDepth`)    WHERE attributes.stat == "Maximum"
       format: json
 
+  # 3b. The same resource metrics over the baseline window — the denominator for
+  #     "did this metric actually move?". Optional: a short-history environment may
+  #     have no baseline, in which case the report must say the comparison is unavailable.
+  - name: db_resource_baseline
+    type: elasticsearch.esql.query
+    with:
+      query: |
+        FROM {{ consts.rds_metrics_index }}
+        | WHERE attributes.DBInstanceIdentifier == "{{ steps.resolve.output.db_instance_identifier }}"
+          AND @timestamp >= TO_DATETIME("{{ steps.resolve.output.alert_timestamp }}") - {{ consts.baseline_lookback }}
+          AND @timestamp <= TO_DATETIME("{{ steps.resolve.output.alert_timestamp }}") - {{ consts.baseline_lookend }}
+        | STATS
+            baseline_max_cpu_pct        = MAX(`metrics.amazonaws.com/AWS/RDS/CPUUtilization`)    WHERE attributes.stat == "Maximum",
+            baseline_min_freeable_mem   = MIN(`metrics.amazonaws.com/AWS/RDS/FreeableMemory`)    WHERE attributes.stat == "Average",
+            baseline_avg_freeable_mem   = AVG(`metrics.amazonaws.com/AWS/RDS/FreeableMemory`)    WHERE attributes.stat == "Average",
+            baseline_min_free_storage   = MIN(`metrics.amazonaws.com/AWS/RDS/FreeStorageSpace`)  WHERE attributes.stat == "Average",
+            baseline_max_read_latency   = MAX(`metrics.amazonaws.com/AWS/RDS/ReadLatency`)       WHERE attributes.stat == "Maximum",
+            baseline_max_write_latency  = MAX(`metrics.amazonaws.com/AWS/RDS/WriteLatency`)      WHERE attributes.stat == "Maximum",
+            baseline_max_disk_queue     = MAX(`metrics.amazonaws.com/AWS/RDS/DiskQueueDepth`)    WHERE attributes.stat == "Maximum"
+      format: json
+    on-failure:
+      continue: true
+
   # 4. Downstream cascade — causal chain often ends in ALB TARGET 5xx as the dependent
   #    service times out waiting for a DB connection and returns 503. Confirms blast
   #    radius. OPTIONAL: the ALB may not be onboarded, and HTTPCode_Target_5XX_Count is a
   #    SPARSE CloudWatch metric (unmapped until the first 5xx ever lands, and ES|QL fails
-  #    verification on an unknown column) — continue without it.
+  #    verification on an unknown column) — continue without it. Pinned to the
+  #    LoadBalancer-only dimension level: CloudWatch also publishes per-AZ and per-
+  #    TargetGroup copies of the same counters, and summing all levels multiplies them.
   - name: alb_cascade
     type: elasticsearch.esql.query
     with:
       query: |
         FROM {{ consts.alb_metrics_index }}
         | WHERE attributes.LoadBalancer == "{{ steps.resolve.output.load_balancer }}"
+          AND attributes.TargetGroup IS NULL AND attributes.AvailabilityZone IS NULL
           AND @timestamp >= TO_DATETIME("{{ steps.resolve.output.alert_timestamp }}") - {{ consts.incident_lookback }}
           AND @timestamp <= TO_DATETIME("{{ steps.resolve.output.alert_timestamp }}") + 5 minutes
         | STATS
             target_5xx          = SUM(`metrics.amazonaws.com/AWS/ApplicationELB/HTTPCode_Target_5XX_Count`) WHERE attributes.stat == "Sum",
             request_count       = SUM(`metrics.amazonaws.com/AWS/ApplicationELB/RequestCount`)              WHERE attributes.stat == "Sum",
             max_target_response = MAX(`metrics.amazonaws.com/AWS/ApplicationELB/TargetResponseTime`)        WHERE attributes.stat == "Maximum"
+      format: json
+    on-failure:
+      continue: true
+
+  # 4b. The refusal itself. CloudWatch cannot show a refused connection (there is no
+  #     ConnectionsRefused metric and no max_connections metric), but Postgres logs one
+  #     FATAL line per refusal ("remaining connection slots are reserved…", "too many
+  #     connections for role…", "sorry, too many clients already"). If the RDS log is
+  #     shipped, this turns "new connections refused" from an inference into an
+  #     observation. Counted over baseline AND incident so a standing trickle of
+  #     FATALs is not mistaken for the incident.
+  - name: db_connection_refusals
+    type: elasticsearch.esql.query
+    with:
+      query: |
+        FROM {{ consts.rds_logs_index }}
+        | WHERE aws.cloudwatch.log_group LIKE "*/aws/rds/instance/{{ steps.resolve.output.db_instance_identifier }}/*"
+          AND @timestamp >= TO_DATETIME("{{ steps.resolve.output.alert_timestamp }}") - {{ consts.baseline_lookback }}
+          AND @timestamp <= TO_DATETIME("{{ steps.resolve.output.alert_timestamp }}") + 5 minutes
+          AND message LIKE "*FATAL*"
+          AND (message LIKE "*connection slots*" OR message LIKE "*too many connections*" OR message LIKE "*too many clients*")
+        | EVAL window_start = TO_DATETIME("{{ steps.resolve.output.alert_timestamp }}") - {{ consts.incident_lookback }}
+        | STATS
+            refusals_incident = COUNT(*) WHERE @timestamp >= window_start,
+            refusals_baseline = COUNT(*) WHERE @timestamp <  window_start,
+            first_refusal     = MIN(@timestamp) WHERE @timestamp >= window_start,
+            sample_message    = MAX(message)
+      format: json
+    on-failure:
+      continue: true
+
+  # 4c. The fallout at the dependent service. Access-log lines are dissected for the
+  #     HTTP status and 5xx counted per log group over baseline vs incident — so the
+  #     report can name WHICH service started failing and prove it was not failing
+  #     before. Lines that are not access logs dissect to a null status and drop out.
+  #     Zero-error services are RETURNED (not filtered) so "no 5xx observed" is a
+  #     positive finding rather than an empty result the summariser must guess about.
+  - name: service_5xx_logs
+    type: elasticsearch.esql.query
+    with:
+      query: |
+        FROM {{ consts.service_logs_index }}
+        | WHERE @timestamp >= TO_DATETIME("{{ steps.resolve.output.alert_timestamp }}") - {{ consts.baseline_lookback }}
+          AND @timestamp <= TO_DATETIME("{{ steps.resolve.output.alert_timestamp }}") + 5 minutes
+          AND message LIKE "*HTTP/1.*"
+        | DISSECT message "%{} \"%{method} %{path} %{proto}\" %{status} %{}"
+        | EVAL status_code = TO_INTEGER(status),
+               window_start = TO_DATETIME("{{ steps.resolve.output.alert_timestamp }}") - {{ consts.incident_lookback }}
+        | WHERE status_code IS NOT NULL
+        | STATS
+            requests_incident  = COUNT(*) WHERE @timestamp >= window_start,
+            errors_5xx_incident = COUNT(*) WHERE @timestamp >= window_start AND status_code >= 500,
+            requests_baseline  = COUNT(*) WHERE @timestamp <  window_start,
+            errors_5xx_baseline = COUNT(*) WHERE @timestamp <  window_start AND status_code >= 500,
+            first_5xx          = MIN(@timestamp) WHERE @timestamp >= window_start AND status_code >= 500
+            BY aws.cloudwatch.log_group
+        | SORT errors_5xx_incident DESC, requests_incident DESC
+        | LIMIT 10
       format: json
     on-failure:
       continue: true
@@ -176,7 +274,9 @@ steps:
             DBInstanceIdentifier: {{ steps.resolve.output.db_instance_identifier }}
             Connections during incident: {{ steps.connections_incident.output | json }}
             Baseline connections:        {{ steps.connections_baseline.output | json }}
-            DB resource metrics:         {{ steps.db_resource_metrics.output | json }}
+            DB resource metrics (incident window): {{ steps.db_resource_metrics.output | json }}
+            DB resource metrics (baseline window): {{ steps.db_resource_baseline.output | json }}
+            Postgres connection refusals (log):    {{ steps.db_connection_refusals.output | json }}
           categories:
             - connection_exhaustion
             - cpu_saturation
@@ -188,16 +288,26 @@ steps:
             You are classifying the dominant failure mode of an AWS RDS instance during an
             incident. Note: RDS does NOT emit a max_connections metric, so connection
             exhaustion is inferred from the symptom — DatabaseConnections climbing far above
-            baseline and plateauing at a steady ceiling while CPU, freeable memory, free
-            storage and IO latency remain within normal ranges. Choose:
-              - connection_exhaustion: peak connections >> baseline and plateaued, other resources nominal
-              - cpu_saturation: max_cpu_pct sustained near 100
-              - memory_pressure: min_freeable_mem near zero
-              - io_latency: read/write latency or disk queue depth sharply elevated
+            baseline and plateauing at a steady ceiling while the OTHER resources did not
+            move relative to their own baseline. If the Postgres log shows connection
+            refusals in the incident window (refusals_incident > 0) and none in the
+            baseline, that is direct confirmation of exhaustion.
+
+            "Unchanged" / "within baseline" is judged per metric against the baseline
+            window for THIS instance, never against an absolute number: freeable memory
+            of 90 MB is unremarkable on an instance whose baseline is 90 MB, and only
+            matters if it fell materially (say, by more than a third) from baseline or
+            approached zero. Choose:
+              - connection_exhaustion: peak connections >> baseline and plateaued; other resources within baseline
+              - cpu_saturation: max_cpu_pct sustained near 100, or several times its baseline
+              - memory_pressure: min_freeable_mem near zero, or fell materially below baseline_min_freeable_mem
+              - io_latency: read/write latency or disk queue depth several times baseline
               - storage_full: min_free_storage near zero
             Pick the single best category. If signals are ambiguous, return "unrecognized".
-            If the baseline query returned no rows or nulls, note that the comparison is
-            unavailable — do not treat a missing baseline as a zero baseline.
+            If a baseline query returned no rows or nulls, say the comparison is
+            unavailable — do not treat a missing baseline as a zero baseline. In the
+            rationale, state each resource metric as "<incident value> vs baseline
+            <baseline value>: unchanged | moved", not as a bare "nominal".
           includeRationale: true
 
       # Optional calibration anchors (graceful if SLOs/alerts aren't deployed).
@@ -216,15 +326,30 @@ steps:
         on-failure:
           continue: true
 
+      # An alert that was already firing before the incident window opened is standing
+      # state, not corroboration — a small instance can sit under a fixed "freeable
+      # memory low" floor for weeks. `alert_relation` makes that distinction explicit
+      # in the data so the summariser cannot blur it.
+      #
+      # Match on the alert EPISODE, not the document timestamp: Kibana rewrites the
+      # alert doc's @timestamp on every rule run, so filtering @timestamp into the
+      # incident window silently drops every still-active alert once the workflow runs
+      # more than one rule interval after the window closes. An episode is relevant if
+      # it started before the window ended and was still being updated at/after the
+      # window opened (which also excludes alerts stuck "active" by a disabled rule).
       - name: active_alerts
         type: elasticsearch.esql.query
         with:
           query: |
             FROM .alerts-*
             | WHERE kibana.alert.instance.id LIKE "*{{ steps.resolve.output.db_instance_identifier }}*"
+              AND kibana.alert.start <= TO_DATETIME("{{ steps.resolve.output.alert_timestamp }}") + 5 minutes
               AND @timestamp >= TO_DATETIME("{{ steps.resolve.output.alert_timestamp }}") - {{ consts.incident_lookback }}
-              AND @timestamp <= TO_DATETIME("{{ steps.resolve.output.alert_timestamp }}") + 5 minutes
-            | KEEP kibana.alert.rule.name, kibana.alert.status, kibana.alert.reason, kibana.alert.start
+            | EVAL window_start = TO_DATETIME("{{ steps.resolve.output.alert_timestamp }}") - {{ consts.incident_lookback }},
+                   alert_relation = CASE(kibana.alert.start < window_start,
+                                         "pre-existing: started before the incident window",
+                                         "started during the incident window")
+            | KEEP kibana.alert.rule.name, kibana.alert.status, alert_relation, kibana.alert.start, kibana.alert.reason
             | SORT kibana.alert.start DESC
             | LIMIT 20
           format: json
@@ -246,31 +371,89 @@ steps:
 
             Connections (incident): {{ steps.connections_incident.output | json }}
             Connections (baseline): {{ steps.connections_baseline.output | json }}
-            DB resource metrics:    {{ steps.db_resource_metrics.output | json }}
+            DB resource metrics (incident window): {{ steps.db_resource_metrics.output | json }}
+            DB resource metrics (baseline window): {{ steps.db_resource_baseline.output | json }}
+            Postgres connection refusals (RDS log): {{ steps.db_connection_refusals.output | json }}
+            Dependent-service 5xx (access logs, by log group): {{ steps.service_5xx_logs.output | json }}
             ALB cascade:            {{ steps.alb_cascade.output | json }}
             SLO status:             {{ steps.slo_context.output | json }}
-            Active alerts:          {{ steps.active_alerts.output | json }}
+            Alerts on this resource (alert_relation says whether each pre-dates the incident window): {{ steps.active_alerts.output | json }}
           instructions: |
-            You are an SRE assistant synthesising an AWS RDS incident investigation.
-            Produce a structured root-cause summary in EXACTLY these sections:
-            ROOT CAUSE HYPOTHESIS — one sentence naming the most likely cause.
-            EVIDENCE — the specific metric values supporting it (peak vs baseline
-              connections; the nominal/abnormal resource metrics; ALB 5xx + latency).
-            SEVERITY & CALIBRATION — if an SLO is VIOLATED/DEGRADING (or its error budget is
-              materially consumed), or an alert is active for this resource, ANCHOR the
-              severity and root cause on that calibrated signal and name the alert/SLO + its
-              reason (e.g. the "Database connections high" alert confirms the count is high
-              for THIS instance — which the raw number alone cannot establish). If no
-              SLO/alert context is present or it shows nothing, state the assessment rests on
-              raw metrics alone with no SLO/alert corroboration — do NOT invent one.
-            CAUSAL CHAIN — connections climb to the ceiling → new connections refused →
-              the dependent service times out → 5xx at the ALB (adjust to the evidence).
-            RECOMMENDED NEXT STEPS — e.g. drain/recycle leaked connections, raise the
-              connection ceiling (max_connections / pool size) with headroom, restart
-              the dependent service to reset its pool, fix the leak.
-            DOWNSTREAM IMPACT — services affected and user-facing symptom.
+            You are an SRE assistant synthesising an AWS RDS incident investigation. Report
+            only what the supplied step outputs show; every number you cite must appear in
+            them. Produce a structured root-cause summary in EXACTLY these sections:
+
+            Writing rules for the report: write for an on-call engineer in plain words. The
+            field and step names below are for YOUR reading only — never print them (write
+            "connection refusals in the Postgres log", not "refusals_incident"; "the alert
+            pre-dates the incident window", not "alert_relation"). When you state a ratio,
+            name both numbers it divides ("peak 73 vs baseline average 0.13, about 560x"),
+            and never present an average-based ratio as a peak ratio. If "Triggered by" is
+            not "manual run", open SEVERITY & CALIBRATION by naming the triggering alert and
+            saying whether the classified failure mode explains it.
+
+            ROOT CAUSE HYPOTHESIS — one sentence naming the most likely cause. Do not assert
+              an impact ("disrupted availability", "connections were refused") unless a
+              supplied metric, log count or alert directly shows it; otherwise phrase it as
+              the likely consequence.
+
+            EVIDENCE — the values that support the hypothesis: peak vs baseline connections
+              and whether the series plateaued; EACH resource metric stated against its own
+              baseline ("freeable memory min 88 MB vs baseline min 90 MB: unchanged"), never
+              as a bare "nominal"; the Postgres refusal count (incident vs baseline) if the
+              log step returned rows; the per-service 5xx counts (incident vs baseline) if
+              the access-log step returned rows; ALB 5xx + latency, or that ALB data was
+              unavailable. If a step returned no rows or an error, say "not available"
+              rather than treating it as zero.
+
+            SEVERITY & CALIBRATION — apply these rules literally:
+              1. An SLO or alert CORROBORATES the root cause only if BOTH hold: (a) it
+                 measures the same signal as the classified failure mode (for
+                 connection_exhaustion that is DatabaseConnections; a memory, storage or
+                 latency alert does NOT), and (b) its alert_relation says it started during
+                 the incident window, or the SLO's status changed in this window.
+              2. An alert whose alert_relation is "pre-existing" was already firing before
+                 the incident. List it under "Pre-existing context" with its start time and
+                 say explicitly that it is not corroboration and may be unrelated standing
+                 state. If its metric did not move between the baseline and incident windows,
+                 say that — it means the alert is unrelated to this incident. If its metric
+                 DID move during the incident, the movement is a consequence to explain under
+                 EVIDENCE, but the alert still pre-dates the incident and remains
+                 non-corroborating. Never describe a pre-existing alert as a symptom or
+                 consequence of the incident.
+              3. A HEALTHY SLO is not corroboration; report it as scope ("user-facing impact
+                 on <SLI> not visible in this window").
+              4. If nothing satisfies rule 1, state that the assessment rests on raw metrics
+                 (and logs, if present) alone, with no SLO/alert corroboration. Do NOT
+                 invent one.
+              Then give the severity (low / moderate / high) with a one-line reason.
+
+            HYPOTHESIZED CAUSAL CHAIN — one link per line, cause to impact. Tag EVERY link:
+              [observed: <the metric, log count or alert that shows it>] when a supplied
+              value directly shows it, or [inferred] when it is the expected mechanism but
+              no supplied data shows it. "New connections refused" is observed ONLY if
+              refusals_incident > 0; "the dependent service failed" is observed ONLY if
+              errors_5xx_incident > 0 for some log group or ALB target 5xx > 0; otherwise
+              both are [inferred] and must use conditional language ("would then", "likely").
+              Link a service's 5xx to the database ONLY if it is the named dependent service
+              or its first_5xx is at or after first_refusal; a service whose errors began
+              before the refusals, or that is unrelated to the database, is listed as
+              "concurrent, not linked", never woven into the chain.
+              Where the evidence contradicts a link (e.g. zero ALB 5xx), keep the link and
+              say it was NOT observed rather than dropping it. If every link is observed,
+              retitle the section CAUSAL CHAIN.
+
+            RECOMMENDED NEXT STEPS — numbered. First the checks that would confirm any
+              [inferred] link (pg_stat_activity, connection-error lines in the service's
+              logs, traces), then remediation: drain/recycle leaked connections, restart the
+              dependent service to reset its pool, raise the ceiling (max_connections / pool
+              size) with headroom, fix the leak.
+
+            DOWNSTREAM IMPACT — services affected and the user-facing symptom, each marked
+              observed or expected in the same way.
+
             CONFIDENCE NOTE — only if the classification was ambiguous.
-          maxLength: 1500
+          maxLength: 2200
 
       # 8. Expose the result as the workflow's output so callers / composing
       #    workflows can consume it (not just read a step output).
