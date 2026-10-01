@@ -4,7 +4,11 @@ steps:
   - label: "Build"
     command: "true"
 
-  - label: "Test"
+  # PR validation (build:catalog, lint, workflow YAML validation) runs in
+  # GitHub Actions (.github/workflows/validate.yml) where fork PRs are
+  # supported. This step is a placeholder; a post-merge backstop run can be
+  # added here later if needed.
+  - label: "Validate workflows"
     command: "true"
 
   - label: "Deploy"
