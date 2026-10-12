@@ -1,0 +1,108 @@
+template-metadata:
+  slug: prometheus-auto-dashboards
+  version: "1.0.0"
+  availability: ">=9.5.0"
+  name: "Prometheus auto dashboards (Agent Builder)"
+  description: >-
+    Every 10 minutes (and on demand), detect Prometheus metric families in a
+    remote-write metrics index, then ask an Agent Builder agent to create Lens
+    xy dashboards only for NEW families (HTTP, CPU, Go, business KPIs). Gap-only;
+    does not blank existing healthy dashboards.
+  solutions: [observability]
+  categories: [monitoring, ai-agent, reporting]
+  install:
+    form:
+      - name: agent-id
+        label: "Agent Builder agent ID"
+        description: >-
+          Agent Builder agent that performs gap analysis and creates assets.
+          Default elastic-ai-agent is the built-in Elastic AI Agent; point at a
+          custom agent if you have Prometheus-specific tools/skills configured.
+        inputType: text
+        required: true
+        default: "elastic-ai-agent"
+      - name: metrics-index
+        label: "Prometheus metrics index pattern"
+        description: >-
+          Elasticsearch index / data stream pattern holding Prometheus remote-write
+          metrics (e.g. metrics-generic.prometheus-* or metrics-*.prometheus-*).
+        inputType: esIndex
+        required: true
+        default: "metrics-generic.prometheus-*"
+
+name: Prometheus Auto Dashboards
+description: >
+  Detect Prometheus metric families and create gap-only Lens dashboards via
+  Agent Builder (HTTP, CPU, Go, business KPIs).
+
+consts:
+  metrics_index: __install__.metrics-index
+
+triggers:
+  - type: manual
+  - type: scheduled
+    with:
+      every: 10m
+
+steps:
+  # Count recent samples per Prom metric family to decide which dashboards are needed.
+  - name: detect_metric_families
+    type: elasticsearch.esql.query
+    with:
+      format: json
+      query: |
+        FROM { consts.metrics_index }
+        | WHERE @timestamp > NOW() - 30 minutes
+        | STATS http_samples = COUNT(*) WHERE http_requests_total IS NOT NULL,
+                cpu_samples = COUNT(*) WHERE process_cpu_usage_ratio IS NOT NULL,
+                go_samples = COUNT(*) WHERE go_goroutines IS NOT NULL,
+                business_samples = COUNT(*) WHERE checkout_orders_total IS NOT NULL,
+                services = COUNT_DISTINCT(service)
+
+  - name: parse_sample_counts
+    type: data.set
+    with:
+      http_samples: "{{ steps.detect_metric_families.output.values[0][0] }}"
+      cpu_samples: "{{ steps.detect_metric_families.output.values[0][1] }}"
+      go_samples: "{{ steps.detect_metric_families.output.values[0][2] }}"
+      business_samples: "{{ steps.detect_metric_families.output.values[0][3] }}"
+      services: "{{ steps.detect_metric_families.output.values[0][4] }}"
+
+  # Agent creates Lens xy dashboards only for families that are not already covered.
+  - name: build_prometheus_dashboards
+    type: ai.agent
+    agent-id: __install__.agent-id
+    with:
+      message: |
+        Scheduled / on-demand Prometheus dashboard sync.
+        Index: {{ consts.metrics_index }}
+        Pre-check sample counts (last 30m):
+        - http_samples (http_requests_total): {{ steps.parse_sample_counts.output.http_samples }}
+        - cpu_samples (process_cpu_usage_ratio): {{ steps.parse_sample_counts.output.cpu_samples }}
+        - go_samples (go_goroutines): {{ steps.parse_sample_counts.output.go_samples }}
+        - business_samples (checkout_orders_total): {{ steps.parse_sample_counts.output.business_samples }}
+        - distinct services: {{ steps.parse_sample_counts.output.services }}
+
+        GOAL: Find NEW metric families and create dashboards only for gaps.
+        Do NOT recreate or blank-out dashboards that already have real Lens/vis panels.
+
+        Family → expected dashboard title:
+        1) HTTP (http_samples > 0) → "Auto: Prometheus HTTP Requests & Errors by Service"
+           Lens xy: request_rate = SUM(RATE(http_requests_total)) by service + time bucket;
+           5xx: same with AND status LIKE "5*" → error_rate.
+        2) CPU (cpu_samples > 0) → "Auto: Prometheus Process CPU by Service"
+           AVG(process_cpu_usage_ratio) by service + time bucket.
+        3) Go (go_samples > 0) → "Auto: Prometheus Go Goroutines"
+           AVG(go_goroutines) BY job + time bucket (service often null on go_*).
+        4) Business (business_samples > 0) → "Auto: Prometheus Business Checkout KPIs"
+           Lens xy for RATE(checkout_orders_total), RATE(checkout_revenue_usd_total),
+           RATE(cart_abandonments_total), AVG(active_checkouts) by service.
+
+        Rules:
+        - Prefer o11y.detect_prom_metric_families when available; otherwise use the sample counts above.
+        - Use platform.core.create_visualization with target.type="lens", chartType="xy",
+          index="{{ consts.metrics_index }}". NEVER custom_content (empty shells).
+        - Skip family if samples == 0.
+        - Skip if a matching Auto: Prometheus dashboard already has non-empty vis/lens panels.
+        - End with a short summary: created / skipped / already covered.
+    timeout: 15m

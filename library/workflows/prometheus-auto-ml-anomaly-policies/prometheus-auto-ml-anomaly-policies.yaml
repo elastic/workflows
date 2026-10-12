@@ -1,0 +1,112 @@
+template-metadata:
+  slug: prometheus-auto-ml-anomaly-policies
+  version: "1.0.0"
+  availability: ">=9.5.0"
+  name: "Prometheus auto ML anomaly policies (Agent Builder)"
+  description: >-
+    Every 10 minutes (and on demand), detect Prometheus metric families and ask
+    an Agent Builder agent to create gap-only ML anomaly detection jobs (opened
+    + started datafeeds) and xpack.ml.anomaly_detection_alert rules. Syncs Kibana
+    ML saved objects so rules can see job IDs.
+  solutions: [observability]
+  categories: [monitoring, detection, ai-agent]
+  install:
+    form:
+      - name: agent-id
+        label: "Agent Builder agent ID"
+        description: >-
+          Agent Builder agent that performs gap analysis and creates assets.
+          Default elastic-ai-agent is the built-in Elastic AI Agent; point at a
+          custom agent if you have Prometheus-specific tools/skills configured.
+        inputType: text
+        required: true
+        default: "elastic-ai-agent"
+      - name: metrics-index
+        label: "Prometheus metrics index pattern"
+        description: >-
+          Elasticsearch index / data stream pattern holding Prometheus remote-write
+          metrics (e.g. metrics-generic.prometheus-* or metrics-*.prometheus-*).
+        inputType: esIndex
+        required: true
+        default: "metrics-generic.prometheus-*"
+
+name: Prometheus Auto ML Anomaly Policies
+description: >
+  Detect Prometheus metric families and create gap-only ML anomaly jobs plus
+  Anomaly detection alert rules via Agent Builder.
+
+consts:
+  metrics_index: __install__.metrics-index
+
+triggers:
+  - type: manual
+  - type: scheduled
+    with:
+      every: 10m
+
+steps:
+  # Count recent samples per Prom metric family to decide ML coverage.
+  - name: detect_metric_families
+    type: elasticsearch.esql.query
+    with:
+      format: json
+      query: |
+        FROM { consts.metrics_index }
+        | WHERE @timestamp > NOW() - 30 minutes
+        | STATS http_samples = COUNT(*) WHERE http_requests_total IS NOT NULL,
+                cpu_samples = COUNT(*) WHERE process_cpu_usage_ratio IS NOT NULL,
+                go_samples = COUNT(*) WHERE go_goroutines IS NOT NULL,
+                business_samples = COUNT(*) WHERE checkout_orders_total IS NOT NULL,
+                services = COUNT_DISTINCT(service)
+
+  - name: parse_sample_counts
+    type: data.set
+    with:
+      http_samples: "{{ steps.detect_metric_families.output.values[0][0] }}"
+      cpu_samples: "{{ steps.detect_metric_families.output.values[0][1] }}"
+      go_samples: "{{ steps.detect_metric_families.output.values[0][2] }}"
+      business_samples: "{{ steps.detect_metric_families.output.values[0][3] }}"
+      services: "{{ steps.detect_metric_families.output.values[0][4] }}"
+
+  # Agent creates/opens ML jobs, starts datafeeds, syncs SOs, creates anomaly alert rules.
+  - name: sync_ml_anomaly_policies
+    type: ai.agent
+    agent-id: __install__.agent-id
+    with:
+      message: |
+        Scheduled / on-demand Prometheus ML ANOMALY POLICY sync.
+        Index / datafeed source: {{ consts.metrics_index }}
+        Pre-check sample counts (last 30m):
+        - http_samples: {{ steps.parse_sample_counts.output.http_samples }}
+        - cpu_samples: {{ steps.parse_sample_counts.output.cpu_samples }}
+        - go_samples: {{ steps.parse_sample_counts.output.go_samples }}
+        - business_samples: {{ steps.parse_sample_counts.output.business_samples }}
+        - distinct services: {{ steps.parse_sample_counts.output.services }}
+
+        GOAL: Each DETECTED Prom metric family must have (1) an OPEN anomaly detection
+        job with a STARTED datafeed and (2) an Anomaly detection alert rule
+        (rule_type_id: xpack.ml.anomaly_detection_alert). Gap-only.
+
+        Tooling:
+        - Prefer execute_api Elasticsearch: ml.get_jobs, ml.get_job_stats, ml.put_job,
+          ml.open_job, ml.put_datafeed, ml.start_datafeed, ml.get_datafeeds.
+        - observability.get_anomaly_detection_jobs may fail privileges — fall back to execute_api.
+        - Create rules via alerting.post-alerting-rule-id; verify with alerting.get-alerting-rules-find.
+        - Do NOT create .index-threshold or SLO burn-rate rules here.
+
+        Steps:
+        1) Detect families (tool or sample counts above).
+        2) Inventory jobs/datafeeds (auto-prom-*) and rules tagged prometheus/ml.
+        3) For each DETECTED family without a covering job, put_job + put_datafeed:
+           - auto-prom-http-rate — high_count on http_requests_total, partition service
+           - auto-prom-cpu — high_mean on process_cpu_usage_ratio, partition service
+           - auto-prom-go — high_mean on go_goroutines, partition job
+           - auto-prom-business — count/high_count on checkout_orders_total, partition service
+           groups: ["prometheus","auto-prom"], bucket_span 5m, indices {{ consts.metrics_index }}
+        4) For closed jobs: ml.open_job then ml.start_datafeed. Re-check until opened.
+        5) After creating ES jobs: Kibana GET /api/ml/saved_objects/sync so rules see job ids.
+        6) Create missing xpack.ml.anomaly_detection_alert rules (severity ~75;
+           tags: prometheus, auto-prom, ml, agent-builder). Verify via _find.
+        7) Optional: generate_workflow helper for open/start + sync.
+        8) End with factual summary: job states, datafeed states, rule ids, failures.
+    timeout: 20m
