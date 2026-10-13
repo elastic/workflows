@@ -1,15 +1,15 @@
 template-metadata:
   slug: prometheus-auto-alert-policies
-  version: "1.0.0"
+  version: "1.1.0"
   availability: ">=9.5.0"
   name: "Prometheus auto alert policies (Agent Builder)"
   description: >-
-    Every 10 minutes (and on demand), detect Prometheus metric families and ask
-    an Agent Builder agent to create gap-only Observability alert policies
-    (threshold / SLO burn-rate) for uncovered families. Fixes Failed Prometheus
-    rules when query drift is found; does not recreate healthy policies.
+    Every 10 minutes (and on demand), detect Prometheus metric families
+    (HTTP / CPU / Go / business KPIs) then ask an Agent Builder agent to create
+    gap-only Observability threshold / SLO burn-rate alert policies for uncovered
+    families and fix Failed Prom rules. Aligns with Custom ES|QL scorecard signals.
   solutions: [observability]
-  categories: [monitoring, detection, ai-agent]
+  categories: [detection, monitoring, ai-agent]
   install:
     form:
       - name: agent-id
@@ -32,8 +32,8 @@ template-metadata:
 
 name: Prometheus Auto Alert Policies
 description: >
-  Detect Prometheus metric families and create gap-only Observability alert
-  policies via Agent Builder.
+  Gap-only Observability alert policies for detected Prometheus metric families
+  (infra + business KPIs), aligned with Auto: Prometheus dashboard scorecards.
 
 consts:
   metrics_index: __install__.metrics-index
@@ -45,7 +45,6 @@ triggers:
       every: 10m
 
 steps:
-  # Count recent samples per Prom metric family to find alert coverage gaps.
   - name: detect_metric_families
     type: elasticsearch.esql.query
     with:
@@ -56,7 +55,11 @@ steps:
         | STATS http_samples = COUNT(*) WHERE http_requests_total IS NOT NULL,
                 cpu_samples = COUNT(*) WHERE process_cpu_usage_ratio IS NOT NULL,
                 go_samples = COUNT(*) WHERE go_goroutines IS NOT NULL,
-                business_samples = COUNT(*) WHERE checkout_orders_total IS NOT NULL,
+                login_samples = COUNT(*) WHERE user_logins_total IS NOT NULL,
+                purchase_samples = COUNT(*) WHERE purchases_total IS NOT NULL,
+                signup_samples = COUNT(*) WHERE user_signups_total IS NOT NULL,
+                checkout_samples = COUNT(*) WHERE checkout_orders_total IS NOT NULL OR cart_abandonments_total IS NOT NULL,
+                engagement_samples = COUNT(*) WHERE product_views_total IS NOT NULL OR search_queries_total IS NOT NULL,
                 services = COUNT_DISTINCT(service)
 
   - name: parse_sample_counts
@@ -65,10 +68,13 @@ steps:
       http_samples: "{{ steps.detect_metric_families.output.values[0][0] }}"
       cpu_samples: "{{ steps.detect_metric_families.output.values[0][1] }}"
       go_samples: "{{ steps.detect_metric_families.output.values[0][2] }}"
-      business_samples: "{{ steps.detect_metric_families.output.values[0][3] }}"
-      services: "{{ steps.detect_metric_families.output.values[0][4] }}"
+      login_samples: "{{ steps.detect_metric_families.output.values[0][3] }}"
+      purchase_samples: "{{ steps.detect_metric_families.output.values[0][4] }}"
+      signup_samples: "{{ steps.detect_metric_families.output.values[0][5] }}"
+      checkout_samples: "{{ steps.detect_metric_families.output.values[0][6] }}"
+      engagement_samples: "{{ steps.detect_metric_families.output.values[0][7] }}"
+      services: "{{ steps.detect_metric_families.output.values[0][8] }}"
 
-  # Agent inventories Rules and creates/fixes gap-only Prometheus alert policies.
   - name: sync_prometheus_alert_policies
     type: ai.agent
     agent-id: __install__.agent-id
@@ -80,24 +86,43 @@ steps:
         - http_samples: {{ steps.parse_sample_counts.output.http_samples }}
         - cpu_samples: {{ steps.parse_sample_counts.output.cpu_samples }}
         - go_samples: {{ steps.parse_sample_counts.output.go_samples }}
-        - business_samples: {{ steps.parse_sample_counts.output.business_samples }}
+        - login_samples (user_logins_total): {{ steps.parse_sample_counts.output.login_samples }}
+        - purchase_samples (purchases_total): {{ steps.parse_sample_counts.output.purchase_samples }}
+        - signup_samples (user_signups_total): {{ steps.parse_sample_counts.output.signup_samples }}
+        - checkout_samples (orders/abandonments): {{ steps.parse_sample_counts.output.checkout_samples }}
+        - engagement_samples (views/searches): {{ steps.parse_sample_counts.output.engagement_samples }}
         - distinct services: {{ steps.parse_sample_counts.output.services }}
 
-        GOAL: Ensure each DETECTED metric family has relevant Observability alert
-        policies. Gap-only — you create/update policies; do not duplicate healthy rules.
+        GOAL: Continuously look for NEW metric types / families and ensure each has
+        relevant Observability alert policies. Gap-only; do not recreate healthy policies.
 
-        1) Prefer o11y.detect_prom_metric_families when available.
-        2) Inventory existing Rules tagged prometheus / auto-prom (Succeeded vs Failed).
-        3) For each DETECTED family (samples > 0), ensure covering policies exist:
-           - HTTP: high 5xx rate by service on http_requests_total (status LIKE "5*")
-           - CPU: process_cpu_usage_ratio high by service (e.g. > 0.85 sustained)
-           - Go: go_goroutines abnormal growth (by job)
-           - Business: checkout_orders_total drop / cart_abandonments_total spike /
-             active_checkouts saturation
-        4) Prefer Observability custom threshold and SLO burn-rate rule types.
+        Context: Auto: Prometheus dashboards use Custom ES|QL Panels (custom_content
+        scorecards + scrape→PRW flow). Align alert policy names/thresholds with the
+        same signals those scorecards surface (5xx error_pct, CPU ratio, goroutines,
+        business KPI drops/spikes). Do not modify dashboards here.
+
+        1) Call o11y.detect_prom_metric_families first when available.
+        2) Inventory existing Rules tagged prometheus / Auto: Prometheus / auto-prom
+           (Observability Rules). Note which are Succeeded vs Failed.
+        3) For each DETECTED family (samples > 0), ensure covering policies exist.
+           Skip creating duplicates when a healthy matching rule already exists.
+           Family → policy intent (name prefix Auto: Prometheus):
+           - HTTP: high 5xx rate by service
+           - CPU: process_cpu_usage_ratio high by service
+           - Go: go_goroutines abnormal growth
+           - Logins: user_login_failures_total spike; user_logins_total sudden drop
+           - Purchases: purchases_total / purchase_revenue_usd_total drop; payment_failures_total spike
+           - Signups: user_signups_total drop
+           - Checkout: cart_abandonments_total spike; active_checkouts saturation
+           - Engagement: product_views_total / search_queries_total drop
+        4) Prefer classic Observability rule types (custom threshold, SLO burn rate).
            Tag new rules: prometheus, auto-prom, agent-builder.
-        5) If an existing Prometheus rule is Failed, diagnose and FIX it.
-        6) Create detection policies first; connectors (Slack/etc.) optional.
-        7) Do NOT create dashboards or ML anomaly jobs in this run.
-        8) End with summary: created / fixed / skipped / failed.
+        5) If an existing Prometheus rule is Failed (query/field drift), diagnose and FIX it
+           rather than leaving a broken policy — still do not create duplicates.
+           For ES|QL/TS queries in rules: NEVER COUNT(*) under TS — use SUM(RATE(metric)).
+        6) Do NOT attach Slack/PagerDuty/Jira connectors unless already present — create
+           the detection policy first (actions can be wired later).
+        7) End with a short summary: created / fixed / skipped (already covered) / failed.
+
+        Do not create dashboards in this run (that is prometheus-auto-dashboards).
     timeout: 15m
