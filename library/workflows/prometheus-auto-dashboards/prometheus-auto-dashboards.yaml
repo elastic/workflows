@@ -1,0 +1,137 @@
+template-metadata:
+  slug: prometheus-auto-dashboards
+  version: "1.1.0"
+  availability: ">=9.5.0"
+  name: "Prometheus auto dashboards (Agent Builder)"
+  description: >-
+    Every 10 minutes (and on demand), detect Prometheus metric families in a
+    remote-write metrics index, then ask an Agent Builder agent to create
+    polished Auto: Prometheus dashboards (Custom ES|QL Panels + Lens xy) only
+    for NEW families — HTTP, CPU, Go, and business KPIs (auth, purchases,
+    signups, checkout, engagement). Gap-only; does not blank existing healthy
+    dashboards.
+  solutions: [observability]
+  categories: [monitoring, ai-agent, reporting]
+  install:
+    form:
+      - name: agent-id
+        label: "Agent Builder agent ID"
+        description: >-
+          Agent Builder agent that performs gap analysis and creates assets.
+          Default elastic-ai-agent is the built-in Elastic AI Agent; point at a
+          custom agent if you have Prometheus-specific tools/skills configured.
+        inputType: text
+        required: true
+        default: "elastic-ai-agent"
+      - name: metrics-index
+        label: "Prometheus metrics index pattern"
+        description: >-
+          Elasticsearch index / data stream pattern holding Prometheus remote-write
+          metrics (e.g. metrics-generic.prometheus-* or metrics-*.prometheus-*).
+        inputType: esIndex
+        required: true
+        default: "metrics-generic.prometheus-*"
+
+name: Prometheus Auto Dashboards
+description: >
+  Detect Prometheus metric families and create gap-only dashboards via Agent
+  Builder — Custom ES|QL Panels (scorecards + scrape→PRW flow) plus Lens
+  gradient area / error bars for HTTP, CPU, Go, and business KPIs.
+
+consts:
+  metrics_index: __install__.metrics-index
+
+triggers:
+  - type: manual
+  - type: scheduled
+    with:
+      every: 10m
+
+steps:
+  - name: detect_metric_families
+    type: elasticsearch.esql.query
+    with:
+      format: json
+      query: |
+        FROM { consts.metrics_index }
+        | WHERE @timestamp > NOW() - 30 minutes
+        | STATS http_samples = COUNT(*) WHERE http_requests_total IS NOT NULL,
+                cpu_samples = COUNT(*) WHERE process_cpu_usage_ratio IS NOT NULL,
+                go_samples = COUNT(*) WHERE go_goroutines IS NOT NULL,
+                login_samples = COUNT(*) WHERE user_logins_total IS NOT NULL,
+                purchase_samples = COUNT(*) WHERE purchases_total IS NOT NULL,
+                signup_samples = COUNT(*) WHERE user_signups_total IS NOT NULL,
+                checkout_samples = COUNT(*) WHERE checkout_orders_total IS NOT NULL OR cart_abandonments_total IS NOT NULL,
+                engagement_samples = COUNT(*) WHERE product_views_total IS NOT NULL OR search_queries_total IS NOT NULL,
+                services = COUNT_DISTINCT(service)
+
+  - name: parse_sample_counts
+    type: data.set
+    with:
+      http_samples: "{{ steps.detect_metric_families.output.values[0][0] }}"
+      cpu_samples: "{{ steps.detect_metric_families.output.values[0][1] }}"
+      go_samples: "{{ steps.detect_metric_families.output.values[0][2] }}"
+      login_samples: "{{ steps.detect_metric_families.output.values[0][3] }}"
+      purchase_samples: "{{ steps.detect_metric_families.output.values[0][4] }}"
+      signup_samples: "{{ steps.detect_metric_families.output.values[0][5] }}"
+      checkout_samples: "{{ steps.detect_metric_families.output.values[0][6] }}"
+      engagement_samples: "{{ steps.detect_metric_families.output.values[0][7] }}"
+      services: "{{ steps.detect_metric_families.output.values[0][8] }}"
+
+  - name: build_prometheus_dashboards
+    type: ai.agent
+    agent-id: __install__.agent-id
+    with:
+      message: |
+        Scheduled / on-demand Prometheus dashboard sync.
+        Index: {{ consts.metrics_index }}
+        Pre-check sample counts (last 30m):
+        - http_samples (http_requests_total): {{ steps.parse_sample_counts.output.http_samples }}
+        - cpu_samples (process_cpu_usage_ratio): {{ steps.parse_sample_counts.output.cpu_samples }}
+        - go_samples (go_goroutines): {{ steps.parse_sample_counts.output.go_samples }}
+        - login_samples (user_logins_total): {{ steps.parse_sample_counts.output.login_samples }}
+        - purchase_samples (purchases_total): {{ steps.parse_sample_counts.output.purchase_samples }}
+        - signup_samples (user_signups_total): {{ steps.parse_sample_counts.output.signup_samples }}
+        - checkout_samples (orders/abandonments): {{ steps.parse_sample_counts.output.checkout_samples }}
+        - engagement_samples (views/searches): {{ steps.parse_sample_counts.output.engagement_samples }}
+        - distinct services: {{ steps.parse_sample_counts.output.services }}
+
+        GOAL: Find NEW metric families and create dashboards only for gaps.
+        Do NOT recreate or blank-out dashboards that already have real panels
+        (custom_content scorecards and/or Lens/vis charts).
+
+        Family → expected dashboard title (create when samples > 0 and missing):
+        1) HTTP → "Auto: Prometheus HTTP Requests & Errors by Service"
+           Lens xy: request_rate = SUM(RATE(http_requests_total)) by service + time;
+           5xx bars: same with AND status LIKE "5*" → error_rate.
+        2) CPU → "Auto: Prometheus Process CPU by Service"
+           AVG(process_cpu_usage_ratio) by service + time.
+        3) Go → "Auto: Prometheus Go Goroutines"
+           AVG(go_goroutines) BY job + time (service often null on go_*).
+        4) Logins → "Auto: Prometheus Business Auth & Logins"
+        5) Purchases → "Auto: Prometheus Business Purchases & Revenue"
+        6) Signups → "Auto: Prometheus Business Signups"
+        7) Checkout → "Auto: Prometheus Business Checkout KPIs"
+        8) Engagement → "Auto: Prometheus Business Engagement"
+        9) Optional showcase → "Auto: Prometheus Health Monitor"
+           (service health scorecards + scrape→Managed PRW→Elastic flow + Lens).
+
+        === VISUAL STANDARD (required on EVERY Auto: Prometheus dashboard) ===
+        1) REQUIRED Custom ES|QL Panels (target.type="custom_content"):
+           - Liquid HTML/CSS scorecard board with live ES|QL (theme vars --cc-*).
+           - A scrape→Managed PRW→Elastic flow panel (custom_content; static HTML OK).
+        2) Lens: platform.core.create_visualization target.type="lens" chartType="xy",
+           index="{{ consts.metrics_index }}", stacked area with gradient fill, legend
+           bottom, hide points; bars for failure/error series.
+        3) ES|QL with TS (time-series): NEVER use COUNT(*). Use SUM(RATE(metric_field))
+           for counters, or COUNT(metric_field). Prefer `metric_field IS NOT NULL` over
+           labels.__name__ == "metric". FROM queries may use COUNT(*).
+
+        Rules:
+        - Prefer o11y.detect_prom_metric_families when available; else use sample counts.
+        - NEVER platform_dashboard_generate_dashboard. Prefer create_visualization /
+          kibana.request PUT /api/dashboards/{id} (Elastic-Api-Version: 2023-10-31).
+        - Skip family if samples == 0.
+        - Skip if a matching Auto: Prometheus dashboard already has non-empty panels.
+        - End with short summary: created / skipped / already covered.
+    timeout: 15m
