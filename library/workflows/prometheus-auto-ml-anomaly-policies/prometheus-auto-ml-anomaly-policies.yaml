@@ -1,6 +1,6 @@
 template-metadata:
   slug: prometheus-auto-ml-anomaly-policies
-  version: "1.1.0"
+  version: "1.2.0"
   availability: ">=9.5.0"
   name: "Prometheus auto ML anomaly policies (Agent Builder)"
   description: >-
@@ -37,6 +37,10 @@ description: >
   families (infra + business KPIs).
 
 enabled: true
+
+consts:
+  metrics_index: __install__.metrics-index
+
 triggers:
   - type: manual
   - type: scheduled
@@ -49,7 +53,7 @@ steps:
     with:
       format: json
       query: |
-        FROM metrics-generic.prometheus-*
+        FROM {{ consts.metrics_index }}
         | WHERE @timestamp > NOW() - 30 minutes
         | STATS http_samples = COUNT(*) WHERE http_requests_total IS NOT NULL,
                 cpu_samples = COUNT(*) WHERE process_cpu_usage_ratio IS NOT NULL,
@@ -65,11 +69,11 @@ steps:
 
   - name: sync_ml_anomaly_policies
     type: ai.agent
-    agent-id: elastic-ai-agent
+    agent-id: __install__.agent-id
     with:
       message: |
         Scheduled / on-demand Prometheus ML ANOMALY POLICY sync on this Serverless Observability project.
-        Index / datafeed source: metrics-generic.prometheus-*
+        Index / datafeed source: {{ consts.metrics_index }}
         Pre-check sample counts (last 30m) — ES|QL columns/values:
         {{ steps.detect_metric_families.output }}
 
@@ -104,7 +108,7 @@ steps:
            - auto-prom-signups — count on user_signups_total
            - auto-prom-checkout — count on checkout_orders_total / cart_abandonments_total
            - auto-prom-engagement — count on product_views_total / search_queries_total
-           groups: ["prometheus","auto-prom"], bucket_span 5m, indices metrics-generic.prometheus-*
+           groups: ["prometheus","auto-prom"], bucket_span 5m, indices {{ consts.metrics_index }}
         4) For EVERY covering job that is closed/closing: ml.open_job then ml.start_datafeed
            (start preferably now-2h or beginning). Re-check ml.get_job_stats until state=opened.
            Interactive chat may pause for HITL confirmations — that is expected for open/start.

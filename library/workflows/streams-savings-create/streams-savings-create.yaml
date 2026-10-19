@@ -1,6 +1,6 @@
 template-metadata:
   slug: streams-savings-create
-  version: "1.0.1"
+  version: "1.1.0"
   availability: ">=9.5.0"
   name: "Streams savings create (manual)"
   description: >-
@@ -17,12 +17,25 @@ template-metadata:
         inputType: esIndex
         required: true
         default: "metrics-generic.prometheus-*"
+      - name: prom-stream
+        label: "Prometheus landing stream name"
+        description: >-
+          Observability Streams name for the Managed Prometheus remote-write landing
+          stream (used by kibana.streams.get).
+        inputType: text
+        required: true
+        default: "metrics-generic.prometheus-default"
 
 name: Streams savings create (manual)
 description: >
   Manual create/recreate Auto: Streams Noise & Savings board.
 
 enabled: true
+
+consts:
+  metrics_index: __install__.metrics-index
+  prom_stream: __install__.prom-stream
+
 triggers:
   - type: manual
 
@@ -35,14 +48,13 @@ steps:
     on-failure:
       continue: true
     with:
-      name: metrics-generic.prometheus-default
-
+      name: "{{ consts.prom_stream }}"
   - name: volume_24h
     type: elasticsearch.esql.query
     with:
       format: json
       query: |
-        FROM metrics-generic.prometheus-*
+        FROM {{ consts.metrics_index }}
         | WHERE @timestamp > NOW() - 24 hours
         | STATS docs = COUNT(*), services = COUNT_DISTINCT(service), jobs = COUNT_DISTINCT(job)
         | EVAL est_bytes = docs * 450
@@ -55,7 +67,7 @@ steps:
     with:
       format: json
       query: |
-        FROM metrics-generic.prometheus-*
+        FROM {{ consts.metrics_index }}
         | WHERE @timestamp > NOW() - 24 hours
         | STATS docs = COUNT(*) BY service
         | SORT docs DESC
@@ -93,7 +105,7 @@ steps:
               title: "Streams noise → savings"
               content: |
                 ## Purpose
-                Identify **noise** in Observability **Streams** (Managed PRW → `metrics-generic.prometheus-*`) and show **potential savings** from Streams levers: aggregate / dedupe, roll-up, drop, and retention → object storage.
+                Identify **noise** in Observability **Streams** (Managed PRW → `{{ consts.metrics_index }}`) and show **potential savings** from Streams levers: aggregate / dedupe, roll-up, drop, and retention → object storage.
 
                 ## How to read it
                 - **Potential savings** — heuristic $ from docs × ~450 B/doc × illustrative $/GB-mo.
@@ -138,7 +150,7 @@ steps:
                   <div class="card">
                     <div class="label">Docs in range</div>
                     <div class="value">{{ "{{ row[\"docs\"].value }}" }}</div>
-                    <div class="meta">{{ "{{ row[\"services\"].value }}" }} services · {{ "{{ row[\"jobs\"].value }}" }} jobs · stream metrics-generic.prometheus-*</div>
+                    <div class="meta">{{ "{{ row[\"services\"].value }}" }} services · {{ "{{ row[\"jobs\"].value }}" }} jobs · stream {{ consts.metrics_index }}</div>
                   </div>
                   <div class="card">
                     <div class="label">Est. volume</div>
@@ -160,7 +172,7 @@ steps:
                 
               esql_query:
                 - |
-                  FROM metrics-generic.prometheus-*
+                  FROM {{ consts.metrics_index }}
                   | WHERE @timestamp >= ?_tstart AND @timestamp <= ?_tend
                   | STATS docs = COUNT(*), services = COUNT_DISTINCT(service), jobs = COUNT_DISTINCT(job)
                   | EVAL est_bytes = docs * 450
@@ -220,7 +232,7 @@ steps:
                 
               esql_query:
                 - |
-                  FROM metrics-generic.prometheus-*
+                  FROM {{ consts.metrics_index }}
                   | WHERE @timestamp >= ?_tstart AND @timestamp <= ?_tend
                   | STATS docs = COUNT(*), services = COUNT_DISTINCT(service), jobs = COUNT_DISTINCT(job)
                   | EVAL est_bytes = docs * 450
@@ -258,7 +270,7 @@ steps:
                   data_source:
                     type: esql
                     query: |
-                      FROM metrics-generic.prometheus-*
+                      FROM {{ consts.metrics_index }}
                       | WHERE @timestamp >= ?_tstart AND @timestamp <= ?_tend
                       | STATS docs = COUNT(*) BY @timestamp = BUCKET(@timestamp, 5 minutes)
                   x: { column: "@timestamp" }
@@ -288,7 +300,7 @@ steps:
                   data_source:
                     type: esql
                     query: |
-                      FROM metrics-generic.prometheus-*
+                      FROM {{ consts.metrics_index }}
                       | WHERE @timestamp >= ?_tstart AND @timestamp <= ?_tend
                       | STATS docs = COUNT(*) BY service
                       | SORT docs DESC
@@ -303,7 +315,7 @@ steps:
               title: "Live recommendations (workflow)"
               content: |
                 ## Stream inventory
-                Prom landing stream **metrics-generic.prometheus-default** (from `kibana.streams.get`).
+                Prom landing stream **{{ consts.prom_stream }}** (from `kibana.streams.get`).
                 Detail: {{ steps.get_prom_stream.output }}
 
                 ## Noise findings (last 24h)
@@ -320,11 +332,11 @@ steps:
                 1. **DROP** — unused / debug Prom metric families and high-cardinality labels
                 2. **ROLLUP** — downsample `go_*` / `process_*` to 5m/15m after 24h; keep 1m for HTTP SLIs
                 3. **AGGREGATE** — by `service` for estate rollups before long retention
-                4. **RETENTION** — lifecycle DSL (e.g. `30d`) on `metrics-generic.prometheus-default`
+                4. **RETENTION** — lifecycle DSL (e.g. `30d`) on `{{ consts.prom_stream }}`
                 5. **STORAGE** — age rolled-up history to object storage / blob
 
                 ## Day-one next steps
-                1. Streams → `metrics-generic.prometheus-default` → set lifecycle retention
+                1. Streams → `{{ consts.prom_stream }}` → set lifecycle retention
                 2. Add processing steps for drop/rollup on low-value series
                 3. Re-check scorecards above after the next workflow run
                 4. Cross-link with Auto: Prometheus Health Monitor for SLO vs cost tradeoffs

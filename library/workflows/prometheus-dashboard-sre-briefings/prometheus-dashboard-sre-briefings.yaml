@@ -1,6 +1,6 @@
 template-metadata:
   slug: prometheus-dashboard-sre-briefings
-  version: "1.1.0"
+  version: "1.2.0"
   availability: ">=9.5.0"
   name: "Prometheus dashboard SRE day-one briefings"
   description: >-
@@ -36,6 +36,10 @@ description: >
   Prometheus dashboard (including Health Monitor); preserves custom_content panels.
 
 enabled: true
+
+consts:
+  metrics_index: __install__.metrics-index
+
 triggers:
   - type: manual
   - type: scheduled
@@ -48,7 +52,7 @@ steps:
     with:
       format: json
       query: |
-        FROM metrics-generic.prometheus-*
+        FROM {{ consts.metrics_index }}
         | WHERE @timestamp > NOW() - 24 hours
         | STATS http_samples = COUNT(*) WHERE http_requests_total IS NOT NULL,
                 cpu_samples = COUNT(*) WHERE process_cpu_usage_ratio IS NOT NULL,
@@ -64,11 +68,11 @@ steps:
 
   - name: refresh_sre_briefings
     type: ai.agent
-    agent-id: elastic-ai-agent
+    agent-id: __install__.agent-id
     with:
       message: |
         Daily / on-demand SRE DASHBOARD BRIEFING sync on this Serverless Observability project.
-        Index: metrics-generic.prometheus-*
+        Index: {{ consts.metrics_index }}
         Sample counts (last 24h):
         - http_samples: {{ steps.detect_metric_families.output }}
         - cpu_samples: {{ steps.detect_metric_families.output }}

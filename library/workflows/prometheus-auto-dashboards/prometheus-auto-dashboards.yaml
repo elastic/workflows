@@ -1,6 +1,6 @@
 template-metadata:
   slug: prometheus-auto-dashboards
-  version: "1.1.0"
+  version: "1.2.0"
   availability: ">=9.5.0"
   name: "Prometheus auto dashboards (Agent Builder)"
   description: >-
@@ -39,6 +39,10 @@ description: >
   gradient area / error bars for HTTP, CPU, Go, and business KPIs.
 
 enabled: true
+
+consts:
+  metrics_index: __install__.metrics-index
+
 triggers:
   - type: manual
   - type: scheduled
@@ -51,7 +55,7 @@ steps:
     with:
       format: json
       query: |
-        FROM metrics-generic.prometheus-*
+        FROM {{ consts.metrics_index }}
         | WHERE @timestamp > NOW() - 30 minutes
         | STATS http_samples = COUNT(*) WHERE http_requests_total IS NOT NULL,
                 cpu_samples = COUNT(*) WHERE process_cpu_usage_ratio IS NOT NULL,
@@ -155,7 +159,7 @@ steps:
                 
               esql_query:
                 - |
-                  FROM metrics-generic.prometheus-*
+                  FROM {{ consts.metrics_index }}
                   | WHERE @timestamp >= ?_tstart AND @timestamp <= ?_tend AND http_requests_total IS NOT NULL
                   | STATS
                       total = COUNT(*),
@@ -210,7 +214,7 @@ steps:
                   <div class="col">
                     <div class="label">Observability</div>
                     <div class="node">Elastic Serverless</div>
-                    <div class="sub">metrics-generic.prometheus-*</div>
+                    <div class="sub">{{ consts.metrics_index }}</div>
                   </div>
                 </div>
                 
@@ -242,7 +246,7 @@ steps:
                   data_source:
                     type: esql
                     query: |
-                      TS metrics-generic.prometheus-*
+                      TS {{ consts.metrics_index }}
                       | WHERE @timestamp >= ?_tstart AND @timestamp <= ?_tend AND http_requests_total IS NOT NULL
                       | STATS request_rate = SUM(RATE(http_requests_total)) BY service, @timestamp = BUCKET(@timestamp, 1 minute)
                   x: { column: "@timestamp" }
@@ -273,7 +277,7 @@ steps:
                   data_source:
                     type: esql
                     query: |
-                      TS metrics-generic.prometheus-*
+                      TS {{ consts.metrics_index }}
                       | WHERE @timestamp >= ?_tstart AND @timestamp <= ?_tend AND http_requests_total IS NOT NULL AND status LIKE "5*"
                       | STATS error_rate = SUM(RATE(http_requests_total)) BY service, @timestamp = BUCKET(@timestamp, 1 minute)
                   x: { column: "@timestamp" }
@@ -367,7 +371,7 @@ steps:
                 
               esql_query:
                 - |
-                  FROM metrics-generic.prometheus-*
+                  FROM {{ consts.metrics_index }}
                   | WHERE @timestamp >= ?_tstart AND @timestamp <= ?_tend AND process_cpu_usage_ratio IS NOT NULL
                   | STATS cpu = ROUND(AVG(process_cpu_usage_ratio), 3), samples = COUNT(*) BY service
                   | SORT cpu DESC
@@ -415,7 +419,7 @@ steps:
                   <div class="col">
                     <div class="label">Observability</div>
                     <div class="node">Elastic Serverless</div>
-                    <div class="sub">metrics-generic.prometheus-*</div>
+                    <div class="sub">{{ consts.metrics_index }}</div>
                   </div>
                 </div>
                 
@@ -447,7 +451,7 @@ steps:
                   data_source:
                     type: esql
                     query: |
-                      FROM metrics-generic.prometheus-*
+                      FROM {{ consts.metrics_index }}
                       | WHERE @timestamp >= ?_tstart AND @timestamp <= ?_tend AND process_cpu_usage_ratio IS NOT NULL
                       | STATS cpu = AVG(process_cpu_usage_ratio) BY service, @timestamp = BUCKET(@timestamp, 1 minute)
                   x: { column: "@timestamp" }
@@ -541,7 +545,7 @@ steps:
                 
               esql_query:
                 - |
-                  FROM metrics-generic.prometheus-*
+                  FROM {{ consts.metrics_index }}
                   | WHERE @timestamp >= ?_tstart AND @timestamp <= ?_tend AND go_goroutines IS NOT NULL
                   | STATS goroutines = ROUND(AVG(go_goroutines), 0), samples = COUNT(*) BY job
                   | SORT goroutines DESC
@@ -589,7 +593,7 @@ steps:
                   <div class="col">
                     <div class="label">Observability</div>
                     <div class="node">Elastic Serverless</div>
-                    <div class="sub">metrics-generic.prometheus-*</div>
+                    <div class="sub">{{ consts.metrics_index }}</div>
                   </div>
                 </div>
                 
@@ -621,7 +625,7 @@ steps:
                   data_source:
                     type: esql
                     query: |
-                      FROM metrics-generic.prometheus-*
+                      FROM {{ consts.metrics_index }}
                       | WHERE @timestamp >= ?_tstart AND @timestamp <= ?_tend AND go_goroutines IS NOT NULL
                       | STATS goroutines = AVG(go_goroutines) BY job, @timestamp = BUCKET(@timestamp, 1 minute)
                   x: { column: "@timestamp" }
@@ -704,7 +708,7 @@ steps:
                 
               esql_query:
                 - |
-                  FROM metrics-generic.prometheus-*
+                  FROM {{ consts.metrics_index }}
                   | WHERE @timestamp >= ?_tstart AND @timestamp <= ?_tend AND http_requests_total IS NOT NULL
                   | STATS
                       total = COUNT(*),
@@ -759,7 +763,7 @@ steps:
                   <div class="col">
                     <div class="label">Observability</div>
                     <div class="node">Elastic Serverless</div>
-                    <div class="sub">metrics-generic.prometheus-*</div>
+                    <div class="sub">{{ consts.metrics_index }}</div>
                   </div>
                 </div>
                 
@@ -791,7 +795,7 @@ steps:
                   data_source:
                     type: esql
                     query: |
-                      TS metrics-generic.prometheus-*
+                      TS {{ consts.metrics_index }}
                       | WHERE @timestamp >= ?_tstart AND @timestamp <= ?_tend AND http_requests_total IS NOT NULL
                       | STATS request_rate = SUM(RATE(http_requests_total)) BY service, @timestamp = BUCKET(@timestamp, 1 minute)
                   x: { column: "@timestamp" }
@@ -822,7 +826,7 @@ steps:
                   data_source:
                     type: esql
                     query: |
-                      TS metrics-generic.prometheus-*
+                      TS {{ consts.metrics_index }}
                       | WHERE @timestamp >= ?_tstart AND @timestamp <= ?_tend AND http_requests_total IS NOT NULL AND status LIKE "5*"
                       | STATS error_rate = SUM(RATE(http_requests_total)) BY service, @timestamp = BUCKET(@timestamp, 1 minute)
                   x: { column: "@timestamp" }
@@ -916,7 +920,7 @@ steps:
                 
               esql_query:
                 - |
-                  FROM metrics-generic.prometheus-*
+                  FROM {{ consts.metrics_index }}
                   | WHERE @timestamp >= ?_tstart AND @timestamp <= ?_tend AND (user_logins_total IS NOT NULL OR user_login_failures_total IS NOT NULL)
                   | STATS logins = COUNT(*) WHERE user_logins_total IS NOT NULL,
                           failures = COUNT(*) WHERE user_login_failures_total IS NOT NULL
@@ -968,7 +972,7 @@ steps:
                   <div class="col">
                     <div class="label">Observability</div>
                     <div class="node">Elastic Serverless</div>
-                    <div class="sub">metrics-generic.prometheus-*</div>
+                    <div class="sub">{{ consts.metrics_index }}</div>
                   </div>
                 </div>
                 
@@ -1001,7 +1005,7 @@ steps:
                   data_source:
                     type: esql
                     query: |
-                      TS metrics-generic.prometheus-*
+                      TS {{ consts.metrics_index }}
                       | WHERE @timestamp >= ?_tstart AND @timestamp <= ?_tend AND user_logins_total IS NOT NULL
                       | STATS login_rate = SUM(RATE(user_logins_total)) BY service, @timestamp = BUCKET(@timestamp, 1 minute)
                   x: { column: "@timestamp" }
@@ -1033,7 +1037,7 @@ steps:
                   data_source:
                     type: esql
                     query: |
-                      TS metrics-generic.prometheus-*
+                      TS {{ consts.metrics_index }}
                       | WHERE @timestamp >= ?_tstart AND @timestamp <= ?_tend AND user_login_failures_total IS NOT NULL
                       | STATS fail_rate = SUM(RATE(user_login_failures_total)) BY service, @timestamp = BUCKET(@timestamp, 1 minute)
                   x: { column: "@timestamp" }
@@ -1127,7 +1131,7 @@ steps:
                 
               esql_query:
                 - |
-                  FROM metrics-generic.prometheus-*
+                  FROM {{ consts.metrics_index }}
                   | WHERE @timestamp >= ?_tstart AND @timestamp <= ?_tend AND (purchases_total IS NOT NULL OR payment_failures_total IS NOT NULL)
                   | STATS purchases = COUNT(*) WHERE purchases_total IS NOT NULL,
                           failures = COUNT(*) WHERE payment_failures_total IS NOT NULL
@@ -1179,7 +1183,7 @@ steps:
                   <div class="col">
                     <div class="label">Observability</div>
                     <div class="node">Elastic Serverless</div>
-                    <div class="sub">metrics-generic.prometheus-*</div>
+                    <div class="sub">{{ consts.metrics_index }}</div>
                   </div>
                 </div>
                 
@@ -1212,7 +1216,7 @@ steps:
                   data_source:
                     type: esql
                     query: |
-                      TS metrics-generic.prometheus-*
+                      TS {{ consts.metrics_index }}
                       | WHERE @timestamp >= ?_tstart AND @timestamp <= ?_tend AND purchases_total IS NOT NULL
                       | STATS purchase_rate = SUM(RATE(purchases_total)) BY service, @timestamp = BUCKET(@timestamp, 1 minute)
                   x: { column: "@timestamp" }
@@ -1244,7 +1248,7 @@ steps:
                   data_source:
                     type: esql
                     query: |
-                      TS metrics-generic.prometheus-*
+                      TS {{ consts.metrics_index }}
                       | WHERE @timestamp >= ?_tstart AND @timestamp <= ?_tend AND payment_failures_total IS NOT NULL
                       | STATS fail_rate = SUM(RATE(payment_failures_total)) BY service, @timestamp = BUCKET(@timestamp, 1 minute)
                   x: { column: "@timestamp" }
@@ -1338,7 +1342,7 @@ steps:
                 
               esql_query:
                 - |
-                  FROM metrics-generic.prometheus-*
+                  FROM {{ consts.metrics_index }}
                   | WHERE @timestamp >= ?_tstart AND @timestamp <= ?_tend AND user_signups_total IS NOT NULL
                   | STATS signups = COUNT(*) BY service
                   | SORT signups DESC
@@ -1387,7 +1391,7 @@ steps:
                   <div class="col">
                     <div class="label">Observability</div>
                     <div class="node">Elastic Serverless</div>
-                    <div class="sub">metrics-generic.prometheus-*</div>
+                    <div class="sub">{{ consts.metrics_index }}</div>
                   </div>
                 </div>
                 
@@ -1420,7 +1424,7 @@ steps:
                   data_source:
                     type: esql
                     query: |
-                      TS metrics-generic.prometheus-*
+                      TS {{ consts.metrics_index }}
                       | WHERE @timestamp >= ?_tstart AND @timestamp <= ?_tend AND user_signups_total IS NOT NULL
                       | STATS signup_rate = SUM(RATE(user_signups_total)) BY service, @timestamp = BUCKET(@timestamp, 1 minute)
                   x: { column: "@timestamp" }
@@ -1514,7 +1518,7 @@ steps:
                 
               esql_query:
                 - |
-                  FROM metrics-generic.prometheus-*
+                  FROM {{ consts.metrics_index }}
                   | WHERE @timestamp >= ?_tstart AND @timestamp <= ?_tend AND (checkout_orders_total IS NOT NULL OR cart_abandonments_total IS NOT NULL)
                   | STATS orders = COUNT(*) WHERE checkout_orders_total IS NOT NULL,
                           abandons = COUNT(*) WHERE cart_abandonments_total IS NOT NULL
@@ -1566,7 +1570,7 @@ steps:
                   <div class="col">
                     <div class="label">Observability</div>
                     <div class="node">Elastic Serverless</div>
-                    <div class="sub">metrics-generic.prometheus-*</div>
+                    <div class="sub">{{ consts.metrics_index }}</div>
                   </div>
                 </div>
                 
@@ -1599,7 +1603,7 @@ steps:
                   data_source:
                     type: esql
                     query: |
-                      TS metrics-generic.prometheus-*
+                      TS {{ consts.metrics_index }}
                       | WHERE @timestamp >= ?_tstart AND @timestamp <= ?_tend AND checkout_orders_total IS NOT NULL
                       | STATS order_rate = SUM(RATE(checkout_orders_total)) BY service, @timestamp = BUCKET(@timestamp, 1 minute)
                   x: { column: "@timestamp" }
@@ -1631,7 +1635,7 @@ steps:
                   data_source:
                     type: esql
                     query: |
-                      TS metrics-generic.prometheus-*
+                      TS {{ consts.metrics_index }}
                       | WHERE @timestamp >= ?_tstart AND @timestamp <= ?_tend AND cart_abandonments_total IS NOT NULL
                       | STATS abandon_rate = SUM(RATE(cart_abandonments_total)) BY service, @timestamp = BUCKET(@timestamp, 1 minute)
                   x: { column: "@timestamp" }
@@ -1725,7 +1729,7 @@ steps:
                 
               esql_query:
                 - |
-                  FROM metrics-generic.prometheus-*
+                  FROM {{ consts.metrics_index }}
                   | WHERE @timestamp >= ?_tstart AND @timestamp <= ?_tend AND (product_views_total IS NOT NULL OR search_queries_total IS NOT NULL)
                   | STATS views = COUNT(*) WHERE product_views_total IS NOT NULL,
                           searches = COUNT(*) WHERE search_queries_total IS NOT NULL
@@ -1776,7 +1780,7 @@ steps:
                   <div class="col">
                     <div class="label">Observability</div>
                     <div class="node">Elastic Serverless</div>
-                    <div class="sub">metrics-generic.prometheus-*</div>
+                    <div class="sub">{{ consts.metrics_index }}</div>
                   </div>
                 </div>
                 
@@ -1809,7 +1813,7 @@ steps:
                   data_source:
                     type: esql
                     query: |
-                      TS metrics-generic.prometheus-*
+                      TS {{ consts.metrics_index }}
                       | WHERE @timestamp >= ?_tstart AND @timestamp <= ?_tend AND product_views_total IS NOT NULL
                       | STATS view_rate = SUM(RATE(product_views_total)) BY service, @timestamp = BUCKET(@timestamp, 1 minute)
                   x: { column: "@timestamp" }
@@ -1841,7 +1845,7 @@ steps:
                   data_source:
                     type: esql
                     query: |
-                      TS metrics-generic.prometheus-*
+                      TS {{ consts.metrics_index }}
                       | WHERE @timestamp >= ?_tstart AND @timestamp <= ?_tend AND search_queries_total IS NOT NULL
                       | STATS search_rate = SUM(RATE(search_queries_total)) BY service, @timestamp = BUCKET(@timestamp, 1 minute)
                   x: { column: "@timestamp" }
@@ -1853,13 +1857,13 @@ steps:
   # Agent polish only — business boards are upserted above with fixed IDs.
   - name: polish_business_dashboards
     type: ai.agent
-    agent-id: elastic-ai-agent
+    agent-id: __install__.agent-id
     on-failure:
       continue: true
     with:
       message: |
         Prometheus business-dashboard polish on this Serverless project.
-        Index: metrics-generic.prometheus-*
+        Index: {{ consts.metrics_index }}
         Sample counts (last 30m) — ES|QL columns/values:
         {{ steps.detect_metric_families.output }}
 
