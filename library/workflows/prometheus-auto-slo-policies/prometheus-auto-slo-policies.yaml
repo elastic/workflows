@@ -45,11 +45,6 @@ steps:
       limit: 50
       on-limit: continue
     steps:
-      - name: set_service_ctx
-        type: data.set
-        with:
-          service: "{{ foreach.item[0] }}"
-          slo_name: "{{ foreach.item[0] }} availability (Prometheus)"
 
       - name: create_service_slo
         type: kibana.request
@@ -61,15 +56,15 @@ steps:
           headers:
             Elastic-Api-Version: "2023-10-31"
           body:
-            name: "{{ steps.set_service_ctx.output.slo_name }}"
+            name: "{{ foreach.item[0] }} availability (Prometheus)"
             description: >
               Good = non-5xx http_requests_total; total = all statuses for
-              {{ steps.set_service_ctx.output.service }}. Created by workflow prometheus-slo-policies.
+              {{ foreach.item[0] }}. Created by workflow prometheus-slo-policies.
             indicator:
               type: sli.metric.custom
               params:
                 index: metrics-generic.prometheus-*
-                filter: "service: \"{{ steps.set_service_ctx.output.service }}\""
+                filter: "service: \"{{ foreach.item[0] }}\""
                 timestampField: "@timestamp"
                 good:
                   metrics:
@@ -94,7 +89,7 @@ steps:
               - prometheus
               - auto-prom
               - auto-slo
-              - "{{ steps.set_service_ctx.output.service }}"
+              - "{{ foreach.item[0] }}"
 
   - name: create_estate_groupby_slo
     type: kibana.request

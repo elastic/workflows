@@ -1,37 +1,9 @@
-template-metadata:
-  slug: streams-noise-savings
-  version: "1.0.1"
-  availability: ">=9.5.0"
-  name: "Streams noise and savings (refresh)"
-  description: >-
-    Refresh Auto: Streams Noise & Savings board with live potential $/mo savings. Fixed workflow schema (on-failure continue) and escaped dashboard Liquid
-    so the editor validator does not treat custom_content row.* as workflow variables.
-  solutions: [observability]
-  categories: [monitoring, reporting, data-ingestion]
-  install:
-    form:
-      - name: agent-id
-        label: "Agent Builder agent ID"
-        description: >-
-          Agent Builder agent used for optional narrate steps.
-        inputType: text
-        required: true
-        default: "elastic-ai-agent"
-      - name: metrics-index
-        label: "Prometheus metrics index pattern"
-        description: >-
-          Elasticsearch index / data stream pattern holding Prometheus remote-write metrics.
-        inputType: esIndex
-        required: true
-        default: "metrics-generic.prometheus-*"
-
-name: Streams noise and savings (refresh)
+name: streams-noise-savings
 description: >
-  Refresh Auto: Streams Noise & Savings board with live potential $/mo savings.
-
-consts:
-  metrics_index: __install__.metrics-index
-
+  Every 10 minutes (and on demand): refresh Auto: Streams Noise & Savings —
+  inventory Streams, remeasure Prom noise, kibana.request upsert the board.
+  For a clean delete→create demo, run manual workflow streams-savings-create.
+enabled: true
 triggers:
   - type: manual
   - type: scheduled
@@ -54,7 +26,7 @@ steps:
     with:
       format: json
       query: |
-        FROM { consts.metrics_index }
+        FROM metrics-generic.prometheus-*
         | WHERE @timestamp > NOW() - 24 hours
         | STATS docs = COUNT(*), services = COUNT_DISTINCT(service), jobs = COUNT_DISTINCT(job)
         | EVAL est_bytes = docs * 450
@@ -67,21 +39,12 @@ steps:
     with:
       format: json
       query: |
-        FROM { consts.metrics_index }
+        FROM metrics-generic.prometheus-*
         | WHERE @timestamp > NOW() - 24 hours
         | STATS docs = COUNT(*) BY service
         | SORT docs DESC
         | LIMIT 10
 
-  - name: parse_volume
-    type: data.set
-    with:
-      docs_24h: "{{ steps.volume_24h.output.values[0][0] }}"
-      services: "{{ steps.volume_24h.output.values[0][1] }}"
-      jobs: "{{ steps.volume_24h.output.values[0][2] }}"
-      est_gb: "{{ steps.volume_24h.output.values[0][4] }}"
-      est_month_cost_usd: "{{ steps.volume_24h.output.values[0][5] }}"
-      save_total_usd: "{{ steps.volume_24h.output.values[0][6] }}"
 
   # Deterministic board — survives delete; agent only refreshes recommendations markdown.
   - name: upsert_streams_dashboard
@@ -114,7 +77,7 @@ steps:
               title: "Streams noise → savings"
               content: |
                 ## Purpose
-                Identify **noise** in Observability **Streams** (Managed PRW → `{ consts.metrics_index }`) and show **potential savings** from Streams levers: aggregate / dedupe, roll-up, drop, and retention → object storage.
+                Identify **noise** in Observability **Streams** (Managed PRW → `metrics-generic.prometheus-*`) and show **potential savings** from Streams levers: aggregate / dedupe, roll-up, drop, and retention → object storage.
 
                 ## How to read it
                 - **Potential savings** — heuristic $ from docs × ~450 B/doc × illustrative $/GB-mo.
@@ -159,7 +122,7 @@ steps:
                   <div class="card">
                     <div class="label">Docs in range</div>
                     <div class="value">{{ "{{ row[\"docs\"].value }}" }}</div>
-                    <div class="meta">{{ "{{ row[\"services\"].value }}" }} services · {{ "{{ row[\"jobs\"].value }}" }} jobs · stream { consts.metrics_index }</div>
+                    <div class="meta">{{ "{{ row[\"services\"].value }}" }} services · {{ "{{ row[\"jobs\"].value }}" }} jobs · stream metrics-generic.prometheus-*</div>
                   </div>
                   <div class="card">
                     <div class="label">Est. volume</div>
@@ -181,7 +144,7 @@ steps:
                 
               esql_query:
                 - |
-                  FROM { consts.metrics_index }
+                  FROM metrics-generic.prometheus-*
                   | WHERE @timestamp >= ?_tstart AND @timestamp <= ?_tend
                   | STATS docs = COUNT(*), services = COUNT_DISTINCT(service), jobs = COUNT_DISTINCT(job)
                   | EVAL est_bytes = docs * 450
@@ -241,7 +204,7 @@ steps:
                 
               esql_query:
                 - |
-                  FROM { consts.metrics_index }
+                  FROM metrics-generic.prometheus-*
                   | WHERE @timestamp >= ?_tstart AND @timestamp <= ?_tend
                   | STATS docs = COUNT(*), services = COUNT_DISTINCT(service), jobs = COUNT_DISTINCT(job)
                   | EVAL est_bytes = docs * 450
@@ -279,7 +242,7 @@ steps:
                   data_source:
                     type: esql
                     query: |
-                      FROM { consts.metrics_index }
+                      FROM metrics-generic.prometheus-*
                       | WHERE @timestamp >= ?_tstart AND @timestamp <= ?_tend
                       | STATS docs = COUNT(*) BY @timestamp = BUCKET(@timestamp, 5 minutes)
                   x: { column: "@timestamp" }
@@ -309,7 +272,7 @@ steps:
                   data_source:
                     type: esql
                     query: |
-                      FROM { consts.metrics_index }
+                      FROM metrics-generic.prometheus-*
                       | WHERE @timestamp >= ?_tstart AND @timestamp <= ?_tend
                       | STATS docs = COUNT(*) BY service
                       | SORT docs DESC
@@ -328,14 +291,14 @@ steps:
                 Detail: {{ steps.get_prom_stream.output }}
 
                 ## Noise findings (last 24h)
-                - **docs** = {{ steps.parse_volume.output.docs_24h }}
-                - **services** = {{ steps.parse_volume.output.services }} · **jobs** = {{ steps.parse_volume.output.jobs }}
-                - **est_gb** = {{ steps.parse_volume.output.est_gb }} (~450 B/doc heuristic)
+                - **docs** = {{ steps.volume_24h.output.values[0][0] }}
+                - **services** = {{ steps.volume_24h.output.values[0][1] }} · **jobs** = {{ steps.volume_24h.output.values[0][2] }}
+                - **est_gb** = {{ steps.volume_24h.output.values[0][4] }} (~450 B/doc heuristic)
                 Top services by docs: {{ steps.volume_by_service.output | json }}
 
                 ## Potential savings
-                - Est. storage / mo ≈ **{{ steps.parse_volume.output.est_month_cost_usd | prepend: "$" }}** (illustrative $0.12/GB-mo)
-                - Potential savings / mo ≈ **{{ steps.parse_volume.output.save_total_usd | prepend: "$" }}** (stacked drop + roll-up + retention levers)
+                - Est. storage / mo ≈ **{{ steps.volume_24h.output.values[0][5] | prepend: "$" }}** (illustrative $0.12/GB-mo)
+                - Potential savings / mo ≈ **{{ steps.volume_24h.output.values[0][6] | prepend: "$" }}** (stacked drop + roll-up + retention levers)
 
                 ## Recommended Streams actions (ranked)
                 1. **DROP** — unused / debug Prom metric families and high-cardinality labels
@@ -355,7 +318,7 @@ steps:
   # Narrative only — must NOT PUT the dashboard (full PUTs strip custom_content Liquid bindings).
   - name: narrate_streams_savings
     type: ai.agent
-    agent-id: __install__.agent-id
+    agent-id: elastic-ai-agent
     on-failure:
       continue: true
     with:
@@ -363,9 +326,9 @@ steps:
         Streams TCO pitch assist (read-only). Do NOT call kibana.request PUT/POST on dashboards.
         Do NOT modify Auto: Streams Noise & Savings — scorecards are already live via workflow upsert.
 
-        Volume 24h: docs={{ steps.parse_volume.output.docs_24h }}, est_gb={{ steps.parse_volume.output.est_gb }},
-        est_month_cost_usd={{ steps.parse_volume.output.est_month_cost_usd }},
-        save_total_usd={{ steps.parse_volume.output.save_total_usd }}.
+        Volume 24h: docs={{ steps.volume_24h.output.values[0][0] }}, est_gb={{ steps.volume_24h.output.values[0][4] }},
+        est_month_cost_usd={{ steps.volume_24h.output.values[0][5] }},
+        save_total_usd={{ steps.volume_24h.output.values[0][6] }}.
 
         Reply with a short 5-bullet executive pitch: Private Link + Streams
         (aggregate/dedupe/rollup/drop) → blob = best TCO. No tool calls required.
