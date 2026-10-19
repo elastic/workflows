@@ -1,38 +1,11 @@
-template-metadata:
-  slug: prometheus-auto-slo-policies
-  version: "1.0.1"
-  availability: ">=9.5.0"
-  name: "Prometheus auto SLO policies"
-  description: >-
-    Every 10 minutes (and on demand), detect Prometheus services with HTTP traffic and create gap-only availability SLOs (99.9% / 7d rolling) per service via kibana.request, plus a groupBy=service estate SLO. Agent verifies gaps only. Aligns Health Monitor SLO cards with Observability SLOs.
-  solutions: [observability]
-  categories: [monitoring, ai-agent]
-  install:
-    form:
-      - name: agent-id
-        label: "Agent Builder agent ID"
-        description: >-
-          Agent Builder agent used for optional verify/narrate steps.
-          Default elastic-ai-agent is the built-in Elastic AI Agent.
-        inputType: text
-        required: true
-        default: "elastic-ai-agent"
-      - name: metrics-index
-        label: "Prometheus metrics index pattern"
-        description: >-
-          Elasticsearch index / data stream pattern holding Prometheus remote-write
-          metrics (e.g. metrics-generic.prometheus-* or metrics-*.prometheus-*).
-        inputType: esIndex
-        required: true
-        default: "metrics-generic.prometheus-*"
-
-name: Prometheus auto SLO policies
+name: prometheus-slo-policies
 description: >
-  Every 10 minutes (and on demand), detect Prometheus services with HTTP traffic and create gap-only availability SLOs (99.9% / 7d rolling) per service via kibana.request, plus a groupBy=service estate SLO. Agent verifies gaps only. Aligns Health Monitor SLO cards with Observability SLOs.
-
-consts:
-  metrics_index: __install__.metrics-index
-
+  Every 10 minutes (and on demand): detect distinct Prometheus services with
+  HTTP traffic, then create gap-only availability SLOs (99.9% / 7d rolling) for
+  each service via kibana.request — plus a groupBy=service estate SLO. Aligns
+  Health Monitor SLO cards with Observability SLOs. Creation is workflow-owned
+  (not external scripts).
+enabled: true
 triggers:
   - type: manual
   - type: scheduled
@@ -46,7 +19,7 @@ steps:
     with:
       format: json
       query: |
-        FROM { consts.metrics_index }
+        FROM metrics-generic.prometheus-*
         | WHERE @timestamp > NOW() - 30 minutes AND http_requests_total IS NOT NULL AND service IS NOT NULL
         | STATS samples = COUNT(*) BY service
         | WHERE samples > 0
@@ -63,12 +36,8 @@ steps:
       headers:
         Elastic-Api-Version: "2023-10-31"
 
-  - name: parse_existing_names
-    type: data.set
-    with:
-      names_blob: "{{ steps.list_existing_slos.output.results | map: 'name' | join: ' || ' }}"
-
   # Per-service SLOs — foreach over ES|QL rows [service].
+  # POST may fail if the name already exists; on-failure continue keeps gap-fill idempotent.
   - name: create_per_service_slos
     type: foreach
     foreach: "{{ steps.detect_services.output.values }}"
@@ -82,70 +51,7 @@ steps:
           service: "{{ foreach.item[0] }}"
           slo_name: "{{ foreach.item[0] }} availability (Prometheus)"
 
-      - name: create_service_slo_if_missing
-        type: if
-        condition: '${{ steps.parse_existing_names.output.names_blob contains steps.set_service_ctx.output.slo_name }}'
-        steps:
-          - name: skip_existing_service_slo
-            type: console
-            with:
-              message: "skip existing SLO {{ steps.set_service_ctx.output.slo_name }}"
-        else:
-          - name: create_service_slo
-            type: kibana.request
-            on-failure:
-              continue: true
-            with:
-              method: POST
-              path: /api/observability/slos
-              headers:
-                Elastic-Api-Version: "2023-10-31"
-              body:
-                name: "{{ steps.set_service_ctx.output.slo_name }}"
-                description: >
-                  Good = non-5xx http_requests_total; total = all statuses for
-                  {{ steps.set_service_ctx.output.service }}. Created by workflow prometheus-slo-policies.
-                indicator:
-                  type: sli.metric.custom
-                  params:
-                    index: "{ consts.metrics_index }"
-                    filter: "service: \"{{ steps.set_service_ctx.output.service }}\""
-                    timestampField: "@timestamp"
-                    good:
-                      metrics:
-                        - name: A
-                          aggregation: sum
-                          field: http_requests_total
-                          filter: 'NOT status: "500"'
-                      equation: A
-                    total:
-                      metrics:
-                        - name: A
-                          aggregation: sum
-                          field: http_requests_total
-                      equation: A
-                timeWindow:
-                  duration: 7d
-                  type: rolling
-                budgetingMethod: occurrences
-                objective:
-                  target: 0.999
-                tags:
-                  - prometheus
-                  - auto-prom
-                  - auto-slo
-                  - "{{ steps.set_service_ctx.output.service }}"
-
-  - name: create_estate_groupby_slo_if_missing
-    type: if
-    condition: '${{ steps.parse_existing_names.output.names_blob contains "Auto: Prometheus availability by service" }}'
-    steps:
-      - name: skip_existing_estate_slo
-        type: console
-        with:
-          message: "skip existing estate groupBy SLO"
-    else:
-      - name: create_estate_groupby_slo
+      - name: create_service_slo
         type: kibana.request
         on-failure:
           continue: true
@@ -155,15 +61,15 @@ steps:
           headers:
             Elastic-Api-Version: "2023-10-31"
           body:
-            name: "Auto: Prometheus availability by service"
+            name: "{{ steps.set_service_ctx.output.slo_name }}"
             description: >
-              Good = non-5xx http_requests_total; total = all statuses.
-              Grouped by service from Managed PRW. Created by prometheus-slo-policies.
+              Good = non-5xx http_requests_total; total = all statuses for
+              {{ steps.set_service_ctx.output.service }}. Created by workflow prometheus-slo-policies.
             indicator:
               type: sli.metric.custom
               params:
-                index: "{ consts.metrics_index }"
-                filter: ""
+                index: metrics-generic.prometheus-*
+                filter: "service: \"{{ steps.set_service_ctx.output.service }}\""
                 timestampField: "@timestamp"
                 good:
                   metrics:
@@ -178,8 +84,6 @@ steps:
                       aggregation: sum
                       field: http_requests_total
                   equation: A
-            groupBy:
-              - service
             timeWindow:
               duration: 7d
               type: rolling
@@ -190,23 +94,70 @@ steps:
               - prometheus
               - auto-prom
               - auto-slo
+              - "{{ steps.set_service_ctx.output.service }}"
 
-  # Verify only — create missing gaps if foreach/if skipped incorrectly.
+  - name: create_estate_groupby_slo
+    type: kibana.request
+    on-failure:
+      continue: true
+    with:
+      method: POST
+      path: /api/observability/slos
+      headers:
+        Elastic-Api-Version: "2023-10-31"
+      body:
+        name: "Auto: Prometheus availability by service"
+        description: >
+          Good = non-5xx http_requests_total; total = all statuses.
+          Grouped by service from Managed PRW. Created by prometheus-slo-policies.
+        indicator:
+          type: sli.metric.custom
+          params:
+            index: metrics-generic.prometheus-*
+            filter: ""
+            timestampField: "@timestamp"
+            good:
+              metrics:
+                - name: A
+                  aggregation: sum
+                  field: http_requests_total
+                  filter: 'NOT status: "500"'
+              equation: A
+            total:
+              metrics:
+                - name: A
+                  aggregation: sum
+                  field: http_requests_total
+              equation: A
+        groupBy:
+          - service
+        timeWindow:
+          duration: 7d
+          type: rolling
+        budgetingMethod: occurrences
+        objective:
+          target: 0.999
+        tags:
+          - prometheus
+          - auto-prom
+          - auto-slo
+
+  # Verify only — create missing gaps if POST skips incorrectly.
   - name: verify_prometheus_slos
     type: ai.agent
-    agent-id: __install__.agent-id
+    agent-id: elastic-ai-agent
     on-failure:
       continue: true
     with:
       message: |
         Prometheus SLO verification on this Serverless Observability project.
-        Index: {{ consts.metrics_index }}
+        Index: metrics-generic.prometheus-*
 
         Detected services (ES|QL rows [service] only):
         {{ steps.detect_services.output }}
 
-        Existing SLO names blob (before creates):
-        {{ steps.parse_existing_names.output.names_blob }}
+        Existing SLOs before create steps:
+        {{ steps.list_existing_slos.output }}
 
         YOUR JOB (gap-fill verify — do NOT create dashboards or alert rules):
         1) GET /api/observability/slos?perPage=100 (Elastic-Api-Version 2023-10-31).
