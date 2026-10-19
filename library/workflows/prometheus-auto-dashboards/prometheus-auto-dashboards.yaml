@@ -1,9 +1,43 @@
-name: prometheus-vega-dashboards
+template-metadata:
+  slug: prometheus-auto-dashboards
+  version: "1.1.0"
+  availability: ">=9.5.0"
+  name: "Prometheus auto dashboards (Agent Builder)"
+  description: >-
+    Every 10 minutes (and on demand), detect Prometheus metric families in a
+    remote-write metrics index, then ask an Agent Builder agent to create
+    polished Auto: Prometheus dashboards (Custom ES|QL Panels + Lens xy) only
+    for NEW families — HTTP, CPU, Go, and business KPIs (auth, purchases,
+    signups, checkout, engagement). Gap-only; does not blank existing healthy
+    dashboards.
+  solutions: [observability]
+  categories: [monitoring, ai-agent, reporting]
+  install:
+    form:
+      - name: agent-id
+        label: "Agent Builder agent ID"
+        description: >-
+          Agent Builder agent that performs gap analysis and creates assets.
+          Default elastic-ai-agent is the built-in Elastic AI Agent; point at a
+          custom agent if you have Prometheus-specific tools/skills configured.
+        inputType: text
+        required: true
+        default: "elastic-ai-agent"
+      - name: metrics-index
+        label: "Prometheus metrics index pattern"
+        description: >-
+          Elasticsearch index / data stream pattern holding Prometheus remote-write
+          metrics (e.g. metrics-generic.prometheus-* or metrics-*.prometheus-*).
+        inputType: esIndex
+        required: true
+        default: "metrics-generic.prometheus-*"
+
+name: Prometheus Auto Dashboards
 description: >
-  Every 10 minutes (and on demand): detect Prometheus metric families, upsert
-  polished core Auto: Prometheus dashboards via kibana.request (custom_content
-  scorecards + flow + gradient area / bars), then call Elastic AI Agent for
-  business-family gaps and a polish pass.
+  Detect Prometheus metric families and create gap-only dashboards via Agent
+  Builder — Custom ES|QL Panels (scorecards + scrape→PRW flow) plus Lens
+  gradient area / error bars for HTTP, CPU, Go, and business KPIs.
+
 enabled: true
 triggers:
   - type: manual

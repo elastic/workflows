@@ -1,8 +1,34 @@
-name: streams-noise-savings
+template-metadata:
+  slug: streams-noise-savings
+  version: "1.0.1"
+  availability: ">=9.5.0"
+  name: "Streams noise and savings (refresh)"
+  description: >-
+    Refresh Auto: Streams Noise & Savings board with live potential $/mo savings. Fixed workflow schema (on-failure continue) and escaped dashboard Liquid
+    so the editor validator does not treat custom_content row.* as workflow variables.
+  solutions: [observability]
+  categories: [monitoring, reporting, data-ingestion]
+  install:
+    form:
+      - name: agent-id
+        label: "Agent Builder agent ID"
+        description: >-
+          Agent Builder agent used for optional narrate steps.
+        inputType: text
+        required: true
+        default: "elastic-ai-agent"
+      - name: metrics-index
+        label: "Prometheus metrics index pattern"
+        description: >-
+          Elasticsearch index / data stream pattern holding Prometheus remote-write metrics.
+        inputType: esIndex
+        required: true
+        default: "metrics-generic.prometheus-*"
+
+name: Streams noise and savings (refresh)
 description: >
-  Every 10 minutes (and on demand): refresh Auto: Streams Noise & Savings —
-  inventory Streams, remeasure Prom noise, kibana.request upsert the board.
-  For a clean delete→create demo, run manual workflow streams-savings-create.
+  Refresh Auto: Streams Noise & Savings board with live potential $/mo savings.
+
 enabled: true
 triggers:
   - type: manual

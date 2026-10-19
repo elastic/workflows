@@ -1,9 +1,27 @@
-name: streams-savings-create
+template-metadata:
+  slug: streams-savings-create
+  version: "1.0.1"
+  availability: ">=9.5.0"
+  name: "Streams savings create (manual)"
+  description: >-
+    Manual create/recreate Auto: Streams Noise & Savings board. Fixed workflow schema (on-failure continue) and escaped dashboard Liquid
+    so the editor validator does not treat custom_content row.* as workflow variables.
+  solutions: [observability]
+  categories: [monitoring, reporting, data-ingestion]
+  install:
+    form:
+      - name: metrics-index
+        label: "Prometheus metrics index pattern"
+        description: >-
+          Elasticsearch index / data stream pattern holding Prometheus remote-write metrics.
+        inputType: esIndex
+        required: true
+        default: "metrics-generic.prometheus-*"
+
+name: Streams savings create (manual)
 description: >
-  Manual only: create (or recreate) Auto: Streams Noise & Savings — inventory
-  Streams, measure Prom volume/cardinality, and kibana.request PUT the full
-  board (custom_content scorecards with live ES|QL numbers + Lens + recommendations).
-  No AI agent writes — safe delete→create path for demos.
+  Manual create/recreate Auto: Streams Noise & Savings board.
+
 enabled: true
 triggers:
   - type: manual
