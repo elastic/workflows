@@ -1,6 +1,6 @@
 template-metadata:
   slug: prometheus-auto-slo-policies
-  version: "1.0.0"
+  version: "1.0.1"
   availability: ">=9.5.0"
   name: "Prometheus auto SLO policies"
   description: >-
@@ -93,7 +93,8 @@ steps:
         else:
           - name: create_service_slo
             type: kibana.request
-            continue-on-error: true
+            on-failure:
+              continue: true
             with:
               method: POST
               path: /api/observability/slos
@@ -146,7 +147,8 @@ steps:
     else:
       - name: create_estate_groupby_slo
         type: kibana.request
-        continue-on-error: true
+        on-failure:
+          continue: true
         with:
           method: POST
           path: /api/observability/slos
@@ -193,7 +195,8 @@ steps:
   - name: verify_prometheus_slos
     type: ai.agent
     agent-id: __install__.agent-id
-    continue-on-error: true
+    on-failure:
+      continue: true
     with:
       message: |
         Prometheus SLO verification on this Serverless Observability project.
