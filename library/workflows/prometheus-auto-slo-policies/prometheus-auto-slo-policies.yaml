@@ -1,11 +1,11 @@
 template-metadata:
   slug: prometheus-auto-slo-policies
-  version: "1.2.0"
+  version: "1.2.1"
   availability: ">=9.5.0"
   name: "Prometheus auto SLO policies (Agent Builder)"
   description: >-
     Every 10 minutes (and on demand), detect distinct Prometheus services with
-    HTTP traffic, then create gap-only availability SLOs (99.9% / 7d rolling) per
+    HTTP traffic, then create gap-only availability SLOs (95% / 7d rolling) per
     service via kibana.request — plus a groupBy=service estate SLO. Aligns Health
     Monitor SLO cards with Observability SLOs.
   solutions: [observability]
@@ -30,11 +30,19 @@ template-metadata:
         inputType: esIndex
         required: true
         default: "metrics-generic.prometheus-*"
+      - name: slo-target
+        label: "Availability SLO target"
+        description: >-
+          Objective target as a fraction (e.g. 0.95 = 95%). Demo traffic often
+          sits in the mid-90s; 0.999 is usually too aggressive.
+        inputType: text
+        required: true
+        default: "0.95"
 
 name: Prometheus Auto SLO Policies
 description: >
   Every 10 minutes (and on demand): detect distinct Prometheus services with
-  HTTP traffic, then create gap-only availability SLOs (99.9% / 7d rolling) for
+  HTTP traffic, then create gap-only availability SLOs (95% / 7d rolling) for
   each service via kibana.request — plus a groupBy=service estate SLO. Aligns
   Health Monitor SLO cards with Observability SLOs. Creation is workflow-owned
   (not external scripts).
@@ -42,6 +50,7 @@ enabled: true
 
 consts:
   metrics_index: __install__.metrics-index
+  slo_target: __install__.slo-target
 
 triggers:
   - type: manual
@@ -121,7 +130,7 @@ steps:
               type: rolling
             budgetingMethod: occurrences
             objective:
-              target: 0.999
+              target: __install__.slo-target
             tags:
               - prometheus
               - auto-prom
@@ -168,7 +177,7 @@ steps:
           type: rolling
         budgetingMethod: occurrences
         objective:
-          target: 0.999
+          target: __install__.slo-target
         tags:
           - prometheus
           - auto-prom
@@ -196,7 +205,7 @@ steps:
         2) Confirm every detected service has `<service> availability (Prometheus)`.
         3) Confirm exactly one `Auto: Prometheus availability by service` (groupBy service).
         4) If any service SLO is missing, POST once (sli.metric.custom, good filter
-           NOT status: "500", 99.9%/7d, tags prometheus/auto-prom/auto-slo/<service>).
+           NOT status: "500", 95%/7d, tags prometheus/auto-prom/auto-slo/<service>).
         5) Do NOT create duplicate estate SLOs. Do NOT create SLOs named after numbers.
         6) End with a table: service → present|created|failed + SLO id.
 
