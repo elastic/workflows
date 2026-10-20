@@ -1,13 +1,12 @@
 template-metadata:
   slug: prometheus-auto-slo-policies
-  version: "1.3.1"
+  version: "1.4.0"
   availability: ">=9.5.0"
   name: "Prometheus auto SLO policies (baseline → improve)"
   description: >-
-    Measure per-service Prometheus availability baselines, create gap-only SLOs
-    with targets set just below current SLI (start Healthy), then slowly ratchet
-    targets upward only while services stay green. Continuous improvement for
-    Prom / OTel estates — not a sea of violated 99.9% SLOs.
+    Measure per-service availability baselines on OTel/Prom-shaped metrics,
+    create gap-only SLOs with targets just below current SLI (start Healthy),
+    then slowly ratchet targets upward only while services stay green.
   solutions: [observability]
   categories: [monitoring, detection, ai-agent]
   install:
@@ -21,18 +20,25 @@ template-metadata:
         required: true
         default: "elastic-ai-agent"
       - name: metrics-index
-        label: "Prometheus metrics index pattern"
+        label: "Metrics data stream / index"
         description: >-
-          Index / data stream pattern for Prometheus remote-write metrics.
+          Prefer metrics-generic.otel-default (or equivalent) with http.status_code +
+          service.name. Avoid SUM() on Prometheus counter_double fields.
         inputType: esIndex
         required: true
-        default: "metrics-generic.prometheus-*"
-      - name: target-floor
-        label: "SLO target floor"
-        description: "Minimum objective (fraction). New baselines never go below this."
+        default: "metrics-generic.otel-default"
+      - name: service-filter
+        label: "Service name filter (ES|QL LIKE)"
+        description: 'e.g. horizon* or * for all services with http.status_code'
         inputType: text
         required: true
-        default: "0.90"
+        default: "horizon*"
+      - name: target-floor
+        label: "SLO target floor"
+        description: "Soft minimum objective (fraction). Also capped below live avail."
+        inputType: text
+        required: true
+        default: "0.50"
       - name: target-ceiling
         label: "SLO target ceiling"
         description: "Maximum objective (fraction) when ratcheting up."
@@ -42,8 +48,7 @@ template-metadata:
       - name: baseline-buffer
         label: "Baseline buffer"
         description: >-
-          New target = current availability minus this buffer (e.g. 0.02 = 2 points)
-          so coverage starts Healthy with room to improve.
+          New target = current availability minus this buffer so coverage starts Healthy.
         inputType: text
         required: true
         default: "0.02"
@@ -61,17 +66,16 @@ template-metadata:
         required: true
         default: "0.005"
 
-
 name: Prometheus Auto SLO Policies
 description: >
-  Every 10 minutes (and on demand): measure per-service Prometheus availability
-  baselines, create gap-only SLOs with targets set just below current SLI (so
-  new coverage starts Healthy), then slowly ratchet targets upward only when
-  services stay green. Continuous improvement — not a sea of violated 99.9% SLOs.
+  Every 10 minutes (and on demand): measure per-service availability baselines,
+  create gap-only SLOs with targets set just below current SLI (so new coverage
+  starts Healthy), then slowly ratchet targets upward only when services stay green.
 enabled: true
 
 consts:
   metrics_index: __install__.metrics-index
+  service_filter: __install__.service-filter
   target_floor: __install__.target-floor
   target_ceiling: __install__.target-ceiling
   baseline_buffer: __install__.baseline-buffer
@@ -85,23 +89,23 @@ triggers:
       every: 10m
 
 steps:
-  # Columns: [service, avail, target] — baseline from last 7d (same window as SLO).
+  # COUNT(*) on request docs — counter_double fields cannot be SUM()'d in ES|QL.
   - name: baseline_services
     type: elasticsearch.esql.query
     with:
       format: json
       query: |
         FROM {{ consts.metrics_index }}
-        | WHERE @timestamp > NOW() - 7 days AND http_requests_total IS NOT NULL AND service IS NOT NULL
-        | STATS total = SUM(http_requests_total),
-                good = SUM(http_requests_total) WHERE status != "500"
-                BY service
+        | WHERE @timestamp > NOW() - 7 days AND service.name LIKE "{{ consts.service_filter }}" AND http.status_code IS NOT NULL
+        | STATS total = COUNT(*),
+                good = COUNT(*) WHERE http.status_code != "500"
+                BY service.name
         | WHERE total > 0
-        | EVAL avail = ROUND(good / total, 4)
-        | EVAL raw_target = avail - __install__.baseline-buffer
-        | EVAL target = ROUND(CLAMP(raw_target, __install__.target-floor, __install__.target-ceiling), 3)
-        | KEEP service, avail, target
-        | SORT service
+        | EVAL avail = ROUND(TO_DOUBLE(good) / TO_DOUBLE(total), 4)
+        | EVAL raw_target = avail - {{ consts.baseline_buffer }}
+        | EVAL target = ROUND(CLAMP(raw_target, {{ consts.target_floor }}, avail - 0.005), 3)
+        | KEEP service.name, avail, target
+        | SORT service.name
 
   - name: estate_baseline
     type: elasticsearch.esql.query
@@ -109,13 +113,13 @@ steps:
       format: json
       query: |
         FROM {{ consts.metrics_index }}
-        | WHERE @timestamp > NOW() - 7 days AND http_requests_total IS NOT NULL
-        | STATS total = SUM(http_requests_total),
-                good = SUM(http_requests_total) WHERE status != "500"
+        | WHERE @timestamp > NOW() - 7 days AND service.name LIKE "{{ consts.service_filter }}" AND http.status_code IS NOT NULL
+        | STATS total = COUNT(*),
+                good = COUNT(*) WHERE http.status_code != "500"
         | WHERE total > 0
-        | EVAL avail = ROUND(good / total, 4)
-        | EVAL raw_target = avail - __install__.baseline-buffer
-        | EVAL target = ROUND(CLAMP(raw_target, __install__.target-floor, __install__.target-ceiling), 3)
+        | EVAL avail = ROUND(TO_DOUBLE(good) / TO_DOUBLE(total), 4)
+        | EVAL raw_target = avail - {{ consts.baseline_buffer }}
+        | EVAL target = ROUND(CLAMP(raw_target, {{ consts.target_floor }}, avail - 0.005), 3)
         | KEEP avail, target
 
   - name: list_existing_slos
@@ -128,7 +132,6 @@ steps:
       headers:
         Elastic-Api-Version: "2023-10-31"
 
-  # Gap-fill create — target from live baseline so new SLOs start Healthy.
   - name: create_per_service_slos
     type: foreach
     foreach: "{{ steps.baseline_services.output.values }}"
@@ -150,28 +153,16 @@ steps:
             name: "{{ foreach.item[0] }} availability (Prometheus)"
             description: >
               Baseline-then-improve availability SLO for {{ foreach.item[0] }}.
-              Good = non-5xx http_requests_total. Initial target was set from a
-              7d baseline (~{{ foreach.item[1] }} avail → target {{ foreach.item[2] }})
-              by workflow prometheus-slo-policies; targets ratchet up only while Healthy.
+              Good = non-5xx request docs. Initial target from 7d baseline
+              (~{{ foreach.item[1] }} avail → target {{ foreach.item[2] }}).
             indicator:
-              type: sli.metric.custom
+              type: sli.kql.custom
               params:
                 index: "{{ consts.metrics_index }}"
-                filter: "service: \"{{ foreach.item[0] }}\""
+                filter: 'service.name: "{{ foreach.item[0] }}" and http.status_code: *'
+                good: 'NOT http.status_code: "500"'
+                total: 'http.status_code: *'
                 timestampField: "@timestamp"
-                good:
-                  metrics:
-                    - name: A
-                      aggregation: sum
-                      field: http_requests_total
-                      filter: 'NOT status: "500"'
-                  equation: A
-                total:
-                  metrics:
-                    - name: A
-                      aggregation: sum
-                      field: http_requests_total
-                  equation: A
             timeWindow:
               duration: 7d
               type: rolling
@@ -198,30 +189,19 @@ steps:
         id: auto-prom-avail-by-service
         name: "Auto: Prometheus availability by service"
         description: >
-          Estate availability by service from Managed PRW. Target bootstrapped from
-          estate 7d baseline (avail {{ steps.estate_baseline.output.values[0][0] }} →
-          target {{ steps.estate_baseline.output.values[0][1] }}). Ratchets up while Healthy.
+          Estate availability by service. Target from estate 7d baseline
+          (avail {{ steps.estate_baseline.output.values[0][0] }} →
+          target {{ steps.estate_baseline.output.values[0][1] }}).
         indicator:
-          type: sli.metric.custom
+          type: sli.kql.custom
           params:
             index: "{{ consts.metrics_index }}"
-            filter: ""
+            filter: 'service.name: {{ consts.service_filter }} and http.status_code: *'
+            good: 'NOT http.status_code: "500"'
+            total: 'http.status_code: *'
             timestampField: "@timestamp"
-            good:
-              metrics:
-                - name: A
-                  aggregation: sum
-                  field: http_requests_total
-                  filter: 'NOT status: "500"'
-              equation: A
-            total:
-              metrics:
-                - name: A
-                  aggregation: sum
-                  field: http_requests_total
-              equation: A
         groupBy:
-          - service
+          - service.name
         timeWindow:
           duration: 7d
           type: rolling
@@ -234,7 +214,6 @@ steps:
           - auto-slo
           - baseline-ratchet
 
-  # Continuous improvement: align existing targets to baseline/ratchet rules.
   - name: improve_slo_targets
     type: ai.agent
     agent-id: __install__.agent-id
@@ -244,8 +223,9 @@ steps:
       message: |
         Continuous-improvement SLO steward on this Serverless Observability project.
         Index: {{ consts.metrics_index }}
+        SLI: sli.kql.custom — good = NOT http.status_code: "500".
 
-        Live baselines (columns service, avail, target):
+        Live baselines (columns service.name, avail, target):
         {{ steps.baseline_services.output }}
 
         Estate baseline (avail, target):
@@ -258,34 +238,17 @@ steps:
         Constants: floor={{ consts.target_floor }}, ceiling={{ consts.target_ceiling }},
         baseline_buffer={{ consts.baseline_buffer }}, ratchet_gap={{ consts.ratchet_gap }},
         ratchet_step={{ consts.ratchet_step }}.
+        Always keep target < live avail. Prefer sli.kql.custom — do not SUM counter_double fields.
 
-        Scope: only SLOs tagged auto-slo / auto-prom / baseline-ratchet, or named
+        Scope: SLOs tagged auto-slo / auto-prom / baseline-ratchet, or named
         `* availability (Prometheus)` / `Auto: Prometheus availability by service`.
-        Ignore unrelated SLOs. Paginate GET /api/observability/slos?perPage=100.
 
-        UNIQUENESS (critical — we had 40× duplicates before):
-        - Exactly ONE SLO per service name `<service> availability (Prometheus)`.
-        - Exactly ONE estate SLO `Auto: Prometheus availability by service`.
-        - Canonical ids: `auto-prom-avail-<service>` and `auto-prom-avail-by-service`.
-        - If duplicates share a name: DELETE extras; keep the canonical id when present.
-        - Do NOT POST a new SLO when that name (or canonical id) already exists.
+        UNIQUENESS: one SLO per service + one estate SLO; canonical ids
+        `auto-prom-avail-<service>` and `auto-prom-avail-by-service`.
 
-        For each in-scope SLO (after dedupe):
-        1) READ current objective.target and summary.sliValue + summary.status.
-        2) BOOTSTRAP / REBASE (if violated OR target > avail - buffer, or target is still 0.999):
-           Set target = clamp(round(sliValue - {{ consts.baseline_buffer }}, 3), floor, ceiling)
-           using the matching service row from the baseline table when possible.
-           Goal: status becomes Healthy (or stays Healthy) after update.
-        3) RATCHET UP (only if status is Healthy AND sliValue >= target + {{ consts.ratchet_gap }}
-           AND target < ceiling):
-           new_target = min(ceiling, round(target + {{ consts.ratchet_step }}, 3))
-           PUT only when new_target > target. Small steps — show gradual improvement.
-        4) NEVER lower a target that is already Healthy just to chase a higher number in one jump.
-        5) NEVER create duplicate SLOs. Prefer PUT /api/observability/slos/{id} for objective only
-           (preserve indicator, timeWindow, tags; add tag baseline-ratchet if missing).
-        6) Estate groupBy SLO: use estate baseline the same way (one definition, many instances).
+        For each in-scope SLO: rebase if violated / target >= avail / still 0.999;
+        ratchet up only when Healthy and SLI >= target + gap; migrate old
+        prometheus-* / http_requests_total indicators to kql.custom on {{ consts.metrics_index }}.
 
-        End with a table: name | old_target | new_target | action (rebase|ratchet|skip) | status.
-        Pitch: Elastic measures the real baseline from Prom/OTel/logs, then improves SLOs over time
-        — vs static Datadog packs that start everyone violated.
+        End with a table: name | old_target | new_target | action | status.
     timeout: 12m
