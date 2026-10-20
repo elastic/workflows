@@ -99,11 +99,7 @@ steps:
         | WHERE total > 0
         | EVAL avail = ROUND(good / total, 4)
         | EVAL raw_target = avail - __install__.baseline-buffer
-        | EVAL target = ROUND(CASE
-              WHEN raw_target < __install__.target-floor THEN __install__.target-floor
-              WHEN raw_target > __install__.target-ceiling THEN __install__.target-ceiling
-              ELSE raw_target
-            END, 3)
+        | EVAL target = ROUND(CLAMP(raw_target, __install__.target-floor, __install__.target-ceiling), 3)
         | KEEP service, avail, target
         | SORT service
 
@@ -119,11 +115,7 @@ steps:
         | WHERE total > 0
         | EVAL avail = ROUND(good / total, 4)
         | EVAL raw_target = avail - __install__.baseline-buffer
-        | EVAL target = ROUND(CASE
-              WHEN raw_target < __install__.target-floor THEN __install__.target-floor
-              WHEN raw_target > __install__.target-ceiling THEN __install__.target-ceiling
-              ELSE raw_target
-            END, 3)
+        | EVAL target = ROUND(CLAMP(raw_target, __install__.target-floor, __install__.target-ceiling), 3)
         | KEEP avail, target
 
   - name: list_existing_slos
