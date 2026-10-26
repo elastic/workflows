@@ -1,7 +1,7 @@
 template-metadata:
   slug: prometheus-auto-ml-anomaly-policies
-  version: "1.3.0"
-  availability: ">=9.5.0"
+  version: "1.4.0"
+  availability: ">=9.6.0"
   name: "Prometheus Auto ML Anomaly Policies"
   description: >-
     Canonical Auto Prometheus pack with deterministic rule ids — gap-only, no sprawl.
@@ -22,16 +22,23 @@ template-metadata:
 
 name: Prometheus Auto ML Anomaly Policies
 description: >
-  Every 10 minutes (and on demand): detect Prometheus metric families, ensure
+  Hourly (and on demand): detect Prometheus metric families, ensure
   one ML anomaly job + one anomaly alert rule per family (canonical ids).
   Gap-only — never multiply ML alerts. Threshold rules are owned by
-  prometheus-alert-policies.
+  prometheus-auto-alert-policies.
 enabled: true
 triggers:
   - type: manual
   - type: scheduled
     with:
-      every: 10m
+      every: 1h
+
+settings:
+  timeout: 15m
+  concurrency:
+    cancel-in-progress: false
+    # Drop overlapping scheduled runs rather than stacking agent work
+    max: 1
 
 consts:
   metrics_index: __install__.metrics-index
@@ -52,6 +59,7 @@ steps:
     with:
       format: json
       query: |
+        SET unmapped_fields="nullify";
         FROM {{ consts.metrics_index }}
         | WHERE @timestamp > NOW() - 30 minutes
         | STATS http_samples = COUNT(*) WHERE http_requests_total IS NOT NULL,
@@ -80,27 +88,26 @@ steps:
     agent-id: __install__.agent-id
     with:
       message: |
-        Prometheus ML ANOMALY steward on this Serverless Observability project.
+        Prometheus ML ANOMALY steward on this Observability project.
         Index / datafeed source: {{ consts.metrics_index }}
 
         Pre-check samples:
-        {{ steps.detect_metric_families.output }}
+        {{ steps.detect_metric_families.output | json }}
 
         Existing rules page:
-        {{ steps.list_alert_rules.output }}
+        {{ steps.list_alert_rules.output | json }}
 
         CANONICAL CATALOG (job_id|alert_rule_id|alert_name):
         {{ consts.catalog }}
 
-        HARD RULES (stop ML alert sprawl — we had dual "Auto Prom:" + "Auto: Prometheus … ML Anomaly" pairs):
-        1) Exactly ONE open job + ONE xpack.ml.anomaly_detection_alert per catalog row.
+        HARD RULES (gap-only ML steward — never delete customer rules):
+        1) Exactly ONE open job + ONE xpack.ml.anomaly_detection_alert per catalog row when samples > 0.
         2) Create/update alert rules with the exact alert_rule_id above (tags: prometheus, auto-prom, ml, agent-builder).
-        3) DELETE any xpack.ml.anomaly_detection_alert tagged auto-prom/prometheus whose id is NOT in the catalog
-           (especially *-anomaly-rule and "Auto: Prometheus … ML Anomaly" duplicates).
-        4) Do NOT create .index-threshold / es-query threshold rules (prometheus-alert-policies owns those).
+        3) Ownership scope = tags **auto-prom**. NEVER DELETE rules (scheduled or manual), including
+           non-catalog auto-prom/prometheus anomaly alerts — report extras only.
+        4) Do NOT create .index-threshold / es-query threshold rules (prometheus-auto-alert-policies owns those).
         5) Jobs: prefer execute_api ml.put_job / open / put_datafeed / start; sync Kibana ML saved objects
            via GET /api/ml/saved_objects/sync before attaching rules.
-        6) End table: job_id | alert_id | action (kept|created|deleted|fixed|skipped).
-
-        Pitch: one ML monitor per Prom family — not parallel anomaly rule packs.
+        6) If every catalog alert_rule_id with samples > 0 already exists, make NO writes — "no gaps".
+        7) End table: job_id | alert_id | action (kept|created|fixed|skipped|reported-extra).
     timeout: 12m

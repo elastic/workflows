@@ -1,7 +1,7 @@
 template-metadata:
   slug: prometheus-dashboard-sre-briefings
-  version: "1.2.0"
-  availability: ">=9.5.0"
+  version: "1.3.0"
+  availability: ">=9.6.0"
   name: "Prometheus dashboard SRE day-one briefings"
   description: >-
     Daily (and on demand), ask an Agent Builder agent to inject or refresh a top
@@ -37,6 +37,11 @@ description: >
 
 enabled: true
 
+settings:
+  timeout: 15m
+  concurrency:
+    max: 1
+
 consts:
   metrics_index: __install__.metrics-index
 
@@ -52,6 +57,7 @@ steps:
     with:
       format: json
       query: |
+        SET unmapped_fields="nullify";
         FROM {{ consts.metrics_index }}
         | WHERE @timestamp > NOW() - 24 hours
         | STATS http_samples = COUNT(*) WHERE http_requests_total IS NOT NULL,
@@ -71,27 +77,20 @@ steps:
     agent-id: __install__.agent-id
     with:
       message: |
-        Daily / on-demand SRE DASHBOARD BRIEFING sync on this Serverless Observability project.
+        Daily / on-demand SRE DASHBOARD BRIEFING sync on this Observability project.
         Index: {{ consts.metrics_index }}
         Sample counts (last 24h):
-        - http_samples: {{ steps.detect_metric_families.output }}
-        - cpu_samples: {{ steps.detect_metric_families.output }}
-        - go_samples: {{ steps.detect_metric_families.output }}
-        - login_samples (user_logins_total): {{ steps.detect_metric_families.output }}
-        - purchase_samples (purchases_total): {{ steps.detect_metric_families.output }}
-        - signup_samples (user_signups_total): {{ steps.detect_metric_families.output }}
-        - checkout_samples (orders/abandonments): {{ steps.detect_metric_families.output }}
-        - engagement_samples (views/searches): {{ steps.detect_metric_families.output }}
-        - distinct services: {{ steps.detect_metric_families.output }}
+        {{ steps.detect_metric_families.output | json }}
+
 
         GOAL: Every dashboard titled "Auto: Prometheus …" must have a top Markdown panel
         (stable panel id: sre-briefing) that onboards a brand-new SRE in under 2 minutes.
         Refresh content with live analysis — do not leave stale briefs.
-        MUST include "Auto: Prometheus Health Monitor" (id a1b2c3d4-e5f6-7890-abcd-ef1234567890).
+        MUST include "Auto: Prometheus Health Monitor" (find by title / tag auto-prom; canonical id auto-prom-dashboard-health-monitor if present).
 
         CRITICAL: Workflow "completed" is NOT enough — you MUST actually PUT each dashboard
         and verify with GET that panels contain id=sre-briefing type=markdown whose content
-        includes the heading "## Purpose". Stub text saying "_Upserted by prometheus-vega-dashboards_"
+        includes the heading "## Purpose". Stub text saying "_Owned by prometheus-auto-dashboards_"
         is NOT acceptable — replace it.
 
         Audience: day-one SRE who has never seen this estate. Write clearly, no jargon without
@@ -105,7 +104,7 @@ steps:
            Checkout KPIs, Engagement. Skip non-matching titles.
         2) For each dashboard GET /api/dashboards/{id} and read existing panels (ES|QL queries,
            titles, breakdowns). Also pull related context with tools:
-           - o11y.detect_prom_metric_families / ES|QL spot-checks for anomalies or empty series
+           - ES|QL spot-checks for anomalies or empty series
            - observability.get_alerts (tags prometheus / auto-prom / ml) for open/recent issues
            - Note related threshold rules and ML anomaly rules (auto-prom-*) by name when relevant
         3) Author Markdown content with EXACTLY these sections (use ## headings):
@@ -121,8 +120,8 @@ steps:
            Linked rule names / SLOs that fire from the same signals (or "none yet").
            ## Day-one next steps
            3–5 concrete actions (which chart to watch first, who/what to check, which workflow
-           owns dashboards vs alerts vs ML: prometheus-vega-dashboards / prometheus-alert-policies /
-           prometheus-ml-anomaly-policies).
+           owns dashboards vs alerts vs ML: prometheus-auto-dashboards / prometheus-auto-alert-policies /
+           prometheus-auto-ml-anomaly-policies).
            Footer line: `_Last refreshed: <ISO-8601 UTC> by elastic-ai-agent · workflow prometheus-dashboard-sre-briefings_`
         4) UPSERT the briefing panel — do NOT wipe Lens/vis charts OR custom_content panels:
            - Panel id MUST be `sre-briefing`
@@ -138,7 +137,5 @@ steps:
              description, filters, tags). Header Elastic-Api-Version: 2023-10-31.
         5) Do NOT create new dashboards, threshold rules, or ML jobs here.
            If a dashboard is missing custom_content scorecards/flow, note it in the summary
-           (prometheus-vega-dashboards owns those panels) — do not invent them here.
+           (prometheus-auto-dashboards owns those panels) — do not invent them here.
         6) End with a summary table: dashboard title → updated|skipped|failed + one-line reason.
-
-        Pitch: touchless day-one SRE onboarding on every Prom dashboard — vs tribal Datadog tribal knowledge.

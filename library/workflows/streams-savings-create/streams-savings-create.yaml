@@ -1,7 +1,7 @@
 template-metadata:
   slug: streams-savings-create
-  version: "1.1.0"
-  availability: ">=9.5.0"
+  version: "1.2.0"
+  availability: ">=9.6.0"
   name: "Streams savings create (manual)"
   description: >-
     Manual create/recreate Auto: Streams Noise & Savings board. Fixed workflow schema (on-failure continue) and escaped dashboard Liquid
@@ -75,11 +75,25 @@ steps:
 
 
   # Deterministic board — survives delete; agent only refreshes recommendations markdown.
+  - name: get_streams_dashboard
+    type: kibana.request
+    on-failure:
+      continue: true
+    with:
+      method: GET
+      path: /api/dashboards/auto-streams-noise-savings
+      headers:
+        Elastic-Api-Version: "2023-10-31"
+
   - name: upsert_streams_dashboard
     type: kibana.request
+    # Create only when GET missed the dashboard (preserve user edits)
+    if: "{{ steps.get_streams_dashboard.error }}"
+    on-failure:
+      continue: true
     with:
       method: PUT
-      path: /api/dashboards/c0ffee00-5t3a-4e50-9a11-5a5e5a5e0001
+      path: /api/dashboards/auto-streams-noise-savings
       body:
         title: "Auto: Streams Noise & Savings"
         description: "Streams cost control — potential savings from aggregate / roll-up / drop / retention on Prom remote-write. Upserted by streams-noise-savings."
@@ -112,9 +126,6 @@ steps:
                 - **Streams levers** — recommended control classes (not auto-applied).
                 - **Volume charts** — where ingest concentrates (service / time).
                 - **Recommendations** — refreshed by this workflow from live stream inventory + ES|QL.
-
-                ## Pitch
-                Private Link + Streams (aggregate, dedupe, roll-up, drop) → blob = best TCO at PB scale on Serverless.
           - id: streams-savings-cards
             type: custom_content
             grid: { x: 0, y: 8, w: 48, h: 12 }
@@ -316,7 +327,7 @@ steps:
               content: |
                 ## Stream inventory
                 Prom landing stream **{{ consts.prom_stream }}** (from `kibana.streams.get`).
-                Detail: {{ steps.get_prom_stream.output }}
+                Detail: {{ steps.get_prom_stream.output | json }}
 
                 ## Noise findings (last 24h)
                 - **docs** = {{ steps.volume_24h.output.values[0][0] }}

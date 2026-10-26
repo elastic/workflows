@@ -1,10 +1,10 @@
 template-metadata:
   slug: prometheus-auto-dashboards
-  version: "1.2.0"
-  availability: ">=9.5.0"
+  version: "1.3.0"
+  availability: ">=9.6.0"
   name: "Prometheus auto dashboards (Agent Builder)"
   description: >-
-    Every 10 minutes (and on demand), detect Prometheus metric families in a
+    Hourly (and on demand), detect Prometheus metric families in a
     remote-write metrics index, then ask an Agent Builder agent to create
     polished Auto: Prometheus dashboards (Custom ES|QL Panels + Lens xy) only
     for NEW families — HTTP, CPU, Go, and business KPIs (auth, purchases,
@@ -40,6 +40,13 @@ description: >
 
 enabled: true
 
+settings:
+  timeout: 15m
+  concurrency:
+    cancel-in-progress: false
+    # Drop overlapping scheduled runs rather than stacking agent work
+    max: 1
+
 consts:
   metrics_index: __install__.metrics-index
 
@@ -47,7 +54,7 @@ triggers:
   - type: manual
   - type: scheduled
     with:
-      every: 10m
+      every: 1h
 
 steps:
   - name: detect_metric_families
@@ -55,6 +62,7 @@ steps:
     with:
       format: json
       query: |
+        SET unmapped_fields="nullify";
         FROM {{ consts.metrics_index }}
         | WHERE @timestamp > NOW() - 30 minutes
         | STATS http_samples = COUNT(*) WHERE http_requests_total IS NOT NULL,
@@ -68,16 +76,29 @@ steps:
                 services = COUNT_DISTINCT(service)
 
 
-  # Deterministic polished core dashboards (survive delete → next workflow run).
-  # Fixed IDs — always upsert so a delete is healed on the next scheduled/manual
-  # run. Health Monitor + Streams boards are also workflow-owned. Business gaps
-  # use the agent below.
+  # Deterministic polished core dashboards with readable auto-prom-* ids.
+  # CREATE-IF-MISSING only: each board has a GET probe; PUT runs only when GET fails.
+  # Never overwrite an existing dashboard (preserves user panel edits).
   # Custom ES|QL Panels (type: custom_content) are required on every Auto: Prometheus board.
+  - name: get_http_dashboard
+    type: kibana.request
+    on-failure:
+      continue: true
+    with:
+      method: GET
+      path: /api/dashboards/auto-prom-dashboard-http
+      headers:
+        Elastic-Api-Version: "2023-10-31"
+
   - name: upsert_http_dashboard
     type: kibana.request
+    # Create only when GET missed the dashboard (preserve user edits)
+    if: "{{ steps.get_http_dashboard.error }}"
+    on-failure:
+      continue: true
     with:
       method: PUT
-      path: /api/dashboards/bba23bb4-fc88-4c3c-88d4-b6d1629225e2
+      path: /api/dashboards/auto-prom-dashboard-http
       body:
         title: "Auto: Prometheus HTTP Requests & Errors by Service"
         description: "Managed PRW — custom_content health cards + flow + gradient area / 5xx bars"
@@ -106,7 +127,7 @@ steps:
                 Custom ES|QL health cards + scrape→PRW flow, then request rate (gradient area)
                 and 5xx (bars) by service from Managed PRW.
                 Synced cursor/colors/tooltips. Daily workflow refreshes this briefing.
-                _Upserted by prometheus-vega-dashboards_
+                _Owned by prometheus-auto-dashboards_
           - id: http-health-cards
             type: custom_content
             grid: { x: 0, y: 8, w: 48, h: 12 }
@@ -285,11 +306,25 @@ steps:
                     - column: error_rate
                   breakdown_by: { column: service }
 
+  - name: get_cpu_dashboard
+    type: kibana.request
+    on-failure:
+      continue: true
+    with:
+      method: GET
+      path: /api/dashboards/auto-prom-dashboard-cpu
+      headers:
+        Elastic-Api-Version: "2023-10-31"
+
   - name: upsert_cpu_dashboard
     type: kibana.request
+    # Create only when GET missed the dashboard (preserve user edits)
+    if: "{{ steps.get_cpu_dashboard.error }}"
+    on-failure:
+      continue: true
     with:
       method: PUT
-      path: /api/dashboards/6a645c6b-59de-4f55-8962-1225fd5efb4b
+      path: /api/dashboards/auto-prom-dashboard-cpu
       body:
         title: "Auto: Prometheus Process CPU by Service"
         description: "Managed PRW — custom_content CPU scorecards + flow + gradient area"
@@ -318,7 +353,7 @@ steps:
                 Custom ES|QL CPU scorecards + scrape→PRW flow, then process CPU usage
                 ratio as gradient area by service (Managed PRW).
                 Daily workflow refreshes this briefing with live signals.
-                _Upserted by prometheus-vega-dashboards_
+                _Owned by prometheus-auto-dashboards_
           - id: cpu-health-cards
             type: custom_content
             grid: { x: 0, y: 8, w: 48, h: 12 }
@@ -459,11 +494,25 @@ steps:
                     - column: cpu
                   breakdown_by: { column: service }
 
+  - name: get_go_dashboard
+    type: kibana.request
+    on-failure:
+      continue: true
+    with:
+      method: GET
+      path: /api/dashboards/auto-prom-dashboard-go
+      headers:
+        Elastic-Api-Version: "2023-10-31"
+
   - name: upsert_go_dashboard
     type: kibana.request
+    # Create only when GET missed the dashboard (preserve user edits)
+    if: "{{ steps.get_go_dashboard.error }}"
+    on-failure:
+      continue: true
     with:
       method: PUT
-      path: /api/dashboards/9e1e7b91-3093-4f0c-98dd-7ad00ee214bf
+      path: /api/dashboards/auto-prom-dashboard-go
       body:
         title: "Auto: Prometheus Go Goroutines"
         description: "Managed PRW — custom_content goroutine scorecards + flow + gradient area"
@@ -492,7 +541,7 @@ steps:
                 Custom ES|QL goroutine scorecards + scrape→PRW flow, then goroutines
                 as gradient area by job (service label absent on go_*).
                 Daily workflow refreshes this briefing with live signals.
-                _Upserted by prometheus-vega-dashboards_
+                _Owned by prometheus-auto-dashboards_
           - id: go-health-cards
             type: custom_content
             grid: { x: 0, y: 8, w: 48, h: 12 }
@@ -634,14 +683,28 @@ steps:
                   breakdown_by: { column: job }
 
   # Showcase board — workflow-owned (fixed id). Do not rely on upsert scripts.
+  - name: get_health_monitor
+    type: kibana.request
+    on-failure:
+      continue: true
+    with:
+      method: GET
+      path: /api/dashboards/auto-prom-dashboard-health-monitor
+      headers:
+        Elastic-Api-Version: "2023-10-31"
+
   - name: upsert_health_monitor
     type: kibana.request
+    # Create only when GET missed the dashboard (preserve user edits)
+    if: "{{ steps.get_health_monitor.error }}"
+    on-failure:
+      continue: true
     with:
       method: PUT
-      path: /api/dashboards/a1b2c3d4-e5f6-7890-abcd-ef1234567890
+      path: /api/dashboards/auto-prom-dashboard-health-monitor
       body:
         title: "Auto: Prometheus Health Monitor"
-        description: "Custom ES|QL Panels (HTML/CSS + Liquid) SLO cards + flow + Lens gradient area/bars — upserted by prometheus-vega-dashboards"
+        description: "Custom ES|QL Panels (HTML/CSS + Liquid) SLO cards + flow + Lens gradient area/bars — owned by prometheus-auto-dashboards"
         time_range:
           from: now-15m
           to: now
@@ -835,14 +898,28 @@ steps:
                   breakdown_by: { column: service }
 
 
+  - name: get_business_auth
+    type: kibana.request
+    on-failure:
+      continue: true
+    with:
+      method: GET
+      path: /api/dashboards/auto-prom-dashboard-auth
+      headers:
+        Elastic-Api-Version: "2023-10-31"
+
   - name: upsert_business_auth
     type: kibana.request
+    # Create only when GET missed the dashboard (preserve user edits)
+    if: "{{ steps.get_business_auth.error }}"
+    on-failure:
+      continue: true
     with:
       method: PUT
-      path: /api/dashboards/d4a7b001-1111-4a01-8a01-000000000001
+      path: /api/dashboards/auto-prom-dashboard-auth
       body:
         title: "Auto: Prometheus Business Auth & Logins"
-        description: "Managed PRW — login / failure scorecards + flow + gradient area — upserted by prometheus-vega-dashboards"
+        description: "Managed PRW — login / failure scorecards + flow + gradient area — owned by prometheus-auto-dashboards"
         time_range:
           from: now-15m
           to: now
@@ -867,7 +944,7 @@ steps:
                 ### Auto: Prometheus Business Auth & Logins
                 Logins and login failures by service from Managed PRW.
                 Custom ES|QL scorecards + scrape→PRW flow + gradient area.
-                _Upserted by prometheus-vega-dashboards_
+                _Owned by prometheus-auto-dashboards_
           - id: biz-cards
             type: custom_content
             grid: { x: 0, y: 8, w: 48, h: 12 }
@@ -1046,14 +1123,28 @@ steps:
                   breakdown_by: { column: service }
 
 
+  - name: get_business_purchases
+    type: kibana.request
+    on-failure:
+      continue: true
+    with:
+      method: GET
+      path: /api/dashboards/auto-prom-dashboard-purchases
+      headers:
+        Elastic-Api-Version: "2023-10-31"
+
   - name: upsert_business_purchases
     type: kibana.request
+    # Create only when GET missed the dashboard (preserve user edits)
+    if: "{{ steps.get_business_purchases.error }}"
+    on-failure:
+      continue: true
     with:
       method: PUT
-      path: /api/dashboards/d4a7b002-2222-4a02-8a02-000000000002
+      path: /api/dashboards/auto-prom-dashboard-purchases
       body:
         title: "Auto: Prometheus Business Purchases & Revenue"
-        description: "Managed PRW — purchase / payment-failure scorecards + flow + gradient area — upserted by prometheus-vega-dashboards"
+        description: "Managed PRW — purchase / payment-failure scorecards + flow + gradient area — owned by prometheus-auto-dashboards"
         time_range:
           from: now-15m
           to: now
@@ -1078,7 +1169,7 @@ steps:
                 ### Auto: Prometheus Business Purchases & Revenue
                 Purchases and payment failures from Managed PRW.
                 Custom ES|QL scorecards + scrape→PRW flow + gradient area.
-                _Upserted by prometheus-vega-dashboards_
+                _Owned by prometheus-auto-dashboards_
           - id: biz-cards
             type: custom_content
             grid: { x: 0, y: 8, w: 48, h: 12 }
@@ -1257,14 +1348,28 @@ steps:
                   breakdown_by: { column: service }
 
 
+  - name: get_business_signups
+    type: kibana.request
+    on-failure:
+      continue: true
+    with:
+      method: GET
+      path: /api/dashboards/auto-prom-dashboard-signups
+      headers:
+        Elastic-Api-Version: "2023-10-31"
+
   - name: upsert_business_signups
     type: kibana.request
+    # Create only when GET missed the dashboard (preserve user edits)
+    if: "{{ steps.get_business_signups.error }}"
+    on-failure:
+      continue: true
     with:
       method: PUT
-      path: /api/dashboards/d4a7b003-3333-4a03-8a03-000000000003
+      path: /api/dashboards/auto-prom-dashboard-signups
       body:
         title: "Auto: Prometheus Business Signups"
-        description: "Managed PRW — signup scorecards + flow + gradient area — upserted by prometheus-vega-dashboards"
+        description: "Managed PRW — signup scorecards + flow + gradient area — owned by prometheus-auto-dashboards"
         time_range:
           from: now-15m
           to: now
@@ -1289,7 +1394,7 @@ steps:
                 ### Auto: Prometheus Business Signups
                 User signups by service from Managed PRW.
                 Custom ES|QL scorecards + scrape→PRW flow + gradient area.
-                _Upserted by prometheus-vega-dashboards_
+                _Owned by prometheus-auto-dashboards_
           - id: biz-cards
             type: custom_content
             grid: { x: 0, y: 8, w: 48, h: 12 }
@@ -1433,14 +1538,28 @@ steps:
                   breakdown_by: { column: service }
 
 
+  - name: get_business_checkout
+    type: kibana.request
+    on-failure:
+      continue: true
+    with:
+      method: GET
+      path: /api/dashboards/auto-prom-dashboard-checkout
+      headers:
+        Elastic-Api-Version: "2023-10-31"
+
   - name: upsert_business_checkout
     type: kibana.request
+    # Create only when GET missed the dashboard (preserve user edits)
+    if: "{{ steps.get_business_checkout.error }}"
+    on-failure:
+      continue: true
     with:
       method: PUT
-      path: /api/dashboards/d4a7b004-4444-4a04-8a04-000000000004
+      path: /api/dashboards/auto-prom-dashboard-checkout
       body:
         title: "Auto: Prometheus Business Checkout KPIs"
-        description: "Managed PRW — checkout / abandon scorecards + flow + gradient area — upserted by prometheus-vega-dashboards"
+        description: "Managed PRW — checkout / abandon scorecards + flow + gradient area — owned by prometheus-auto-dashboards"
         time_range:
           from: now-15m
           to: now
@@ -1465,7 +1584,7 @@ steps:
                 ### Auto: Prometheus Business Checkout KPIs
                 Orders vs cart abandonments from Managed PRW.
                 Custom ES|QL scorecards + scrape→PRW flow + gradient area.
-                _Upserted by prometheus-vega-dashboards_
+                _Owned by prometheus-auto-dashboards_
           - id: biz-cards
             type: custom_content
             grid: { x: 0, y: 8, w: 48, h: 12 }
@@ -1644,14 +1763,28 @@ steps:
                   breakdown_by: { column: service }
 
 
+  - name: get_business_engagement
+    type: kibana.request
+    on-failure:
+      continue: true
+    with:
+      method: GET
+      path: /api/dashboards/auto-prom-dashboard-engagement
+      headers:
+        Elastic-Api-Version: "2023-10-31"
+
   - name: upsert_business_engagement
     type: kibana.request
+    # Create only when GET missed the dashboard (preserve user edits)
+    if: "{{ steps.get_business_engagement.error }}"
+    on-failure:
+      continue: true
     with:
       method: PUT
-      path: /api/dashboards/d4a7b005-5555-4a05-8a05-000000000005
+      path: /api/dashboards/auto-prom-dashboard-engagement
       body:
         title: "Auto: Prometheus Business Engagement"
-        description: "Managed PRW — product views / search scorecards + flow + gradient area — upserted by prometheus-vega-dashboards"
+        description: "Managed PRW — product views / search scorecards + flow + gradient area — owned by prometheus-auto-dashboards"
         time_range:
           from: now-15m
           to: now
@@ -1676,7 +1809,7 @@ steps:
                 ### Auto: Prometheus Business Engagement
                 Product views and search queries from Managed PRW.
                 Custom ES|QL scorecards + scrape→PRW flow + gradient area.
-                _Upserted by prometheus-vega-dashboards_
+                _Owned by prometheus-auto-dashboards_
           - id: biz-cards
             type: custom_content
             grid: { x: 0, y: 8, w: 48, h: 12 }
@@ -1865,7 +1998,7 @@ steps:
         Prometheus business-dashboard polish on this Serverless project.
         Index: {{ consts.metrics_index }}
         Sample counts (last 30m) — ES|QL columns/values:
-        {{ steps.detect_metric_families.output }}
+        {{ steps.detect_metric_families.output | json }}
 
         Deterministic kibana.request steps already upsert these titles (do NOT recreate):
         - Auto: Prometheus HTTP / CPU / Go / Health Monitor

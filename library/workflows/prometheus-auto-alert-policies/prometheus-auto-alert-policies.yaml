@@ -1,7 +1,7 @@
 template-metadata:
   slug: prometheus-auto-alert-policies
-  version: "1.3.0"
-  availability: ">=9.5.0"
+  version: "1.4.0"
+  availability: ">=9.6.0"
   name: "Prometheus Auto Alert Policies"
   description: >-
     Canonical Auto Prometheus pack with deterministic rule ids — gap-only, no sprawl.
@@ -22,16 +22,23 @@ template-metadata:
 
 name: Prometheus Auto Alert Policies
 description: >
-  Every 10 minutes (and on demand): detect Prometheus metric families, then
+  Hourly (and on demand): detect Prometheus metric families, then
   ensure a small canonical set of Observability threshold alert policies exists
   (deterministic rule ids). Gap-only — never multiply rules. ML anomaly alerts
-  are owned by prometheus-ml-anomaly-policies.
+  are owned by prometheus-auto-ml-anomaly-policies.
 enabled: true
 triggers:
   - type: manual
   - type: scheduled
     with:
-      every: 10m
+      every: 1h
+
+settings:
+  timeout: 15m
+  concurrency:
+    cancel-in-progress: false
+    # Drop overlapping scheduled runs rather than stacking agent work
+    max: 1
 
 consts:
   metrics_index: __install__.metrics-index
@@ -53,6 +60,7 @@ steps:
     with:
       format: json
       query: |
+        SET unmapped_fields="nullify";
         FROM {{ consts.metrics_index }}
         | WHERE @timestamp > NOW() - 30 minutes
         | STATS http_samples = COUNT(*) WHERE http_requests_total IS NOT NULL,
@@ -81,34 +89,33 @@ steps:
     agent-id: __install__.agent-id
     with:
       message: |
-        Prometheus THRESHOLD alert steward (not ML) on this Serverless Observability project.
+        Prometheus THRESHOLD alert steward (not ML) on this Observability project.
         Index: {{ consts.metrics_index }}
 
         Pre-check samples:
-        {{ steps.detect_metric_families.output }}
+        {{ steps.detect_metric_families.output | json }}
 
         Existing rules page:
-        {{ steps.list_alert_rules.output }}
+        {{ steps.list_alert_rules.output | json }}
 
         CANONICAL CATALOG (id|name|intent) — EXACTLY these threshold rules, nothing else:
         {{ consts.catalog }}
 
-        HARD RULES (we previously sprawled 30+ overlapping policies):
-        1) Paginate GET /api/alerting/rules/_find (per_page=100). Scope = tags auto-prom OR prometheus
-           AND rule type is NOT xpack.ml.anomaly_detection_alert (ML owned by prometheus-ml-anomaly-policies).
+        HARD RULES (gap-only steward — never delete customer rules):
+        1) Paginate GET /api/alerting/rules/_find (per_page=100). Ownership scope = tags **auto-prom**
+           (do NOT treat the generic `prometheus` tag alone as owned by this pack)
+           AND rule type is NOT xpack.ml.anomaly_detection_alert (ML owned by prometheus-auto-ml-anomaly-policies).
         2) ALLOWLIST: only the catalog ids above. Prefer creating with that exact `id` so re-runs 409.
-        3) For each catalog row whose family has samples > 0:
+        3) GAP-ONLY: For each catalog row whose family has samples > 0:
            - If rule id exists → skip (or fix if Failed). Do NOT create another with a new name.
            - If missing → create ONE .es-query / custom threshold / index-threshold style rule
              with that exact id + name, tags: prometheus, auto-prom, agent-builder.
-        4) DEDUPE: DELETE any in-scope non-ML rule whose id is NOT in the catalog
-           (examples of sprawl to remove: Logins Sudden Drop, Purchases Revenue Sudden Drop,
-           Purchases Payment Failures Spike, Search Queries Drop, Active Checkouts Saturation,
-           anything named "Auto Prom:" that is a threshold duplicate).
+        4) NEVER DELETE rules on scheduled or manual runs (including non-catalog / user rules).
+           Report extras tagged auto-prom that are not in the catalog; do not remove them.
         5) Do NOT create ML anomaly alert rules here.
         6) Do NOT create dashboards or SLOs.
         7) No Slack/PagerDuty unless already present.
-        8) End table: id | action (kept|created|deleted|fixed|skipped) | reason.
-
-        Pitch: a small curated Auto: Prometheus threshold pack — not alert sprawl.
+        8) If every catalog id with samples > 0 already exists, make NO writes — reply with
+           a short "no gaps" table and exit.
+        9) End table: id | action (kept|created|fixed|skipped|reported-extra) | reason.
     timeout: 12m

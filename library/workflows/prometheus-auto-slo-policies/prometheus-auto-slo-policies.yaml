@@ -1,7 +1,7 @@
 template-metadata:
   slug: prometheus-auto-slo-policies
-  version: "1.4.0"
-  availability: ">=9.5.0"
+  version: "1.5.0"
+  availability: ">=9.6.0"
   name: "Prometheus auto SLO policies (baseline → improve)"
   description: >-
     Measure per-service availability baselines on OTel/Prom-shaped metrics,
@@ -29,10 +29,10 @@ template-metadata:
         default: "metrics-generic.otel-default"
       - name: service-filter
         label: "Service name filter (ES|QL LIKE)"
-        description: 'e.g. horizon* or * for all services with http.status_code'
+        description: 'ES|QL LIKE pattern; default * matches all services with http.status_code'
         inputType: text
         required: true
-        default: "horizon*"
+        default: "*"
       - name: target-floor
         label: "SLO target floor"
         description: "Soft minimum objective (fraction). Also capped below live avail."
@@ -68,10 +68,17 @@ template-metadata:
 
 name: Prometheus Auto SLO Policies
 description: >
-  Every 10 minutes (and on demand): measure per-service availability baselines,
+  Hourly (and on demand): measure per-service availability baselines,
   create gap-only SLOs with targets set just below current SLI (so new coverage
   starts Healthy), then slowly ratchet targets upward only when services stay green.
 enabled: true
+
+settings:
+  timeout: 15m
+  concurrency:
+    cancel-in-progress: false
+    # Drop overlapping scheduled runs rather than stacking agent work
+    max: 1
 
 consts:
   metrics_index: __install__.metrics-index
@@ -86,7 +93,7 @@ triggers:
   - type: manual
   - type: scheduled
     with:
-      every: 10m
+      every: 1h
 
 steps:
   # COUNT(*) on request docs — counter_double fields cannot be SUM()'d in ES|QL.
@@ -134,7 +141,7 @@ steps:
 
   - name: create_per_service_slos
     type: foreach
-    foreach: "{{ steps.baseline_services.output.values }}"
+    foreach: "{{ steps.baseline_services.output.values | json }}"
     max-iterations:
       limit: 50
       on-limit: continue
@@ -221,18 +228,18 @@ steps:
       continue: true
     with:
       message: |
-        Continuous-improvement SLO steward on this Serverless Observability project.
+        Continuous-improvement SLO steward on this Observability project.
         Index: {{ consts.metrics_index }}
         SLI: sli.kql.custom — good = NOT http.status_code: "500".
 
         Live baselines (columns service.name, avail, target):
-        {{ steps.baseline_services.output }}
+        {{ steps.baseline_services.output | json }}
 
         Estate baseline (avail, target):
-        {{ steps.estate_baseline.output }}
+        {{ steps.estate_baseline.output | json }}
 
         Existing SLOs (page 1):
-        {{ steps.list_existing_slos.output }}
+        {{ steps.list_existing_slos.output | json }}
 
         POLICY (baseline → improve — NEVER flash a red sea):
         Constants: floor={{ consts.target_floor }}, ceiling={{ consts.target_ceiling }},
