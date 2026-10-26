@@ -70,6 +70,7 @@ steps:
     with:
       format: json
       query: |
+        SET unmapped_fields="nullify";
         FROM {{ consts.metrics_index }}
         | WHERE @timestamp > NOW() - 24 hours
         | STATS docs = COUNT(*), services = COUNT_DISTINCT(service), jobs = COUNT_DISTINCT(job)
@@ -83,6 +84,7 @@ steps:
     with:
       format: json
       query: |
+        SET unmapped_fields="nullify";
         FROM {{ consts.metrics_index }}
         | WHERE @timestamp > NOW() - 24 hours
         | STATS docs = COUNT(*) BY service
@@ -199,6 +201,7 @@ steps:
                 
               esql_query:
                 - |
+                  SET unmapped_fields="nullify";
                   FROM {{ consts.metrics_index }}
                   | WHERE @timestamp >= ?_tstart AND @timestamp <= ?_tend
                   | STATS docs = COUNT(*), services = COUNT_DISTINCT(service), jobs = COUNT_DISTINCT(job)
@@ -259,6 +262,7 @@ steps:
                 
               esql_query:
                 - |
+                  SET unmapped_fields="nullify";
                   FROM {{ consts.metrics_index }}
                   | WHERE @timestamp >= ?_tstart AND @timestamp <= ?_tend
                   | STATS docs = COUNT(*), services = COUNT_DISTINCT(service), jobs = COUNT_DISTINCT(job)
@@ -297,6 +301,7 @@ steps:
                   data_source:
                     type: esql
                     query: |
+                      SET unmapped_fields="nullify";
                       FROM {{ consts.metrics_index }}
                       | WHERE @timestamp >= ?_tstart AND @timestamp <= ?_tend
                       | STATS docs = COUNT(*) BY @timestamp = BUCKET(@timestamp, 5 minutes)
@@ -327,6 +332,7 @@ steps:
                   data_source:
                     type: esql
                     query: |
+                      SET unmapped_fields="nullify";
                       FROM {{ consts.metrics_index }}
                       | WHERE @timestamp >= ?_tstart AND @timestamp <= ?_tend
                       | STATS docs = COUNT(*) BY service

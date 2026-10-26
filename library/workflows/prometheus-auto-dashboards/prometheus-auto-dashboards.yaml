@@ -175,6 +175,7 @@ steps:
                 
               esql_query:
                 - |
+                  SET unmapped_fields="nullify";
                   FROM {{ consts.metrics_index }}
                   | WHERE @timestamp >= ?_tstart AND @timestamp <= ?_tend AND http_requests_total IS NOT NULL
                   | STATS
@@ -262,6 +263,7 @@ steps:
                   data_source:
                     type: esql
                     query: |
+                      SET unmapped_fields="nullify";
                       TS {{ consts.metrics_index }}
                       | WHERE @timestamp >= ?_tstart AND @timestamp <= ?_tend AND http_requests_total IS NOT NULL
                       | STATS request_rate = SUM(RATE(http_requests_total)) BY service, @timestamp = BUCKET(@timestamp, 1 minute)
@@ -293,6 +295,7 @@ steps:
                   data_source:
                     type: esql
                     query: |
+                      SET unmapped_fields="nullify";
                       TS {{ consts.metrics_index }}
                       | WHERE @timestamp >= ?_tstart AND @timestamp <= ?_tend AND http_requests_total IS NOT NULL AND status LIKE "5*"
                       | STATS error_rate = SUM(RATE(http_requests_total)) BY service, @timestamp = BUCKET(@timestamp, 1 minute)
@@ -401,6 +404,7 @@ steps:
                 
               esql_query:
                 - |
+                  SET unmapped_fields="nullify";
                   FROM {{ consts.metrics_index }}
                   | WHERE @timestamp >= ?_tstart AND @timestamp <= ?_tend AND process_cpu_usage_ratio IS NOT NULL
                   | STATS cpu = ROUND(AVG(process_cpu_usage_ratio), 3), samples = COUNT(*) BY service
@@ -481,6 +485,7 @@ steps:
                   data_source:
                     type: esql
                     query: |
+                      SET unmapped_fields="nullify";
                       FROM {{ consts.metrics_index }}
                       | WHERE @timestamp >= ?_tstart AND @timestamp <= ?_tend AND process_cpu_usage_ratio IS NOT NULL
                       | STATS cpu = AVG(process_cpu_usage_ratio) BY service, @timestamp = BUCKET(@timestamp, 1 minute)
@@ -589,6 +594,7 @@ steps:
                 
               esql_query:
                 - |
+                  SET unmapped_fields="nullify";
                   FROM {{ consts.metrics_index }}
                   | WHERE @timestamp >= ?_tstart AND @timestamp <= ?_tend AND go_goroutines IS NOT NULL
                   | STATS goroutines = ROUND(AVG(go_goroutines), 0), samples = COUNT(*) BY job
@@ -669,6 +675,7 @@ steps:
                   data_source:
                     type: esql
                     query: |
+                      SET unmapped_fields="nullify";
                       FROM {{ consts.metrics_index }}
                       | WHERE @timestamp >= ?_tstart AND @timestamp <= ?_tend AND go_goroutines IS NOT NULL
                       | STATS goroutines = AVG(go_goroutines) BY job, @timestamp = BUCKET(@timestamp, 1 minute)
@@ -766,6 +773,7 @@ steps:
                 
               esql_query:
                 - |
+                  SET unmapped_fields="nullify";
                   FROM {{ consts.metrics_index }}
                   | WHERE @timestamp >= ?_tstart AND @timestamp <= ?_tend AND http_requests_total IS NOT NULL
                   | STATS
@@ -853,6 +861,7 @@ steps:
                   data_source:
                     type: esql
                     query: |
+                      SET unmapped_fields="nullify";
                       TS {{ consts.metrics_index }}
                       | WHERE @timestamp >= ?_tstart AND @timestamp <= ?_tend AND http_requests_total IS NOT NULL
                       | STATS request_rate = SUM(RATE(http_requests_total)) BY service, @timestamp = BUCKET(@timestamp, 1 minute)
@@ -884,6 +893,7 @@ steps:
                   data_source:
                     type: esql
                     query: |
+                      SET unmapped_fields="nullify";
                       TS {{ consts.metrics_index }}
                       | WHERE @timestamp >= ?_tstart AND @timestamp <= ?_tend AND http_requests_total IS NOT NULL AND status LIKE "5*"
                       | STATS error_rate = SUM(RATE(http_requests_total)) BY service, @timestamp = BUCKET(@timestamp, 1 minute)
@@ -992,6 +1002,7 @@ steps:
                 
               esql_query:
                 - |
+                  SET unmapped_fields="nullify";
                   FROM {{ consts.metrics_index }}
                   | WHERE @timestamp >= ?_tstart AND @timestamp <= ?_tend AND (user_logins_total IS NOT NULL OR user_login_failures_total IS NOT NULL)
                   | STATS logins = COUNT(*) WHERE user_logins_total IS NOT NULL,
@@ -1077,6 +1088,7 @@ steps:
                   data_source:
                     type: esql
                     query: |
+                      SET unmapped_fields="nullify";
                       TS {{ consts.metrics_index }}
                       | WHERE @timestamp >= ?_tstart AND @timestamp <= ?_tend AND user_logins_total IS NOT NULL
                       | STATS login_rate = SUM(RATE(user_logins_total)) BY service, @timestamp = BUCKET(@timestamp, 1 minute)
@@ -1109,6 +1121,7 @@ steps:
                   data_source:
                     type: esql
                     query: |
+                      SET unmapped_fields="nullify";
                       TS {{ consts.metrics_index }}
                       | WHERE @timestamp >= ?_tstart AND @timestamp <= ?_tend AND user_login_failures_total IS NOT NULL
                       | STATS fail_rate = SUM(RATE(user_login_failures_total)) BY service, @timestamp = BUCKET(@timestamp, 1 minute)
@@ -1217,6 +1230,7 @@ steps:
                 
               esql_query:
                 - |
+                  SET unmapped_fields="nullify";
                   FROM {{ consts.metrics_index }}
                   | WHERE @timestamp >= ?_tstart AND @timestamp <= ?_tend AND (purchases_total IS NOT NULL OR payment_failures_total IS NOT NULL)
                   | STATS purchases = COUNT(*) WHERE purchases_total IS NOT NULL,
@@ -1302,6 +1316,7 @@ steps:
                   data_source:
                     type: esql
                     query: |
+                      SET unmapped_fields="nullify";
                       TS {{ consts.metrics_index }}
                       | WHERE @timestamp >= ?_tstart AND @timestamp <= ?_tend AND purchases_total IS NOT NULL
                       | STATS purchase_rate = SUM(RATE(purchases_total)) BY service, @timestamp = BUCKET(@timestamp, 1 minute)
@@ -1334,6 +1349,7 @@ steps:
                   data_source:
                     type: esql
                     query: |
+                      SET unmapped_fields="nullify";
                       TS {{ consts.metrics_index }}
                       | WHERE @timestamp >= ?_tstart AND @timestamp <= ?_tend AND payment_failures_total IS NOT NULL
                       | STATS fail_rate = SUM(RATE(payment_failures_total)) BY service, @timestamp = BUCKET(@timestamp, 1 minute)
@@ -1442,6 +1458,7 @@ steps:
                 
               esql_query:
                 - |
+                  SET unmapped_fields="nullify";
                   FROM {{ consts.metrics_index }}
                   | WHERE @timestamp >= ?_tstart AND @timestamp <= ?_tend AND user_signups_total IS NOT NULL
                   | STATS signups = COUNT(*) BY service
@@ -1524,6 +1541,7 @@ steps:
                   data_source:
                     type: esql
                     query: |
+                      SET unmapped_fields="nullify";
                       TS {{ consts.metrics_index }}
                       | WHERE @timestamp >= ?_tstart AND @timestamp <= ?_tend AND user_signups_total IS NOT NULL
                       | STATS signup_rate = SUM(RATE(user_signups_total)) BY service, @timestamp = BUCKET(@timestamp, 1 minute)
@@ -1632,6 +1650,7 @@ steps:
                 
               esql_query:
                 - |
+                  SET unmapped_fields="nullify";
                   FROM {{ consts.metrics_index }}
                   | WHERE @timestamp >= ?_tstart AND @timestamp <= ?_tend AND (checkout_orders_total IS NOT NULL OR cart_abandonments_total IS NOT NULL)
                   | STATS orders = COUNT(*) WHERE checkout_orders_total IS NOT NULL,
@@ -1717,6 +1736,7 @@ steps:
                   data_source:
                     type: esql
                     query: |
+                      SET unmapped_fields="nullify";
                       TS {{ consts.metrics_index }}
                       | WHERE @timestamp >= ?_tstart AND @timestamp <= ?_tend AND checkout_orders_total IS NOT NULL
                       | STATS order_rate = SUM(RATE(checkout_orders_total)) BY service, @timestamp = BUCKET(@timestamp, 1 minute)
@@ -1749,6 +1769,7 @@ steps:
                   data_source:
                     type: esql
                     query: |
+                      SET unmapped_fields="nullify";
                       TS {{ consts.metrics_index }}
                       | WHERE @timestamp >= ?_tstart AND @timestamp <= ?_tend AND cart_abandonments_total IS NOT NULL
                       | STATS abandon_rate = SUM(RATE(cart_abandonments_total)) BY service, @timestamp = BUCKET(@timestamp, 1 minute)
@@ -1857,6 +1878,7 @@ steps:
                 
               esql_query:
                 - |
+                  SET unmapped_fields="nullify";
                   FROM {{ consts.metrics_index }}
                   | WHERE @timestamp >= ?_tstart AND @timestamp <= ?_tend AND (product_views_total IS NOT NULL OR search_queries_total IS NOT NULL)
                   | STATS views = COUNT(*) WHERE product_views_total IS NOT NULL,
@@ -1941,6 +1963,7 @@ steps:
                   data_source:
                     type: esql
                     query: |
+                      SET unmapped_fields="nullify";
                       TS {{ consts.metrics_index }}
                       | WHERE @timestamp >= ?_tstart AND @timestamp <= ?_tend AND product_views_total IS NOT NULL
                       | STATS view_rate = SUM(RATE(product_views_total)) BY service, @timestamp = BUCKET(@timestamp, 1 minute)
@@ -1973,6 +1996,7 @@ steps:
                   data_source:
                     type: esql
                     query: |
+                      SET unmapped_fields="nullify";
                       TS {{ consts.metrics_index }}
                       | WHERE @timestamp >= ?_tstart AND @timestamp <= ?_tend AND search_queries_total IS NOT NULL
                       | STATS search_rate = SUM(RATE(search_queries_total)) BY service, @timestamp = BUCKET(@timestamp, 1 minute)
