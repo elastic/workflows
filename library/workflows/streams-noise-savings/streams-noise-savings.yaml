@@ -1,11 +1,10 @@
 template-metadata:
   slug: streams-noise-savings
-  version: "1.2.0"
+  version: "1.0.0"
   availability: ">=9.6.0"
   name: "Streams noise and savings (refresh)"
   description: >-
-    Refresh Auto: Streams Noise & Savings board with live potential $/mo savings. Fixed workflow schema (on-failure continue) and escaped dashboard Liquid
-    so the editor validator does not treat custom_content row.* as workflow variables.
+    Refresh the Auto: Streams Noise & Savings board with live volume, cost, and potential savings from Prom remote-write.
   solutions: [observability]
   categories: [monitoring, reporting, data-ingestion]
   install:
@@ -40,10 +39,10 @@ description: >
 enabled: true
 
 settings:
-  timeout: 15m
+  timeout: 35m
   concurrency:
-    cancel-in-progress: false
-    # Drop overlapping scheduled runs rather than stacking agent work
+    key: "{{ workflow.id }}"
+    strategy: drop
     max: 1
 
 consts:
@@ -105,7 +104,7 @@ steps:
   - name: upsert_streams_dashboard
     type: kibana.request
     # Create only when GET missed the dashboard (preserve user edits)
-    if: "{{ steps.get_streams_dashboard.error }}"
+    if: "steps.get_streams_dashboard.error.statusCode: 404"
     on-failure:
       continue: true
     with:
@@ -170,10 +169,10 @@ steps:
                   .meta { opacity: 0.7; font-size: 0.82rem; margin-top: var(--cc-space-xs); }
                   .empty { opacity: 0.65; padding: var(--cc-space-l); }
                 </style>
-                {{ "{{ \"{% if rows.size == 0 %}\" }}" }}
+                {{ "{% if rows.size == 0 %}" }}
                   <p class="empty">No stream samples in range — confirm Prometheus remote-write is landing.</p>
-                {{ "{{ \"{% else %}\" }}" }}
-                  {{ "{{ \"{% assign row = rows[0] %}\" }}" }}
+                {{ "{% else %}" }}
+                  {{ "{% assign row = rows[0] %}" }}
                 <div class="board">
                   <div class="card">
                     <div class="label">Docs in range</div>
@@ -196,7 +195,7 @@ steps:
                     <div class="meta">Drop {{ "{{ row[\"save_drop_usd\"].value | prepend: \"$\" }}" }} + roll-up {{ "{{ row[\"save_rollup_usd\"].value | prepend: \"$\" }}" }} + retention {{ "{{ row[\"save_retention_usd\"].value | prepend: \"$\" }}" }}</div>
                   </div>
                 </div>
-                {{ "{{ \"{% endif %}\" }}" }}
+                {{ "{% endif %}" }}
                 
               esql_query:
                 - |
@@ -230,10 +229,10 @@ steps:
                   .hint { opacity: 0.75; font-size: 0.82rem; margin-top: var(--cc-space-xs); }
                   .empty { opacity: 0.65; padding: var(--cc-space-l); }
                 </style>
-                {{ "{{ \"{% if rows.size == 0 %}\" }}" }}
+                {{ "{% if rows.size == 0 %}" }}
                   <p class="empty">No data for action heuristics.</p>
-                {{ "{{ \"{% else %}\" }}" }}
-                  {{ "{{ \"{% assign row = rows[0] %}\" }}" }}
+                {{ "{% else %}" }}
+                  {{ "{% assign row = rows[0] %}" }}
                 <div class="actions">
                   <div class="action">
                     <h3>Aggregate / dedupe</h3>
@@ -256,7 +255,7 @@ steps:
                     <div class="hint">Set stream lifecycle DSL (e.g. 30d) vs inherit; age roll-ups to blob. Est. retention lever ~{{ "{{ row[\"save_retention_usd\"].value | prepend: \"$\" }}" }}/mo. Failure-store retention is separate.</div>
                   </div>
                 </div>
-                {{ "{{ \"{% endif %}\" }}" }}
+                {{ "{% endif %}" }}
                 
               esql_query:
                 - |

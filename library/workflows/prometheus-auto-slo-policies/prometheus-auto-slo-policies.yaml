@@ -1,12 +1,10 @@
 template-metadata:
   slug: prometheus-auto-slo-policies
-  version: "1.5.0"
+  version: "1.0.0"
   availability: ">=9.6.0"
   name: "Prometheus auto SLO policies (baseline → improve)"
   description: >-
-    Measure per-service availability baselines on OTel/Prom-shaped metrics,
-    create gap-only SLOs with targets just below current SLI (start Healthy),
-    then slowly ratchet targets upward only while services stay green.
+    Measure per-service availability baselines, create gap-only SLOs just below current SLI, then ratchet targets while services stay healthy.
   solutions: [observability]
   categories: [monitoring, detection, ai-agent]
   install:
@@ -74,10 +72,10 @@ description: >
 enabled: true
 
 settings:
-  timeout: 15m
+  timeout: 35m
   concurrency:
-    cancel-in-progress: false
-    # Drop overlapping scheduled runs rather than stacking agent work
+    key: "{{ workflow.id }}"
+    strategy: drop
     max: 1
 
 consts:
@@ -258,4 +256,4 @@ steps:
         prometheus-* / http_requests_total indicators to kql.custom on {{ consts.metrics_index }}.
 
         End with a table: name | old_target | new_target | action | status.
-    timeout: 12m
+    timeout: 30m

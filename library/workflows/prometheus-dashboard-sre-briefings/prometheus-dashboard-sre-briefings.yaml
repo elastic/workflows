@@ -1,13 +1,10 @@
 template-metadata:
   slug: prometheus-dashboard-sre-briefings
-  version: "1.3.0"
+  version: "1.0.0"
   availability: ">=9.6.0"
   name: "Prometheus dashboard SRE day-one briefings"
   description: >-
-    Daily (and on demand), ask an Agent Builder agent to inject or refresh a top
-    Markdown panel on every Auto: Prometheus dashboard — including Health Monitor —
-    with purpose, how to read charts, current signals, related alerts/SLOs, and
-    day-one next steps. Preserves Custom ES|QL Panels (custom_content).
+    Inject or refresh a day-one SRE Markdown briefing on every Auto: Prometheus dashboard, including Health Monitor.
   solutions: [observability]
   categories: [reporting, ai-agent, monitoring]
   install:
@@ -38,8 +35,10 @@ description: >
 enabled: true
 
 settings:
-  timeout: 15m
+  timeout: 35m
   concurrency:
+    key: "{{ workflow.id }}"
+    strategy: drop
     max: 1
 
 consts:

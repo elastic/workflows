@@ -1,10 +1,10 @@
 template-metadata:
   slug: prometheus-auto-alert-policies
-  version: "1.4.0"
+  version: "1.0.0"
   availability: ">=9.6.0"
   name: "Prometheus Auto Alert Policies"
   description: >-
-    Canonical Auto Prometheus pack with deterministic rule ids — gap-only, no sprawl.
+    Detect Prometheus metric families and gap-only upsert Universal Alerting ES|QL rules with deterministic auto-prom ids.
   solutions: [observability]
   categories: [detection, monitoring, ai-agent]
   install:
@@ -34,10 +34,10 @@ triggers:
       every: 1h
 
 settings:
-  timeout: 15m
+  timeout: 35m
   concurrency:
-    cancel-in-progress: false
-    # Drop overlapping scheduled runs rather than stacking agent work
+    key: "{{ workflow.id }}"
+    strategy: drop
     max: 1
 
 consts:
@@ -118,4 +118,4 @@ steps:
         8) If every catalog id with samples > 0 already exists, make NO writes — reply with
            a short "no gaps" table and exit.
         9) End table: id | action (kept|created|fixed|skipped|reported-extra) | reason.
-    timeout: 12m
+    timeout: 30m

@@ -1,10 +1,10 @@
 template-metadata:
   slug: prometheus-auto-ml-anomaly-policies
-  version: "1.4.0"
+  version: "1.0.0"
   availability: ">=9.6.0"
   name: "Prometheus Auto ML Anomaly Policies"
   description: >-
-    Canonical Auto Prometheus pack with deterministic rule ids — gap-only, no sprawl.
+    Ensure one ML anomaly job and one anomaly alert rule per Prometheus metric family, using canonical auto-prom ids.
   solutions: [observability]
   categories: [detection, monitoring, ai-agent]
   install:
@@ -34,10 +34,10 @@ triggers:
       every: 1h
 
 settings:
-  timeout: 15m
+  timeout: 35m
   concurrency:
-    cancel-in-progress: false
-    # Drop overlapping scheduled runs rather than stacking agent work
+    key: "{{ workflow.id }}"
+    strategy: drop
     max: 1
 
 consts:
@@ -110,4 +110,4 @@ steps:
            via GET /api/ml/saved_objects/sync before attaching rules.
         6) If every catalog alert_rule_id with samples > 0 already exists, make NO writes — "no gaps".
         7) End table: job_id | alert_id | action (kept|created|fixed|skipped|reported-extra).
-    timeout: 12m
+    timeout: 30m

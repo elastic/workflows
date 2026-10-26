@@ -1,15 +1,10 @@
 template-metadata:
   slug: prometheus-auto-dashboards
-  version: "1.3.0"
+  version: "1.0.0"
   availability: ">=9.6.0"
   name: "Prometheus auto dashboards (Agent Builder)"
   description: >-
-    Hourly (and on demand), detect Prometheus metric families in a
-    remote-write metrics index, then ask an Agent Builder agent to create
-    polished Auto: Prometheus dashboards (Custom ES|QL Panels + Lens xy) only
-    for NEW families — HTTP, CPU, Go, and business KPIs (auth, purchases,
-    signups, checkout, engagement). Gap-only; does not blank existing healthy
-    dashboards.
+    Create Auto: Prometheus dashboards (HTTP, CPU, Go, business KPIs) when missing — readable ids, no overwrite of existing boards.
   solutions: [observability]
   categories: [monitoring, ai-agent, reporting]
   install:
@@ -41,10 +36,10 @@ description: >
 enabled: true
 
 settings:
-  timeout: 15m
+  timeout: 35m
   concurrency:
-    cancel-in-progress: false
-    # Drop overlapping scheduled runs rather than stacking agent work
+    key: "{{ workflow.id }}"
+    strategy: drop
     max: 1
 
 consts:
@@ -93,7 +88,7 @@ steps:
   - name: upsert_http_dashboard
     type: kibana.request
     # Create only when GET missed the dashboard (preserve user edits)
-    if: "{{ steps.get_http_dashboard.error }}"
+    if: "steps.get_http_dashboard.error.statusCode: 404"
     on-failure:
       continue: true
     with:
@@ -319,7 +314,7 @@ steps:
   - name: upsert_cpu_dashboard
     type: kibana.request
     # Create only when GET missed the dashboard (preserve user edits)
-    if: "{{ steps.get_cpu_dashboard.error }}"
+    if: "steps.get_cpu_dashboard.error.statusCode: 404"
     on-failure:
       continue: true
     with:
@@ -507,7 +502,7 @@ steps:
   - name: upsert_go_dashboard
     type: kibana.request
     # Create only when GET missed the dashboard (preserve user edits)
-    if: "{{ steps.get_go_dashboard.error }}"
+    if: "steps.get_go_dashboard.error.statusCode: 404"
     on-failure:
       continue: true
     with:
@@ -696,7 +691,7 @@ steps:
   - name: upsert_health_monitor
     type: kibana.request
     # Create only when GET missed the dashboard (preserve user edits)
-    if: "{{ steps.get_health_monitor.error }}"
+    if: "steps.get_health_monitor.error.statusCode: 404"
     on-failure:
       continue: true
     with:
@@ -911,7 +906,7 @@ steps:
   - name: upsert_business_auth
     type: kibana.request
     # Create only when GET missed the dashboard (preserve user edits)
-    if: "{{ steps.get_business_auth.error }}"
+    if: "steps.get_business_auth.error.statusCode: 404"
     on-failure:
       continue: true
     with:
@@ -1136,7 +1131,7 @@ steps:
   - name: upsert_business_purchases
     type: kibana.request
     # Create only when GET missed the dashboard (preserve user edits)
-    if: "{{ steps.get_business_purchases.error }}"
+    if: "steps.get_business_purchases.error.statusCode: 404"
     on-failure:
       continue: true
     with:
@@ -1361,7 +1356,7 @@ steps:
   - name: upsert_business_signups
     type: kibana.request
     # Create only when GET missed the dashboard (preserve user edits)
-    if: "{{ steps.get_business_signups.error }}"
+    if: "steps.get_business_signups.error.statusCode: 404"
     on-failure:
       continue: true
     with:
@@ -1551,7 +1546,7 @@ steps:
   - name: upsert_business_checkout
     type: kibana.request
     # Create only when GET missed the dashboard (preserve user edits)
-    if: "{{ steps.get_business_checkout.error }}"
+    if: "steps.get_business_checkout.error.statusCode: 404"
     on-failure:
       continue: true
     with:
@@ -1776,7 +1771,7 @@ steps:
   - name: upsert_business_engagement
     type: kibana.request
     # Create only when GET missed the dashboard (preserve user edits)
-    if: "{{ steps.get_business_engagement.error }}"
+    if: "steps.get_business_engagement.error.statusCode: 404"
     on-failure:
       continue: true
     with:
