@@ -384,14 +384,13 @@ steps:
       continue: true
     with:
       message: |
-        Streams savings summary (read-only). Do NOT call kibana.request PUT/POST on dashboards.
+        Summarize Streams cost posture for this project (read-only). Do NOT call kibana.request PUT/POST on dashboards.
         Do NOT modify Auto: Streams Noise & Savings — scorecards are already live via workflow upsert.
 
         Volume 24h: docs={{ steps.volume_24h.output.values[0][0] }}, est_gb={{ steps.volume_24h.output.values[0][4] }},
         est_month_cost_usd={{ steps.volume_24h.output.values[0][5] }},
         save_total_usd={{ steps.volume_24h.output.values[0][6] }}.
 
-        Reply with a short 5-bullet operational summary of Streams levers
-        (aggregate/dedupe/rollup/drop/retention) and estimated savings from the
-        numbers above. No tool calls required. Do not mention competitors.
+        Reply with 5 short bullets: current volume/cost signals and ranked Streams levers
+        (drop, roll-up, aggregate, retention, storage). No competitor or sales language. No tool calls.
     timeout: 5m
