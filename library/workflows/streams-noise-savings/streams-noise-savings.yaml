@@ -171,33 +171,33 @@ steps:
                   .meta { opacity: 0.7; font-size: 0.82rem; margin-top: var(--cc-space-xs); }
                   .empty { opacity: 0.65; padding: var(--cc-space-l); }
                 </style>
-                {{ "{% if rows.size == 0 %}" }}
+                {% if rows.size == 0 %}
                   <p class="empty">No stream samples in range — confirm Prometheus remote-write is landing.</p>
-                {{ "{% else %}" }}
-                  {{ "{% assign row = rows[0] %}" }}
+                {% else %}
+                  {% assign row = rows[0] %}
                 <div class="board">
                   <div class="card">
                     <div class="label">Docs in range</div>
-                    <div class="value">{{ "{{ row[\"docs\"].value }}" }}</div>
-                    <div class="meta">{{ "{{ row[\"services\"].value }}" }} services · {{ "{{ row[\"jobs\"].value }}" }} jobs · stream {{ consts.metrics_index }}</div>
+                    <div class="value">{{ "{{" }} row["docs"].value {{ "}}" }}</div>
+                    <div class="meta">{{ "{{" }} row["services"].value {{ "}}" }} services · {{ "{{" }} row["jobs"].value {{ "}}" }} jobs · stream {{ consts.metrics_index }}</div>
                   </div>
                   <div class="card">
                     <div class="label">Est. volume</div>
-                    <div class="value">{{ "{{ row[\"est_gb\"].value }}" }} GB</div>
+                    <div class="value">{{ "{{" }} row["est_gb"].value {{ "}}" }} GB</div>
                     <div class="meta">~450 B/doc heuristic · TSDS Prom samples</div>
                   </div>
                   <div class="card warn">
                     <div class="label">Est. storage / mo</div>
-                    <div class="value">{{ "{{ row[\"est_month_cost_usd\"].value | prepend: \"$\" }}" }}</div>
+                    <div class="value">{{ "{{" }} row["est_month_cost_usd"].value | prepend: "$" {{ "}}" }}</div>
                     <div class="meta">Illustrative $0.12/GB-mo · scale with retention</div>
                   </div>
                   <div class="card save">
                     <div class="label">Potential savings / mo</div>
-                    <div class="value">{{ "{{ row[\"save_total_usd\"].value | prepend: \"$\" }}" }}</div>
-                    <div class="meta">Drop {{ "{{ row[\"save_drop_usd\"].value | prepend: \"$\" }}" }} + roll-up {{ "{{ row[\"save_rollup_usd\"].value | prepend: \"$\" }}" }} + retention {{ "{{ row[\"save_retention_usd\"].value | prepend: \"$\" }}" }}</div>
+                    <div class="value">{{ "{{" }} row["save_total_usd"].value | prepend: "$" {{ "}}" }}</div>
+                    <div class="meta">Drop {{ "{{" }} row["save_drop_usd"].value | prepend: "$" {{ "}}" }} + roll-up {{ "{{" }} row["save_rollup_usd"].value | prepend: "$" {{ "}}" }} + retention {{ "{{" }} row["save_retention_usd"].value | prepend: "$" {{ "}}" }}</div>
                   </div>
                 </div>
-                {{ "{% endif %}" }}
+                {% endif %}
                 
               esql_query:
                 - |
@@ -232,33 +232,33 @@ steps:
                   .hint { opacity: 0.75; font-size: 0.82rem; margin-top: var(--cc-space-xs); }
                   .empty { opacity: 0.65; padding: var(--cc-space-l); }
                 </style>
-                {{ "{% if rows.size == 0 %}" }}
+                {% if rows.size == 0 %}
                   <p class="empty">No data for action heuristics.</p>
-                {{ "{% else %}" }}
-                  {{ "{% assign row = rows[0] %}" }}
+                {% else %}
+                  {% assign row = rows[0] %}
                 <div class="actions">
                   <div class="action">
                     <h3>Aggregate / dedupe</h3>
                     <div class="pct">~15–30%</div>
-                    <div class="hint">Stream processing: collapse repeated scrape labels; keep RATE at PRW edge. {{ "{{ row[\"services\"].value }}" }} services → aggregate by service before long retention.</div>
+                    <div class="hint">Stream processing: collapse repeated scrape labels; keep RATE at PRW edge. {{ "{{" }} row["services"].value {{ "}}" }} services → aggregate by service before long retention.</div>
                   </div>
                   <div class="action">
                     <h3>Roll-up</h3>
                     <div class="pct">~30–45%</div>
-                    <div class="hint">Downsample 1m → 5m/15m for go_* / process_* after 24h. Keep 1m for HTTP SLIs. Est. roll-up lever ~{{ "{{ row[\"save_rollup_usd\"].value | prepend: \"$\" }}" }}/mo on this window.</div>
+                    <div class="hint">Downsample 1m → 5m/15m for go_* / process_* after 24h. Keep 1m for HTTP SLIs. Est. roll-up lever ~{{ "{{" }} row["save_rollup_usd"].value | prepend: "$" {{ "}}" }}/mo on this window.</div>
                   </div>
                   <div class="action">
                     <h3>Drop</h3>
                     <div class="pct">~20–35%</div>
-                    <div class="hint">Drop high-cardinality debug series and unused exporters via Streams rules. Est. drop lever ~{{ "{{ row[\"save_drop_usd\"].value | prepend: \"$\" }}" }}/mo. Window docs: {{ "{{ row[\"docs\"].value }}" }}.</div>
+                    <div class="hint">Drop high-cardinality debug series and unused exporters via Streams rules. Est. drop lever ~{{ "{{" }} row["save_drop_usd"].value | prepend: "$" {{ "}}" }}/mo. Window docs: {{ "{{" }} row["docs"].value {{ "}}" }}.</div>
                   </div>
                   <div class="action">
                     <h3>Retention &amp; storage</h3>
                     <div class="pct">~15–25%</div>
-                    <div class="hint">Set stream lifecycle DSL (e.g. 30d) vs inherit; age roll-ups to blob. Est. retention lever ~{{ "{{ row[\"save_retention_usd\"].value | prepend: \"$\" }}" }}/mo. Failure-store retention is separate.</div>
+                    <div class="hint">Set stream lifecycle DSL (e.g. 30d) vs inherit; age roll-ups to blob. Est. retention lever ~{{ "{{" }} row["save_retention_usd"].value | prepend: "$" {{ "}}" }}/mo. Failure-store retention is separate.</div>
                   </div>
                 </div>
-                {{ "{% endif %}" }}
+                {% endif %}
                 
               esql_query:
                 - |
