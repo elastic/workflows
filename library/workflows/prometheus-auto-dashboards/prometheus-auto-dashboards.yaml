@@ -88,7 +88,7 @@ steps:
   - name: upsert_http_dashboard
     type: kibana.request
     # Create only when GET missed the dashboard (preserve user edits)
-    if: "steps.get_http_dashboard.error.statusCode: 404"
+    if: "steps.get_http_dashboard.error.message: HTTP*404*"
     on-failure:
       continue: true
     with:
@@ -156,22 +156,22 @@ steps:
                   .empty { opacity: 0.65; padding: var(--cc-space-l); }
                 </style>
 
-                {% if rows.size == 0 %}
+                {{ "{% if rows.size == 0 %}" }}
                   <p class="empty">No HTTP samples in range — SLO cards need Prom request traffic.</p>
-                {% else %}
+                {{ "{% else %}" }}
                 <div class="board">
-                {% for row in rows %}
-                  <div class="card {% if row["sli_pct"].value < row["target"].value %}bad{% elsif row["sli_pct"].value < 99.99 %}warn{% endif %}">
+                {{ "{% for row in rows %}" }}
+                  <div class="card {{ '{% if row["sli_pct"].value < row["target"].value %}' }}bad{{ '{% elsif row["sli_pct"].value < 99.99 %}' }}warn{{ "{% endif %}" }}">
                     <div class="name">{{ "{{" }} row["service"].value {{ "}}" }}</div>
                     <div class="pct">{{ "{{" }} row["sli_pct"].value {{ "}}" }}%</div>
                     <div class="meta">SLO target {{ "{{" }} row["target"].value {{ "}}" }}% · {{ "{{" }} row["errors"].value {{ "}}" }} 5xx · {{ "{{" }} row["total"].value {{ "}}" }} samples</div>
-                    <span class="badge {% if row["sli_pct"].value < row["target"].value %}bad{% elsif row["sli_pct"].value < 99.99 %}warn{% endif %}">
-                      {% if row["sli_pct"].value < row["target"].value %}VIOLATED{% elsif row["sli_pct"].value < 99.99 %}WATCH{% else %}HEALTHY{% endif %}
+                    <span class="badge {{ '{% if row["sli_pct"].value < row["target"].value %}' }}bad{{ '{% elsif row["sli_pct"].value < 99.99 %}' }}warn{{ "{% endif %}" }}">
+                      {{ '{% if row["sli_pct"].value < row["target"].value %}' }}VIOLATED{{ '{% elsif row["sli_pct"].value < 99.99 %}' }}WATCH{{ "{% else %}" }}HEALTHY{{ "{% endif %}" }}
                     </span>
                   </div>
-                {% endfor %}
+                {{ "{% endfor %}" }}
                 </div>
-                {% endif %}
+                {{ "{% endif %}" }}
                 
               esql_query:
                 - |
@@ -230,7 +230,7 @@ steps:
                   <div class="arrow">→</div>
                   <div class="col">
                     <div class="label">Observability</div>
-                    <div class="node">Elastic Serverless</div>
+                    <div class="node">Elastic</div>
                     <div class="sub">{{ consts.metrics_index }}</div>
                   </div>
                 </div>
@@ -317,7 +317,7 @@ steps:
   - name: upsert_cpu_dashboard
     type: kibana.request
     # Create only when GET missed the dashboard (preserve user edits)
-    if: "steps.get_cpu_dashboard.error.statusCode: 404"
+    if: "steps.get_cpu_dashboard.error.message: HTTP*404*"
     on-failure:
       continue: true
     with:
@@ -385,22 +385,22 @@ steps:
                   .empty { opacity: 0.65; padding: var(--cc-space-l); }
                 </style>
 
-                {% if rows.size == 0 %}
+                {{ "{% if rows.size == 0 %}" }}
                   <p class="empty">No CPU samples for the selected time range.</p>
-                {% else %}
+                {{ "{% else %}" }}
                 <div class="board">
-                {% for row in rows %}
-                  <div class="card {% if row["cpu"].value > 0.8 %}bad{% elsif row["cpu"].value > 0.5 %}warn{% endif %}">
+                {{ "{% for row in rows %}" }}
+                  <div class="card {{ '{% if row["cpu"].value > 0.8 %}' }}bad{{ '{% elsif row["cpu"].value > 0.5 %}' }}warn{{ "{% endif %}" }}">
                     <div class="name">{{ "{{" }} row["service"].value {{ "}}" }}</div>
                     <div class="pct">{{ "{{" }} row["cpu"].value {{ "}}" }}</div>
                     <div class="meta">{{ "{{" }} row["samples"].value {{ "}}" }} samples · process_cpu_usage_ratio</div>
-                    <span class="badge {% if row["cpu"].value > 0.8 %}bad{% elsif row["cpu"].value > 0.5 %}warn{% endif %}">
-                      {% if row["cpu"].value > 0.8 %}HOT{% elsif row["cpu"].value > 0.5 %}WATCH{% else %}OK{% endif %}
+                    <span class="badge {{ '{% if row["cpu"].value > 0.8 %}' }}bad{{ '{% elsif row["cpu"].value > 0.5 %}' }}warn{{ "{% endif %}" }}">
+                      {{ '{% if row["cpu"].value > 0.8 %}' }}HOT{{ '{% elsif row["cpu"].value > 0.5 %}' }}WATCH{{ "{% else %}" }}OK{{ "{% endif %}" }}
                     </span>
                   </div>
-                {% endfor %}
+                {{ "{% endfor %}" }}
                 </div>
-                {% endif %}
+                {{ "{% endif %}" }}
                 
               esql_query:
                 - |
@@ -452,7 +452,7 @@ steps:
                   <div class="arrow">→</div>
                   <div class="col">
                     <div class="label">Observability</div>
-                    <div class="node">Elastic Serverless</div>
+                    <div class="node">Elastic</div>
                     <div class="sub">{{ consts.metrics_index }}</div>
                   </div>
                 </div>
@@ -507,7 +507,7 @@ steps:
   - name: upsert_go_dashboard
     type: kibana.request
     # Create only when GET missed the dashboard (preserve user edits)
-    if: "steps.get_go_dashboard.error.statusCode: 404"
+    if: "steps.get_go_dashboard.error.message: HTTP*404*"
     on-failure:
       continue: true
     with:
@@ -575,22 +575,22 @@ steps:
                   .empty { opacity: 0.65; padding: var(--cc-space-l); }
                 </style>
 
-                {% if rows.size == 0 %}
+                {{ "{% if rows.size == 0 %}" }}
                   <p class="empty">No Go runtime samples for the selected time range.</p>
-                {% else %}
+                {{ "{% else %}" }}
                 <div class="board">
-                {% for row in rows %}
-                  <div class="card {% if row["goroutines"].value > 500 %}bad{% elsif row["goroutines"].value > 200 %}warn{% endif %}">
+                {{ "{% for row in rows %}" }}
+                  <div class="card {{ '{% if row["goroutines"].value > 500 %}' }}bad{{ '{% elsif row["goroutines"].value > 200 %}' }}warn{{ "{% endif %}" }}">
                     <div class="name">{{ "{{" }} row["job"].value {{ "}}" }}</div>
                     <div class="pct">{{ "{{" }} row["goroutines"].value {{ "}}" }}</div>
                     <div class="meta">{{ "{{" }} row["samples"].value {{ "}}" }} samples · go_goroutines</div>
-                    <span class="badge {% if row["goroutines"].value > 500 %}bad{% elsif row["goroutines"].value > 200 %}warn{% endif %}">
-                      {% if row["goroutines"].value > 500 %}HIGH{% elsif row["goroutines"].value > 200 %}WATCH{% else %}OK{% endif %}
+                    <span class="badge {{ '{% if row["goroutines"].value > 500 %}' }}bad{{ '{% elsif row["goroutines"].value > 200 %}' }}warn{{ "{% endif %}" }}">
+                      {{ '{% if row["goroutines"].value > 500 %}' }}HIGH{{ '{% elsif row["goroutines"].value > 200 %}' }}WATCH{{ "{% else %}" }}OK{{ "{% endif %}" }}
                     </span>
                   </div>
-                {% endfor %}
+                {{ "{% endfor %}" }}
                 </div>
-                {% endif %}
+                {{ "{% endif %}" }}
                 
               esql_query:
                 - |
@@ -642,7 +642,7 @@ steps:
                   <div class="arrow">→</div>
                   <div class="col">
                     <div class="label">Observability</div>
-                    <div class="node">Elastic Serverless</div>
+                    <div class="node">Elastic</div>
                     <div class="sub">{{ consts.metrics_index }}</div>
                   </div>
                 </div>
@@ -698,7 +698,7 @@ steps:
   - name: upsert_health_monitor
     type: kibana.request
     # Create only when GET missed the dashboard (preserve user edits)
-    if: "steps.get_health_monitor.error.statusCode: 404"
+    if: "steps.get_health_monitor.error.message: HTTP*404*"
     on-failure:
       continue: true
     with:
@@ -754,22 +754,22 @@ steps:
                   .badge.warn { background: var(--cc-color-warning); color: var(--cc-color-background); }
                   .empty { opacity: 0.65; padding: var(--cc-space-l); }
                 </style>
-                {% if rows.size == 0 %}
+                {{ "{% if rows.size == 0 %}" }}
                   <p class="empty">No HTTP samples in range — SLO cards need Prom request traffic.</p>
-                {% else %}
+                {{ "{% else %}" }}
                 <div class="board">
-                {% for row in rows %}
-                  <div class="card {% if row["sli_pct"].value < row["target"].value %}bad{% elsif row["sli_pct"].value < 99.99 %}warn{% endif %}">
+                {{ "{% for row in rows %}" }}
+                  <div class="card {{ '{% if row["sli_pct"].value < row["target"].value %}' }}bad{{ '{% elsif row["sli_pct"].value < 99.99 %}' }}warn{{ "{% endif %}" }}">
                     <div class="name">{{ "{{" }} row["service"].value {{ "}}" }}</div>
                     <div class="pct">{{ "{{" }} row["sli_pct"].value {{ "}}" }}%</div>
                     <div class="meta">SLO target {{ "{{" }} row["target"].value {{ "}}" }}% · {{ "{{" }} row["errors"].value {{ "}}" }} 5xx · {{ "{{" }} row["total"].value {{ "}}" }} samples</div>
-                    <span class="badge {% if row["sli_pct"].value < row["target"].value %}bad{% elsif row["sli_pct"].value < 99.99 %}warn{% endif %}">
-                      {% if row["sli_pct"].value < row["target"].value %}VIOLATED{% elsif row["sli_pct"].value < 99.99 %}WATCH{% else %}HEALTHY{% endif %}
+                    <span class="badge {{ '{% if row["sli_pct"].value < row["target"].value %}' }}bad{{ '{% elsif row["sli_pct"].value < 99.99 %}' }}warn{{ "{% endif %}" }}">
+                      {{ '{% if row["sli_pct"].value < row["target"].value %}' }}VIOLATED{{ '{% elsif row["sli_pct"].value < 99.99 %}' }}WATCH{{ "{% else %}" }}HEALTHY{{ "{% endif %}" }}
                     </span>
                   </div>
-                {% endfor %}
+                {{ "{% endfor %}" }}
                 </div>
-                {% endif %}
+                {{ "{% endif %}" }}
                 
               esql_query:
                 - |
@@ -828,7 +828,7 @@ steps:
                   <div class="arrow">→</div>
                   <div class="col">
                     <div class="label">Observability</div>
-                    <div class="node">Elastic Serverless</div>
+                    <div class="node">Elastic</div>
                     <div class="sub">{{ consts.metrics_index }}</div>
                   </div>
                 </div>
@@ -916,7 +916,7 @@ steps:
   - name: upsert_business_auth
     type: kibana.request
     # Create only when GET missed the dashboard (preserve user edits)
-    if: "steps.get_business_auth.error.statusCode: 404"
+    if: "steps.get_business_auth.error.message: HTTP*404*"
     on-failure:
       continue: true
     with:
@@ -984,20 +984,20 @@ steps:
                 </style>
 
 
-                {% if rows.size == 0 %}
+                {{ "{% if rows.size == 0 %}" }}
                   <p class="empty">No login samples in range.</p>
-                {% else %}
+                {{ "{% else %}" }}
                 <div class="board">
-                {% for row in rows %}
-                  <div class="card {% if row["fail_pct"].value > 10 %}bad{% elsif row["fail_pct"].value > 3 %}warn{% endif %}">
+                {{ "{% for row in rows %}" }}
+                  <div class="card {{ '{% if row["fail_pct"].value > 10 %}' }}bad{{ '{% elsif row["fail_pct"].value > 3 %}' }}warn{{ "{% endif %}" }}">
                     <div class="name">{{ "{{" }} row["service"].value {{ "}}" }}</div>
                     <div class="pct">{{ "{{" }} row["logins"].value {{ "}}" }}</div>
                     <div class="meta">{{ "{{" }} row["failures"].value {{ "}}" }} failures · {{ "{{" }} row["fail_pct"].value {{ "}}" }}% fail rate</div>
-                    <span class="badge {% if row["fail_pct"].value > 10 %}bad{% endif %}">{% if row["fail_pct"].value > 10 %}HOT{% else %}OK{% endif %}</span>
+                    <span class="badge {{ '{% if row["fail_pct"].value > 10 %}' }}bad{{ "{% endif %}" }}">{{ '{% if row["fail_pct"].value > 10 %}' }}HOT{{ "{% else %}" }}OK{{ "{% endif %}" }}</span>
                   </div>
-                {% endfor %}
+                {{ "{% endfor %}" }}
                 </div>
-                {% endif %}
+                {{ "{% endif %}" }}
 
                 
               esql_query:
@@ -1054,7 +1054,7 @@ steps:
                   <div class="arrow">→</div>
                   <div class="col">
                     <div class="label">Observability</div>
-                    <div class="node">Elastic Serverless</div>
+                    <div class="node">Elastic</div>
                     <div class="sub">{{ consts.metrics_index }}</div>
                   </div>
                 </div>
@@ -1144,7 +1144,7 @@ steps:
   - name: upsert_business_purchases
     type: kibana.request
     # Create only when GET missed the dashboard (preserve user edits)
-    if: "steps.get_business_purchases.error.statusCode: 404"
+    if: "steps.get_business_purchases.error.message: HTTP*404*"
     on-failure:
       continue: true
     with:
@@ -1212,20 +1212,20 @@ steps:
                 </style>
 
 
-                {% if rows.size == 0 %}
+                {{ "{% if rows.size == 0 %}" }}
                   <p class="empty">No purchase samples in range.</p>
-                {% else %}
+                {{ "{% else %}" }}
                 <div class="board">
-                {% for row in rows %}
-                  <div class="card {% if row["fail_pct"].value > 8 %}bad{% elsif row["fail_pct"].value > 2 %}warn{% endif %}">
+                {{ "{% for row in rows %}" }}
+                  <div class="card {{ '{% if row["fail_pct"].value > 8 %}' }}bad{{ '{% elsif row["fail_pct"].value > 2 %}' }}warn{{ "{% endif %}" }}">
                     <div class="name">{{ "{{" }} row["service"].value {{ "}}" }}</div>
                     <div class="pct">{{ "{{" }} row["purchases"].value {{ "}}" }}</div>
                     <div class="meta">{{ "{{" }} row["failures"].value {{ "}}" }} payment fails · {{ "{{" }} row["fail_pct"].value {{ "}}" }}%</div>
-                    <span class="badge {% if row["fail_pct"].value > 8 %}bad{% endif %}">{% if row["fail_pct"].value > 8 %}HOT{% else %}OK{% endif %}</span>
+                    <span class="badge {{ '{% if row["fail_pct"].value > 8 %}' }}bad{{ "{% endif %}" }}">{{ '{% if row["fail_pct"].value > 8 %}' }}HOT{{ "{% else %}" }}OK{{ "{% endif %}" }}</span>
                   </div>
-                {% endfor %}
+                {{ "{% endfor %}" }}
                 </div>
-                {% endif %}
+                {{ "{% endif %}" }}
 
                 
               esql_query:
@@ -1282,7 +1282,7 @@ steps:
                   <div class="arrow">→</div>
                   <div class="col">
                     <div class="label">Observability</div>
-                    <div class="node">Elastic Serverless</div>
+                    <div class="node">Elastic</div>
                     <div class="sub">{{ consts.metrics_index }}</div>
                   </div>
                 </div>
@@ -1372,7 +1372,7 @@ steps:
   - name: upsert_business_signups
     type: kibana.request
     # Create only when GET missed the dashboard (preserve user edits)
-    if: "steps.get_business_signups.error.statusCode: 404"
+    if: "steps.get_business_signups.error.message: HTTP*404*"
     on-failure:
       continue: true
     with:
@@ -1440,20 +1440,20 @@ steps:
                 </style>
 
 
-                {% if rows.size == 0 %}
+                {{ "{% if rows.size == 0 %}" }}
                   <p class="empty">No signup samples in range.</p>
-                {% else %}
+                {{ "{% else %}" }}
                 <div class="board">
-                {% for row in rows %}
+                {{ "{% for row in rows %}" }}
                   <div class="card">
                     <div class="name">{{ "{{" }} row["service"].value {{ "}}" }}</div>
                     <div class="pct">{{ "{{" }} row["signups"].value {{ "}}" }}</div>
                     <div class="meta">signup samples in range</div>
                     <span class="badge">OK</span>
                   </div>
-                {% endfor %}
+                {{ "{% endfor %}" }}
                 </div>
-                {% endif %}
+                {{ "{% endif %}" }}
 
                 
               esql_query:
@@ -1507,7 +1507,7 @@ steps:
                   <div class="arrow">→</div>
                   <div class="col">
                     <div class="label">Observability</div>
-                    <div class="node">Elastic Serverless</div>
+                    <div class="node">Elastic</div>
                     <div class="sub">{{ consts.metrics_index }}</div>
                   </div>
                 </div>
@@ -1564,7 +1564,7 @@ steps:
   - name: upsert_business_checkout
     type: kibana.request
     # Create only when GET missed the dashboard (preserve user edits)
-    if: "steps.get_business_checkout.error.statusCode: 404"
+    if: "steps.get_business_checkout.error.message: HTTP*404*"
     on-failure:
       continue: true
     with:
@@ -1632,20 +1632,20 @@ steps:
                 </style>
 
 
-                {% if rows.size == 0 %}
+                {{ "{% if rows.size == 0 %}" }}
                   <p class="empty">No checkout samples in range.</p>
-                {% else %}
+                {{ "{% else %}" }}
                 <div class="board">
-                {% for row in rows %}
-                  <div class="card {% if row["abandon_pct"].value > 40 %}bad{% elsif row["abandon_pct"].value > 20 %}warn{% endif %}">
+                {{ "{% for row in rows %}" }}
+                  <div class="card {{ '{% if row["abandon_pct"].value > 40 %}' }}bad{{ '{% elsif row["abandon_pct"].value > 20 %}' }}warn{{ "{% endif %}" }}">
                     <div class="name">{{ "{{" }} row["service"].value {{ "}}" }}</div>
                     <div class="pct">{{ "{{" }} row["orders"].value {{ "}}" }}</div>
                     <div class="meta">{{ "{{" }} row["abandons"].value {{ "}}" }} abandons · {{ "{{" }} row["abandon_pct"].value {{ "}}" }}%</div>
-                    <span class="badge {% if row["abandon_pct"].value > 40 %}bad{% endif %}">{% if row["abandon_pct"].value > 40 %}HOT{% else %}OK{% endif %}</span>
+                    <span class="badge {{ '{% if row["abandon_pct"].value > 40 %}' }}bad{{ "{% endif %}" }}">{{ '{% if row["abandon_pct"].value > 40 %}' }}HOT{{ "{% else %}" }}OK{{ "{% endif %}" }}</span>
                   </div>
-                {% endfor %}
+                {{ "{% endfor %}" }}
                 </div>
-                {% endif %}
+                {{ "{% endif %}" }}
 
                 
               esql_query:
@@ -1702,7 +1702,7 @@ steps:
                   <div class="arrow">→</div>
                   <div class="col">
                     <div class="label">Observability</div>
-                    <div class="node">Elastic Serverless</div>
+                    <div class="node">Elastic</div>
                     <div class="sub">{{ consts.metrics_index }}</div>
                   </div>
                 </div>
@@ -1792,7 +1792,7 @@ steps:
   - name: upsert_business_engagement
     type: kibana.request
     # Create only when GET missed the dashboard (preserve user edits)
-    if: "steps.get_business_engagement.error.statusCode: 404"
+    if: "steps.get_business_engagement.error.message: HTTP*404*"
     on-failure:
       continue: true
     with:
@@ -1860,20 +1860,20 @@ steps:
                 </style>
 
 
-                {% if rows.size == 0 %}
+                {{ "{% if rows.size == 0 %}" }}
                   <p class="empty">No engagement samples in range.</p>
-                {% else %}
+                {{ "{% else %}" }}
                 <div class="board">
-                {% for row in rows %}
+                {{ "{% for row in rows %}" }}
                   <div class="card">
                     <div class="name">{{ "{{" }} row["service"].value {{ "}}" }}</div>
                     <div class="pct">{{ "{{" }} row["views"].value {{ "}}" }}</div>
                     <div class="meta">{{ "{{" }} row["searches"].value {{ "}}" }} searches · product views in range</div>
                     <span class="badge">OK</span>
                   </div>
-                {% endfor %}
+                {{ "{% endfor %}" }}
                 </div>
-                {% endif %}
+                {{ "{% endif %}" }}
 
                 
               esql_query:
@@ -1929,7 +1929,7 @@ steps:
                   <div class="arrow">→</div>
                   <div class="col">
                     <div class="label">Observability</div>
-                    <div class="node">Elastic Serverless</div>
+                    <div class="node">Elastic</div>
                     <div class="sub">{{ consts.metrics_index }}</div>
                   </div>
                 </div>
@@ -2014,7 +2014,7 @@ steps:
       continue: true
     with:
       message: |
-        Prometheus business-dashboard polish on this Serverless project.
+        Prometheus business-dashboard polish on this Observability project.
         Index: {{ consts.metrics_index }}
         Sample counts (last 30m) — ES|QL columns/values:
         {{ steps.detect_metric_families.output | json }}

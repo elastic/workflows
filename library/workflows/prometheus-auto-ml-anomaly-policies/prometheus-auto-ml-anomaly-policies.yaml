@@ -83,8 +83,82 @@ steps:
       headers:
         Elastic-Api-Version: "2023-10-31"
 
+  - name: get_ml_rule_http
+    type: kibana.request
+    on-failure:
+      continue: true
+    with:
+      method: GET
+      path: /api/alerting/rule/auto-prom-http-rate-ml-alert
+      headers:
+        Elastic-Api-Version: "2023-10-31"
+  - name: get_ml_rule_cpu
+    type: kibana.request
+    on-failure:
+      continue: true
+    with:
+      method: GET
+      path: /api/alerting/rule/auto-prom-cpu-ml-alert
+      headers:
+        Elastic-Api-Version: "2023-10-31"
+  - name: get_ml_rule_go
+    type: kibana.request
+    on-failure:
+      continue: true
+    with:
+      method: GET
+      path: /api/alerting/rule/auto-prom-go-ml-alert
+      headers:
+        Elastic-Api-Version: "2023-10-31"
+  - name: get_ml_rule_logins
+    type: kibana.request
+    on-failure:
+      continue: true
+    with:
+      method: GET
+      path: /api/alerting/rule/auto-prom-logins-ml-alert
+      headers:
+        Elastic-Api-Version: "2023-10-31"
+  - name: get_ml_rule_purchases
+    type: kibana.request
+    on-failure:
+      continue: true
+    with:
+      method: GET
+      path: /api/alerting/rule/auto-prom-purchases-ml-alert
+      headers:
+        Elastic-Api-Version: "2023-10-31"
+  - name: get_ml_rule_signups
+    type: kibana.request
+    on-failure:
+      continue: true
+    with:
+      method: GET
+      path: /api/alerting/rule/auto-prom-signups-ml-alert
+      headers:
+        Elastic-Api-Version: "2023-10-31"
+  - name: get_ml_rule_checkout
+    type: kibana.request
+    on-failure:
+      continue: true
+    with:
+      method: GET
+      path: /api/alerting/rule/auto-prom-checkout-ml-alert
+      headers:
+        Elastic-Api-Version: "2023-10-31"
+  - name: get_ml_rule_engagement
+    type: kibana.request
+    on-failure:
+      continue: true
+    with:
+      method: GET
+      path: /api/alerting/rule/auto-prom-engagement-ml-alert
+      headers:
+        Elastic-Api-Version: "2023-10-31"
+
   - name: sync_ml_anomaly_policies
     type: ai.agent
+    if: "steps.get_ml_rule_http.error.message: HTTP*404* or steps.get_ml_rule_cpu.error.message: HTTP*404* or steps.get_ml_rule_go.error.message: HTTP*404* or steps.get_ml_rule_logins.error.message: HTTP*404* or steps.get_ml_rule_purchases.error.message: HTTP*404* or steps.get_ml_rule_signups.error.message: HTTP*404* or steps.get_ml_rule_checkout.error.message: HTTP*404* or steps.get_ml_rule_engagement.error.message: HTTP*404*"
     agent-id: __install__.agent-id
     with:
       message: |

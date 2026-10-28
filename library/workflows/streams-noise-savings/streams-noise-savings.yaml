@@ -106,7 +106,7 @@ steps:
   - name: upsert_streams_dashboard
     type: kibana.request
     # Create only when GET missed the dashboard (preserve user edits)
-    if: "steps.get_streams_dashboard.error.statusCode: 404"
+    if: "steps.get_streams_dashboard.error.message: HTTP*404*"
     on-failure:
       continue: true
     with:
@@ -171,10 +171,10 @@ steps:
                   .meta { opacity: 0.7; font-size: 0.82rem; margin-top: var(--cc-space-xs); }
                   .empty { opacity: 0.65; padding: var(--cc-space-l); }
                 </style>
-                {% if rows.size == 0 %}
+                {{ "{% if rows.size == 0 %}" }}
                   <p class="empty">No stream samples in range — confirm Prometheus remote-write is landing.</p>
-                {% else %}
-                  {% assign row = rows[0] %}
+                {{ "{% else %}" }}
+                  {{ "{% assign row = rows[0] %}" }}
                 <div class="board">
                   <div class="card">
                     <div class="label">Docs in range</div>
@@ -197,7 +197,7 @@ steps:
                     <div class="meta">Drop {{ "{{" }} row["save_drop_usd"].value | prepend: "$" {{ "}}" }} + roll-up {{ "{{" }} row["save_rollup_usd"].value | prepend: "$" {{ "}}" }} + retention {{ "{{" }} row["save_retention_usd"].value | prepend: "$" {{ "}}" }}</div>
                   </div>
                 </div>
-                {% endif %}
+                {{ "{% endif %}" }}
                 
               esql_query:
                 - |
@@ -232,10 +232,10 @@ steps:
                   .hint { opacity: 0.75; font-size: 0.82rem; margin-top: var(--cc-space-xs); }
                   .empty { opacity: 0.65; padding: var(--cc-space-l); }
                 </style>
-                {% if rows.size == 0 %}
+                {{ "{% if rows.size == 0 %}" }}
                   <p class="empty">No data for action heuristics.</p>
-                {% else %}
-                  {% assign row = rows[0] %}
+                {{ "{% else %}" }}
+                  {{ "{% assign row = rows[0] %}" }}
                 <div class="actions">
                   <div class="action">
                     <h3>Aggregate / dedupe</h3>
@@ -258,7 +258,7 @@ steps:
                     <div class="hint">Set stream lifecycle DSL (e.g. 30d) vs inherit; age roll-ups to blob. Est. retention lever ~{{ "{{" }} row["save_retention_usd"].value | prepend: "$" {{ "}}" }}/mo. Failure-store retention is separate.</div>
                   </div>
                 </div>
-                {% endif %}
+                {{ "{% endif %}" }}
                 
               esql_query:
                 - |

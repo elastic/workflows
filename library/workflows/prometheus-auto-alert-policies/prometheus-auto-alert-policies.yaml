@@ -4,7 +4,7 @@ template-metadata:
   availability: ">=9.6.0"
   name: "Prometheus Auto Alert Policies"
   description: >-
-    Detect Prometheus metric families and gap-only upsert Universal Alerting ES|QL rules with deterministic auto-prom ids.
+    Detect Prometheus metric families and gap-only upsert Observability threshold alert rules with deterministic auto-prom ids.
   solutions: [observability]
   categories: [detection, monitoring, ai-agent]
   install:
@@ -84,12 +84,96 @@ steps:
       headers:
         Elastic-Api-Version: "2023-10-31"
 
+  - name: get_rule_http_5xx
+    type: kibana.request
+    on-failure:
+      continue: true
+    with:
+      method: GET
+      path: /api/alerting/rule/auto-prom-http-5xx-rate
+      headers:
+        Elastic-Api-Version: "2023-10-31"
+  - name: get_rule_cpu
+    type: kibana.request
+    on-failure:
+      continue: true
+    with:
+      method: GET
+      path: /api/alerting/rule/auto-prom-cpu-usage-high
+      headers:
+        Elastic-Api-Version: "2023-10-31"
+  - name: get_rule_go
+    type: kibana.request
+    on-failure:
+      continue: true
+    with:
+      method: GET
+      path: /api/alerting/rule/auto-prom-go-goroutines-high
+      headers:
+        Elastic-Api-Version: "2023-10-31"
+  - name: get_rule_login
+    type: kibana.request
+    on-failure:
+      continue: true
+    with:
+      method: GET
+      path: /api/alerting/rule/auto-prom-login-failures-spike
+      headers:
+        Elastic-Api-Version: "2023-10-31"
+  - name: get_rule_purchases
+    type: kibana.request
+    on-failure:
+      continue: true
+    with:
+      method: GET
+      path: /api/alerting/rule/auto-prom-purchases-drop
+      headers:
+        Elastic-Api-Version: "2023-10-31"
+  - name: get_rule_payment
+    type: kibana.request
+    on-failure:
+      continue: true
+    with:
+      method: GET
+      path: /api/alerting/rule/auto-prom-payment-failures-spike
+      headers:
+        Elastic-Api-Version: "2023-10-31"
+  - name: get_rule_signups
+    type: kibana.request
+    on-failure:
+      continue: true
+    with:
+      method: GET
+      path: /api/alerting/rule/auto-prom-signups-drop
+      headers:
+        Elastic-Api-Version: "2023-10-31"
+  - name: get_rule_cart
+    type: kibana.request
+    on-failure:
+      continue: true
+    with:
+      method: GET
+      path: /api/alerting/rule/auto-prom-cart-abandonments-spike
+      headers:
+        Elastic-Api-Version: "2023-10-31"
+  - name: get_rule_views
+    type: kibana.request
+    on-failure:
+      continue: true
+    with:
+      method: GET
+      path: /api/alerting/rule/auto-prom-product-views-drop
+      headers:
+        Elastic-Api-Version: "2023-10-31"
+
   - name: sync_prometheus_alert_policies
     type: ai.agent
+    if: "steps.get_rule_http_5xx.error.message: HTTP*404* or steps.get_rule_cpu.error.message: HTTP*404* or steps.get_rule_go.error.message: HTTP*404* or steps.get_rule_login.error.message: HTTP*404* or steps.get_rule_purchases.error.message: HTTP*404* or steps.get_rule_payment.error.message: HTTP*404* or steps.get_rule_signups.error.message: HTTP*404* or steps.get_rule_cart.error.message: HTTP*404* or steps.get_rule_views.error.message: HTTP*404*"
     agent-id: __install__.agent-id
     with:
       message: |
         Prometheus THRESHOLD alert steward (not ML) on this Observability project.
+        (This step only runs when at least one canonical auto-prom rule id is missing.)
         Index: {{ consts.metrics_index }}
 
         Pre-check samples:
