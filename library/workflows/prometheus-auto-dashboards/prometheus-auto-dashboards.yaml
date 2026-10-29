@@ -1,0 +1,2033 @@
+template-metadata:
+  slug: prometheus-auto-dashboards
+  version: "1.0.0"
+  availability: ">=9.6.0"
+  name: "Prometheus auto dashboards (Agent Builder)"
+  description: >-
+    Create Auto: Prometheus dashboards (HTTP, CPU, Go, business KPIs) when missing — readable ids, no overwrite of existing boards.
+  solutions: [observability]
+  categories: [monitoring, ai-agent, reporting]
+  install:
+    form:
+      - name: agent-id
+        label: "Agent Builder agent ID"
+        description: >-
+          Agent Builder agent that performs gap analysis and creates assets.
+          Default elastic-ai-agent is the built-in Elastic AI Agent; point at a
+          custom agent if you have Prometheus-specific tools/skills configured.
+        inputType: text
+        required: true
+        default: "elastic-ai-agent"
+      - name: metrics-index
+        label: "Prometheus metrics index pattern"
+        description: >-
+          Elasticsearch index / data stream pattern holding Prometheus remote-write
+          metrics (e.g. metrics-generic.prometheus-* or metrics-*.prometheus-*).
+        inputType: esIndex
+        required: true
+        default: "metrics-generic.prometheus-*"
+
+name: Prometheus Auto Dashboards
+description: >
+  Detect Prometheus metric families and create gap-only dashboards via Agent
+  Builder — Custom ES|QL Panels (scorecards + scrape→PRW flow) plus Lens
+  gradient area / error bars for HTTP, CPU, Go, and business KPIs.
+
+enabled: true
+
+settings:
+  timeout: 35m
+  concurrency:
+    key: "{{ workflow.id }}"
+    strategy: drop
+    max: 1
+
+consts:
+  metrics_index: __install__.metrics-index
+
+triggers:
+  - type: manual
+  - type: scheduled
+    with:
+      every: 1h
+
+steps:
+  - name: detect_metric_families
+    type: elasticsearch.esql.query
+    with:
+      format: json
+      query: |
+        SET unmapped_fields="nullify";
+        FROM {{ consts.metrics_index }}
+        | WHERE @timestamp > NOW() - 30 minutes
+        | STATS http_samples = COUNT(*) WHERE http_requests_total IS NOT NULL,
+                cpu_samples = COUNT(*) WHERE process_cpu_usage_ratio IS NOT NULL,
+                go_samples = COUNT(*) WHERE go_goroutines IS NOT NULL,
+                login_samples = COUNT(*) WHERE user_logins_total IS NOT NULL,
+                purchase_samples = COUNT(*) WHERE purchases_total IS NOT NULL,
+                signup_samples = COUNT(*) WHERE user_signups_total IS NOT NULL,
+                checkout_samples = COUNT(*) WHERE checkout_orders_total IS NOT NULL OR cart_abandonments_total IS NOT NULL,
+                engagement_samples = COUNT(*) WHERE product_views_total IS NOT NULL OR search_queries_total IS NOT NULL,
+                services = COUNT_DISTINCT(service)
+
+
+  # Deterministic polished core dashboards with readable auto-prom-* ids.
+  # CREATE-IF-MISSING only: each board has a GET probe; PUT runs only when GET fails.
+  # Never overwrite an existing dashboard (preserves user panel edits).
+  # Custom ES|QL Panels (type: custom_content) are required on every Auto: Prometheus board.
+  - name: get_http_dashboard
+    type: kibana.request
+    on-failure:
+      continue: true
+    with:
+      method: GET
+      path: /api/dashboards/auto-prom-dashboard-http
+      headers:
+        Elastic-Api-Version: "2023-10-31"
+
+  - name: upsert_http_dashboard
+    type: kibana.request
+    # Create only when GET missed the dashboard (preserve user edits)
+    if: "steps.get_http_dashboard.error.message: HTTP*404*"
+    on-failure:
+      continue: true
+    with:
+      method: PUT
+      path: /api/dashboards/auto-prom-dashboard-http
+      body:
+        title: "Auto: Prometheus HTTP Requests & Errors by Service"
+        description: "Managed PRW — custom_content health cards + flow + gradient area / 5xx bars"
+        time_range:
+          from: now-15m
+          to: now
+        options:
+          auto_apply_filters: true
+          hide_panel_titles: false
+          hide_panel_borders: false
+          use_margins: true
+          sync_colors: true
+          sync_tooltips: true
+          sync_cursor: true
+        filters: []
+        tags: []
+        pinned_panels: []
+        panels:
+          - id: sre-briefing
+            type: markdown
+            grid: { x: 0, y: 0, w: 48, h: 8 }
+            config:
+              title: SRE day-one briefing
+              content: |
+                ### Auto: Prometheus HTTP
+                Custom ES|QL health cards + scrape→PRW flow, then request rate (gradient area)
+                and 5xx (bars) by service from Managed PRW.
+                Synced cursor/colors/tooltips. Daily workflow refreshes this briefing.
+                _Owned by prometheus-auto-dashboards_
+          - id: http-health-cards
+            type: custom_content
+            grid: { x: 0, y: 8, w: 48, h: 12 }
+            config:
+              title: "Service SLO cards (availability)"
+              template: |
+                
+                <style>
+                  .board { display: flex; gap: var(--cc-space-m); flex-wrap: wrap; }
+                  .card {
+                    flex: 1; min-width: 200px;
+                    background: var(--cc-color-surface);
+                    border: 1px solid var(--cc-color-border);
+                    border-left: 4px solid var(--cc-vis-0);
+                    border-radius: var(--cc-radius);
+                    padding: var(--cc-space-m);
+                  }
+                  .card.bad { border-left-color: var(--cc-color-danger); }
+                  .card.warn { border-left-color: var(--cc-color-warning); }
+                  .name { font-weight: 600; font-size: 0.95rem; margin-bottom: var(--cc-space-xs); }
+                  .pct { font-size: 2.25rem; line-height: 1.1; font-weight: 700; letter-spacing: -0.02em; }
+                  .meta { opacity: 0.7; font-size: 0.85rem; margin-top: var(--cc-space-xs); }
+                  .badge {
+                    display: inline-block; margin-top: var(--cc-space-s);
+                    padding: 2px 10px; border-radius: var(--cc-radius-s);
+                    background: var(--cc-vis-0); color: var(--cc-color-background);
+                    font-size: 0.72rem; font-weight: 700; letter-spacing: 0.04em;
+                  }
+                  .badge.bad { background: var(--cc-color-danger); }
+                  .badge.warn { background: var(--cc-color-warning); color: var(--cc-color-background); }
+                  .empty { opacity: 0.65; padding: var(--cc-space-l); }
+                </style>
+
+                {{ "{% if rows.size == 0 %}" }}
+                  <p class="empty">No HTTP samples in range — SLO cards need Prom request traffic.</p>
+                {{ "{% else %}" }}
+                <div class="board">
+                {{ "{% for row in rows %}" }}
+                  <div class="card {{ '{% if row["sli_pct"].value < row["target"].value %}' }}bad{{ '{% elsif row["sli_pct"].value < 99.99 %}' }}warn{{ "{% endif %}" }}">
+                    <div class="name">{{ "{{" }} row["service"].value {{ "}}" }}</div>
+                    <div class="pct">{{ "{{" }} row["sli_pct"].value {{ "}}" }}%</div>
+                    <div class="meta">SLO target {{ "{{" }} row["target"].value {{ "}}" }}% · {{ "{{" }} row["errors"].value {{ "}}" }} 5xx · {{ "{{" }} row["total"].value {{ "}}" }} samples</div>
+                    <span class="badge {{ '{% if row["sli_pct"].value < row["target"].value %}' }}bad{{ '{% elsif row["sli_pct"].value < 99.99 %}' }}warn{{ "{% endif %}" }}">
+                      {{ '{% if row["sli_pct"].value < row["target"].value %}' }}VIOLATED{{ '{% elsif row["sli_pct"].value < 99.99 %}' }}WATCH{{ "{% else %}" }}HEALTHY{{ "{% endif %}" }}
+                    </span>
+                  </div>
+                {{ "{% endfor %}" }}
+                </div>
+                {{ "{% endif %}" }}
+                
+              esql_query:
+                - |
+                  SET unmapped_fields="nullify";
+                  FROM {{ consts.metrics_index }}
+                  | WHERE @timestamp >= ?_tstart AND @timestamp <= ?_tend AND http_requests_total IS NOT NULL
+                  | STATS
+                      total = COUNT(*),
+                      good = COUNT(*) WHERE NOT status LIKE "5*",
+                      errors = COUNT(*) WHERE status LIKE "5*"
+                    BY service
+                  | EVAL sli_pct = ROUND(100.0 * good / total, 3)
+                  | EVAL target = 99.9
+                  | EVAL error_budget_remaining = ROUND(sli_pct - target, 3)
+                  | SORT sli_pct ASC
+          - id: prom-flow
+            type: custom_content
+            grid: { x: 0, y: 20, w: 48, h: 6 }
+            config:
+              title: "Scrape → Managed PRW → Elastic"
+              template: |
+                
+                <style>
+                  .flow {
+                    display: flex; align-items: center; justify-content: space-between;
+                    gap: var(--cc-space-m); padding: var(--cc-space-m);
+                    background: var(--cc-color-surface); border-radius: var(--cc-radius);
+                    border: 1px solid var(--cc-color-border);
+                  }
+                  .col { flex: 1; text-align: center; }
+                  .label {
+                    font-size: 0.7rem; letter-spacing: 0.08em; text-transform: uppercase;
+                    opacity: 0.65; margin-bottom: var(--cc-space-s);
+                  }
+                  .node {
+                    display: inline-block; padding: var(--cc-space-s) var(--cc-space-m);
+                    background: var(--cc-color-background); border: 1px solid var(--cc-color-border);
+                    border-radius: var(--cc-radius-s); font-weight: 600; font-size: 0.9rem;
+                  }
+                  .node.accent { border-color: var(--cc-vis-0); box-shadow: 0 0 0 1px var(--cc-vis-0); }
+                  .arrow { opacity: 0.45; font-size: 1.4rem; }
+                  .sub { margin-top: var(--cc-space-xs); font-size: 0.75rem; opacity: 0.65; }
+                </style>
+                <div class="flow">
+                  <div class="col">
+                    <div class="label">Prometheus scrape</div>
+                    <div class="node">demo-exporter · apps</div>
+                    <div class="sub">:8000 /metrics</div>
+                  </div>
+                  <div class="arrow">→</div>
+                  <div class="col">
+                    <div class="label">Edge</div>
+                    <div class="node accent">Managed PRW</div>
+                    <div class="sub">remote_write</div>
+                  </div>
+                  <div class="arrow">→</div>
+                  <div class="col">
+                    <div class="label">Observability</div>
+                    <div class="node">Elastic</div>
+                    <div class="sub">{{ consts.metrics_index }}</div>
+                  </div>
+                </div>
+                
+          - id: http-rate
+            type: vis
+            grid: { x: 0, y: 26, w: 48, h: 16 }
+            config:
+              type: xy
+              title: Request rate by service
+              legend:
+                visibility: visible
+                placement: outside
+                position: bottom
+              styling:
+                interpolation: linear
+                points: { visibility: hidden }
+                areas: { fill_opacity: 0.7, fill: gradient }
+                overlays:
+                  current_time_marker: { visible: true }
+              axis:
+                y:
+                  title: { text: req/s, visible: true }
+                  grid: { visible: true }
+                x:
+                  title: { text: "", visible: false }
+                  grid: { visible: false }
+              layers:
+                - type: area
+                  data_source:
+                    type: esql
+                    query: |
+                      SET unmapped_fields="nullify";
+                      TS {{ consts.metrics_index }}
+                      | WHERE @timestamp >= ?_tstart AND @timestamp <= ?_tend AND http_requests_total IS NOT NULL
+                      | STATS request_rate = SUM(RATE(http_requests_total)) BY service, @timestamp = BUCKET(@timestamp, 1 minute)
+                  x: { column: "@timestamp" }
+                  y:
+                    - column: request_rate
+                  breakdown_by: { column: service }
+          - id: http-5xx
+            type: vis
+            grid: { x: 0, y: 42, w: 48, h: 12 }
+            config:
+              type: xy
+              title: 5xx error rate by service
+              legend:
+                visibility: visible
+                placement: outside
+                position: bottom
+              styling:
+                points: { visibility: hidden }
+              axis:
+                y:
+                  title: { text: 5xx/s, visible: true }
+                  grid: { visible: true }
+                x:
+                  title: { text: "", visible: false }
+                  grid: { visible: false }
+              layers:
+                - type: bar
+                  data_source:
+                    type: esql
+                    query: |
+                      SET unmapped_fields="nullify";
+                      TS {{ consts.metrics_index }}
+                      | WHERE @timestamp >= ?_tstart AND @timestamp <= ?_tend AND http_requests_total IS NOT NULL AND status LIKE "5*"
+                      | STATS error_rate = SUM(RATE(http_requests_total)) BY service, @timestamp = BUCKET(@timestamp, 1 minute)
+                  x: { column: "@timestamp" }
+                  y:
+                    - column: error_rate
+                  breakdown_by: { column: service }
+
+  - name: get_cpu_dashboard
+    type: kibana.request
+    on-failure:
+      continue: true
+    with:
+      method: GET
+      path: /api/dashboards/auto-prom-dashboard-cpu
+      headers:
+        Elastic-Api-Version: "2023-10-31"
+
+  - name: upsert_cpu_dashboard
+    type: kibana.request
+    # Create only when GET missed the dashboard (preserve user edits)
+    if: "steps.get_cpu_dashboard.error.message: HTTP*404*"
+    on-failure:
+      continue: true
+    with:
+      method: PUT
+      path: /api/dashboards/auto-prom-dashboard-cpu
+      body:
+        title: "Auto: Prometheus Process CPU by Service"
+        description: "Managed PRW — custom_content CPU scorecards + flow + gradient area"
+        time_range:
+          from: now-15m
+          to: now
+        options:
+          auto_apply_filters: true
+          hide_panel_titles: false
+          hide_panel_borders: false
+          use_margins: true
+          sync_colors: true
+          sync_tooltips: true
+          sync_cursor: true
+        filters: []
+        tags: []
+        pinned_panels: []
+        panels:
+          - id: sre-briefing
+            type: markdown
+            grid: { x: 0, y: 0, w: 48, h: 8 }
+            config:
+              title: SRE day-one briefing
+              content: |
+                ### Auto: Prometheus CPU
+                Custom ES|QL CPU scorecards + scrape→PRW flow, then process CPU usage
+                ratio as gradient area by service (Managed PRW).
+                Daily workflow refreshes this briefing with live signals.
+                _Owned by prometheus-auto-dashboards_
+          - id: cpu-health-cards
+            type: custom_content
+            grid: { x: 0, y: 8, w: 48, h: 12 }
+            config:
+              title: "CPU scorecards by service"
+              template: |
+                
+                <style>
+                  .board { display: flex; gap: var(--cc-space-m); flex-wrap: wrap; }
+                  .card {
+                    flex: 1; min-width: 200px;
+                    background: var(--cc-color-surface);
+                    border: 1px solid var(--cc-color-border);
+                    border-left: 4px solid var(--cc-vis-0);
+                    border-radius: var(--cc-radius);
+                    padding: var(--cc-space-m);
+                  }
+                  .card.bad { border-left-color: var(--cc-color-danger); }
+                  .card.warn { border-left-color: var(--cc-color-warning); }
+                  .name { font-weight: 600; font-size: 0.95rem; margin-bottom: var(--cc-space-xs); }
+                  .pct { font-size: 2.25rem; line-height: 1.1; font-weight: 700; letter-spacing: -0.02em; }
+                  .meta { opacity: 0.7; font-size: 0.85rem; margin-top: var(--cc-space-xs); }
+                  .badge {
+                    display: inline-block; margin-top: var(--cc-space-s);
+                    padding: 2px 10px; border-radius: var(--cc-radius-s);
+                    background: var(--cc-vis-0); color: var(--cc-color-background);
+                    font-size: 0.72rem; font-weight: 700; letter-spacing: 0.04em;
+                  }
+                  .badge.bad { background: var(--cc-color-danger); }
+                  .badge.warn { background: var(--cc-color-warning); color: var(--cc-color-background); }
+                  .empty { opacity: 0.65; padding: var(--cc-space-l); }
+                </style>
+
+                {{ "{% if rows.size == 0 %}" }}
+                  <p class="empty">No CPU samples for the selected time range.</p>
+                {{ "{% else %}" }}
+                <div class="board">
+                {{ "{% for row in rows %}" }}
+                  <div class="card {{ '{% if row["cpu"].value > 0.8 %}' }}bad{{ '{% elsif row["cpu"].value > 0.5 %}' }}warn{{ "{% endif %}" }}">
+                    <div class="name">{{ "{{" }} row["service"].value {{ "}}" }}</div>
+                    <div class="pct">{{ "{{" }} row["cpu"].value {{ "}}" }}</div>
+                    <div class="meta">{{ "{{" }} row["samples"].value {{ "}}" }} samples · process_cpu_usage_ratio</div>
+                    <span class="badge {{ '{% if row["cpu"].value > 0.8 %}' }}bad{{ '{% elsif row["cpu"].value > 0.5 %}' }}warn{{ "{% endif %}" }}">
+                      {{ '{% if row["cpu"].value > 0.8 %}' }}HOT{{ '{% elsif row["cpu"].value > 0.5 %}' }}WATCH{{ "{% else %}" }}OK{{ "{% endif %}" }}
+                    </span>
+                  </div>
+                {{ "{% endfor %}" }}
+                </div>
+                {{ "{% endif %}" }}
+                
+              esql_query:
+                - |
+                  SET unmapped_fields="nullify";
+                  FROM {{ consts.metrics_index }}
+                  | WHERE @timestamp >= ?_tstart AND @timestamp <= ?_tend AND process_cpu_usage_ratio IS NOT NULL
+                  | STATS cpu = ROUND(AVG(process_cpu_usage_ratio), 3), samples = COUNT(*) BY service
+                  | SORT cpu DESC
+          - id: prom-flow
+            type: custom_content
+            grid: { x: 0, y: 20, w: 48, h: 6 }
+            config:
+              title: "Scrape → Managed PRW → Elastic"
+              template: |
+                
+                <style>
+                  .flow {
+                    display: flex; align-items: center; justify-content: space-between;
+                    gap: var(--cc-space-m); padding: var(--cc-space-m);
+                    background: var(--cc-color-surface); border-radius: var(--cc-radius);
+                    border: 1px solid var(--cc-color-border);
+                  }
+                  .col { flex: 1; text-align: center; }
+                  .label {
+                    font-size: 0.7rem; letter-spacing: 0.08em; text-transform: uppercase;
+                    opacity: 0.65; margin-bottom: var(--cc-space-s);
+                  }
+                  .node {
+                    display: inline-block; padding: var(--cc-space-s) var(--cc-space-m);
+                    background: var(--cc-color-background); border: 1px solid var(--cc-color-border);
+                    border-radius: var(--cc-radius-s); font-weight: 600; font-size: 0.9rem;
+                  }
+                  .node.accent { border-color: var(--cc-vis-0); box-shadow: 0 0 0 1px var(--cc-vis-0); }
+                  .arrow { opacity: 0.45; font-size: 1.4rem; }
+                  .sub { margin-top: var(--cc-space-xs); font-size: 0.75rem; opacity: 0.65; }
+                </style>
+                <div class="flow">
+                  <div class="col">
+                    <div class="label">Prometheus scrape</div>
+                    <div class="node">demo-exporter · apps</div>
+                    <div class="sub">:8000 /metrics</div>
+                  </div>
+                  <div class="arrow">→</div>
+                  <div class="col">
+                    <div class="label">Edge</div>
+                    <div class="node accent">Managed PRW</div>
+                    <div class="sub">remote_write</div>
+                  </div>
+                  <div class="arrow">→</div>
+                  <div class="col">
+                    <div class="label">Observability</div>
+                    <div class="node">Elastic</div>
+                    <div class="sub">{{ consts.metrics_index }}</div>
+                  </div>
+                </div>
+                
+          - id: cpu
+            type: vis
+            grid: { x: 0, y: 26, w: 48, h: 18 }
+            config:
+              type: xy
+              title: Process CPU usage ratio by service
+              legend:
+                visibility: visible
+                placement: outside
+                position: bottom
+              styling:
+                interpolation: linear
+                points: { visibility: hidden }
+                areas: { fill_opacity: 0.65, fill: gradient }
+                overlays:
+                  current_time_marker: { visible: true }
+              axis:
+                y:
+                  title: { text: CPU ratio, visible: true }
+                  grid: { visible: true }
+                x:
+                  title: { text: "", visible: false }
+                  grid: { visible: false }
+              layers:
+                - type: area
+                  data_source:
+                    type: esql
+                    query: |
+                      SET unmapped_fields="nullify";
+                      FROM {{ consts.metrics_index }}
+                      | WHERE @timestamp >= ?_tstart AND @timestamp <= ?_tend AND process_cpu_usage_ratio IS NOT NULL
+                      | STATS cpu = AVG(process_cpu_usage_ratio) BY service, @timestamp = BUCKET(@timestamp, 1 minute)
+                  x: { column: "@timestamp" }
+                  y:
+                    - column: cpu
+                  breakdown_by: { column: service }
+
+  - name: get_go_dashboard
+    type: kibana.request
+    on-failure:
+      continue: true
+    with:
+      method: GET
+      path: /api/dashboards/auto-prom-dashboard-go
+      headers:
+        Elastic-Api-Version: "2023-10-31"
+
+  - name: upsert_go_dashboard
+    type: kibana.request
+    # Create only when GET missed the dashboard (preserve user edits)
+    if: "steps.get_go_dashboard.error.message: HTTP*404*"
+    on-failure:
+      continue: true
+    with:
+      method: PUT
+      path: /api/dashboards/auto-prom-dashboard-go
+      body:
+        title: "Auto: Prometheus Go Goroutines"
+        description: "Managed PRW — custom_content goroutine scorecards + flow + gradient area"
+        time_range:
+          from: now-15m
+          to: now
+        options:
+          auto_apply_filters: true
+          hide_panel_titles: false
+          hide_panel_borders: false
+          use_margins: true
+          sync_colors: true
+          sync_tooltips: true
+          sync_cursor: true
+        filters: []
+        tags: []
+        pinned_panels: []
+        panels:
+          - id: sre-briefing
+            type: markdown
+            grid: { x: 0, y: 0, w: 48, h: 8 }
+            config:
+              title: SRE day-one briefing
+              content: |
+                ### Auto: Prometheus Go
+                Custom ES|QL goroutine scorecards + scrape→PRW flow, then goroutines
+                as gradient area by job (service label absent on go_*).
+                Daily workflow refreshes this briefing with live signals.
+                _Owned by prometheus-auto-dashboards_
+          - id: go-health-cards
+            type: custom_content
+            grid: { x: 0, y: 8, w: 48, h: 12 }
+            config:
+              title: "Goroutine scorecards by job"
+              template: |
+                
+                <style>
+                  .board { display: flex; gap: var(--cc-space-m); flex-wrap: wrap; }
+                  .card {
+                    flex: 1; min-width: 200px;
+                    background: var(--cc-color-surface);
+                    border: 1px solid var(--cc-color-border);
+                    border-left: 4px solid var(--cc-vis-0);
+                    border-radius: var(--cc-radius);
+                    padding: var(--cc-space-m);
+                  }
+                  .card.bad { border-left-color: var(--cc-color-danger); }
+                  .card.warn { border-left-color: var(--cc-color-warning); }
+                  .name { font-weight: 600; font-size: 0.95rem; margin-bottom: var(--cc-space-xs); }
+                  .pct { font-size: 2.25rem; line-height: 1.1; font-weight: 700; letter-spacing: -0.02em; }
+                  .meta { opacity: 0.7; font-size: 0.85rem; margin-top: var(--cc-space-xs); }
+                  .badge {
+                    display: inline-block; margin-top: var(--cc-space-s);
+                    padding: 2px 10px; border-radius: var(--cc-radius-s);
+                    background: var(--cc-vis-0); color: var(--cc-color-background);
+                    font-size: 0.72rem; font-weight: 700; letter-spacing: 0.04em;
+                  }
+                  .badge.bad { background: var(--cc-color-danger); }
+                  .badge.warn { background: var(--cc-color-warning); color: var(--cc-color-background); }
+                  .empty { opacity: 0.65; padding: var(--cc-space-l); }
+                </style>
+
+                {{ "{% if rows.size == 0 %}" }}
+                  <p class="empty">No Go runtime samples for the selected time range.</p>
+                {{ "{% else %}" }}
+                <div class="board">
+                {{ "{% for row in rows %}" }}
+                  <div class="card {{ '{% if row["goroutines"].value > 500 %}' }}bad{{ '{% elsif row["goroutines"].value > 200 %}' }}warn{{ "{% endif %}" }}">
+                    <div class="name">{{ "{{" }} row["job"].value {{ "}}" }}</div>
+                    <div class="pct">{{ "{{" }} row["goroutines"].value {{ "}}" }}</div>
+                    <div class="meta">{{ "{{" }} row["samples"].value {{ "}}" }} samples · go_goroutines</div>
+                    <span class="badge {{ '{% if row["goroutines"].value > 500 %}' }}bad{{ '{% elsif row["goroutines"].value > 200 %}' }}warn{{ "{% endif %}" }}">
+                      {{ '{% if row["goroutines"].value > 500 %}' }}HIGH{{ '{% elsif row["goroutines"].value > 200 %}' }}WATCH{{ "{% else %}" }}OK{{ "{% endif %}" }}
+                    </span>
+                  </div>
+                {{ "{% endfor %}" }}
+                </div>
+                {{ "{% endif %}" }}
+                
+              esql_query:
+                - |
+                  SET unmapped_fields="nullify";
+                  FROM {{ consts.metrics_index }}
+                  | WHERE @timestamp >= ?_tstart AND @timestamp <= ?_tend AND go_goroutines IS NOT NULL
+                  | STATS goroutines = ROUND(AVG(go_goroutines), 0), samples = COUNT(*) BY job
+                  | SORT goroutines DESC
+          - id: prom-flow
+            type: custom_content
+            grid: { x: 0, y: 20, w: 48, h: 6 }
+            config:
+              title: "Scrape → Managed PRW → Elastic"
+              template: |
+                
+                <style>
+                  .flow {
+                    display: flex; align-items: center; justify-content: space-between;
+                    gap: var(--cc-space-m); padding: var(--cc-space-m);
+                    background: var(--cc-color-surface); border-radius: var(--cc-radius);
+                    border: 1px solid var(--cc-color-border);
+                  }
+                  .col { flex: 1; text-align: center; }
+                  .label {
+                    font-size: 0.7rem; letter-spacing: 0.08em; text-transform: uppercase;
+                    opacity: 0.65; margin-bottom: var(--cc-space-s);
+                  }
+                  .node {
+                    display: inline-block; padding: var(--cc-space-s) var(--cc-space-m);
+                    background: var(--cc-color-background); border: 1px solid var(--cc-color-border);
+                    border-radius: var(--cc-radius-s); font-weight: 600; font-size: 0.9rem;
+                  }
+                  .node.accent { border-color: var(--cc-vis-0); box-shadow: 0 0 0 1px var(--cc-vis-0); }
+                  .arrow { opacity: 0.45; font-size: 1.4rem; }
+                  .sub { margin-top: var(--cc-space-xs); font-size: 0.75rem; opacity: 0.65; }
+                </style>
+                <div class="flow">
+                  <div class="col">
+                    <div class="label">Prometheus scrape</div>
+                    <div class="node">demo-exporter · apps</div>
+                    <div class="sub">:8000 /metrics</div>
+                  </div>
+                  <div class="arrow">→</div>
+                  <div class="col">
+                    <div class="label">Edge</div>
+                    <div class="node accent">Managed PRW</div>
+                    <div class="sub">remote_write</div>
+                  </div>
+                  <div class="arrow">→</div>
+                  <div class="col">
+                    <div class="label">Observability</div>
+                    <div class="node">Elastic</div>
+                    <div class="sub">{{ consts.metrics_index }}</div>
+                  </div>
+                </div>
+                
+          - id: go
+            type: vis
+            grid: { x: 0, y: 26, w: 48, h: 18 }
+            config:
+              type: xy
+              title: Go goroutines by job
+              legend:
+                visibility: visible
+                placement: outside
+                position: bottom
+              styling:
+                interpolation: linear
+                points: { visibility: hidden }
+                areas: { fill_opacity: 0.7, fill: gradient }
+                overlays:
+                  current_time_marker: { visible: true }
+              axis:
+                y:
+                  title: { text: goroutines, visible: true }
+                  grid: { visible: true }
+                x:
+                  title: { text: "", visible: false }
+                  grid: { visible: false }
+              layers:
+                - type: area
+                  data_source:
+                    type: esql
+                    query: |
+                      SET unmapped_fields="nullify";
+                      FROM {{ consts.metrics_index }}
+                      | WHERE @timestamp >= ?_tstart AND @timestamp <= ?_tend AND go_goroutines IS NOT NULL
+                      | STATS goroutines = AVG(go_goroutines) BY job, @timestamp = BUCKET(@timestamp, 1 minute)
+                  x: { column: "@timestamp" }
+                  y:
+                    - column: goroutines
+                  breakdown_by: { column: job }
+
+  # Showcase board — workflow-owned (fixed id). Do not rely on upsert scripts.
+  - name: get_health_monitor
+    type: kibana.request
+    on-failure:
+      continue: true
+    with:
+      method: GET
+      path: /api/dashboards/auto-prom-dashboard-health-monitor
+      headers:
+        Elastic-Api-Version: "2023-10-31"
+
+  - name: upsert_health_monitor
+    type: kibana.request
+    # Create only when GET missed the dashboard (preserve user edits)
+    if: "steps.get_health_monitor.error.message: HTTP*404*"
+    on-failure:
+      continue: true
+    with:
+      method: PUT
+      path: /api/dashboards/auto-prom-dashboard-health-monitor
+      body:
+        title: "Auto: Prometheus Health Monitor"
+        description: "Custom ES|QL Panels (HTML/CSS + Liquid) SLO cards + flow + Lens gradient area/bars — owned by prometheus-auto-dashboards"
+        time_range:
+          from: now-15m
+          to: now
+        options:
+          auto_apply_filters: true
+          hide_panel_titles: false
+          hide_panel_borders: false
+          use_margins: true
+          sync_colors: true
+          sync_tooltips: true
+          sync_cursor: true
+        filters: []
+        tags: []
+        pinned_panels: []
+        panels:
+          - id: health-cards
+            type: custom_content
+            grid: { x: 0, y: 0, w: 48, h: 14 }
+            config:
+              title: "Service SLO cards (availability)"
+              template: |
+                
+                <style>
+                  .board { display: flex; gap: var(--cc-space-m); flex-wrap: wrap; }
+                  .card {
+                    flex: 1; min-width: 200px;
+                    background: var(--cc-color-surface);
+                    border: 1px solid var(--cc-color-border);
+                    border-left: 4px solid var(--cc-vis-0);
+                    border-radius: var(--cc-radius);
+                    padding: var(--cc-space-m);
+                  }
+                  .card.bad { border-left-color: var(--cc-color-danger); }
+                  .card.warn { border-left-color: var(--cc-color-warning); }
+                  .name { font-weight: 600; font-size: 0.95rem; margin-bottom: var(--cc-space-xs); }
+                  .pct { font-size: 2.25rem; line-height: 1.1; font-weight: 700; letter-spacing: -0.02em; }
+                  .meta { opacity: 0.7; font-size: 0.85rem; margin-top: var(--cc-space-xs); }
+                  .badge {
+                    display: inline-block; margin-top: var(--cc-space-s);
+                    padding: 2px 10px; border-radius: var(--cc-radius-s);
+                    background: var(--cc-vis-0); color: var(--cc-color-background);
+                    font-size: 0.72rem; font-weight: 700; letter-spacing: 0.04em;
+                  }
+                  .badge.bad { background: var(--cc-color-danger); }
+                  .badge.warn { background: var(--cc-color-warning); color: var(--cc-color-background); }
+                  .empty { opacity: 0.65; padding: var(--cc-space-l); }
+                </style>
+                {{ "{% if rows.size == 0 %}" }}
+                  <p class="empty">No HTTP samples in range — SLO cards need Prom request traffic.</p>
+                {{ "{% else %}" }}
+                <div class="board">
+                {{ "{% for row in rows %}" }}
+                  <div class="card {{ '{% if row["sli_pct"].value < row["target"].value %}' }}bad{{ '{% elsif row["sli_pct"].value < 99.99 %}' }}warn{{ "{% endif %}" }}">
+                    <div class="name">{{ "{{" }} row["service"].value {{ "}}" }}</div>
+                    <div class="pct">{{ "{{" }} row["sli_pct"].value {{ "}}" }}%</div>
+                    <div class="meta">SLO target {{ "{{" }} row["target"].value {{ "}}" }}% · {{ "{{" }} row["errors"].value {{ "}}" }} 5xx · {{ "{{" }} row["total"].value {{ "}}" }} samples</div>
+                    <span class="badge {{ '{% if row["sli_pct"].value < row["target"].value %}' }}bad{{ '{% elsif row["sli_pct"].value < 99.99 %}' }}warn{{ "{% endif %}" }}">
+                      {{ '{% if row["sli_pct"].value < row["target"].value %}' }}VIOLATED{{ '{% elsif row["sli_pct"].value < 99.99 %}' }}WATCH{{ "{% else %}" }}HEALTHY{{ "{% endif %}" }}
+                    </span>
+                  </div>
+                {{ "{% endfor %}" }}
+                </div>
+                {{ "{% endif %}" }}
+                
+              esql_query:
+                - |
+                  SET unmapped_fields="nullify";
+                  FROM {{ consts.metrics_index }}
+                  | WHERE @timestamp >= ?_tstart AND @timestamp <= ?_tend AND http_requests_total IS NOT NULL
+                  | STATS
+                      total = COUNT(*),
+                      good = COUNT(*) WHERE NOT status LIKE "5*",
+                      errors = COUNT(*) WHERE status LIKE "5*"
+                    BY service
+                  | EVAL sli_pct = ROUND(100.0 * good / total, 3)
+                  | EVAL target = 99.9
+                  | EVAL error_budget_remaining = ROUND(sli_pct - target, 3)
+                  | SORT sli_pct ASC
+          - id: prom-flow
+            type: custom_content
+            grid: { x: 0, y: 14, w: 48, h: 8 }
+            config:
+              title: "Scrape → Managed PRW → Elastic"
+              template: |
+                
+                <style>
+                  .flow {
+                    display: flex; align-items: center; justify-content: space-between;
+                    gap: var(--cc-space-m); padding: var(--cc-space-m);
+                    background: var(--cc-color-surface); border-radius: var(--cc-radius);
+                    border: 1px solid var(--cc-color-border);
+                  }
+                  .col { flex: 1; text-align: center; }
+                  .label {
+                    font-size: 0.7rem; letter-spacing: 0.08em; text-transform: uppercase;
+                    opacity: 0.65; margin-bottom: var(--cc-space-s);
+                  }
+                  .node {
+                    display: inline-block; padding: var(--cc-space-s) var(--cc-space-m);
+                    background: var(--cc-color-background); border: 1px solid var(--cc-color-border);
+                    border-radius: var(--cc-radius-s); font-weight: 600; font-size: 0.9rem;
+                  }
+                  .node.accent { border-color: var(--cc-vis-0); box-shadow: 0 0 0 1px var(--cc-vis-0); }
+                  .arrow { opacity: 0.45; font-size: 1.4rem; }
+                  .sub { margin-top: var(--cc-space-xs); font-size: 0.75rem; opacity: 0.65; }
+                </style>
+                <div class="flow">
+                  <div class="col">
+                    <div class="label">Prometheus scrape</div>
+                    <div class="node">demo-exporter · apps</div>
+                    <div class="sub">:8000 /metrics</div>
+                  </div>
+                  <div class="arrow">→</div>
+                  <div class="col">
+                    <div class="label">Edge</div>
+                    <div class="node accent">Managed PRW</div>
+                    <div class="sub">remote_write</div>
+                  </div>
+                  <div class="arrow">→</div>
+                  <div class="col">
+                    <div class="label">Observability</div>
+                    <div class="node">Elastic</div>
+                    <div class="sub">{{ consts.metrics_index }}</div>
+                  </div>
+                </div>
+                
+          - id: http-rate
+            type: vis
+            grid: { x: 0, y: 22, w: 24, h: 16 }
+            config:
+              type: xy
+              title: Request volume over time
+              legend:
+                visibility: visible
+                placement: outside
+                position: bottom
+              styling:
+                interpolation: linear
+                points: { visibility: hidden }
+                areas: { fill_opacity: 0.7, fill: gradient }
+                overlays:
+                  current_time_marker: { visible: true }
+              axis:
+                y:
+                  title: { text: req/s, visible: true }
+                  grid: { visible: true }
+                x:
+                  title: { text: "", visible: false }
+                  grid: { visible: false }
+              layers:
+                - type: area
+                  data_source:
+                    type: esql
+                    query: |
+                      SET unmapped_fields="nullify";
+                      TS {{ consts.metrics_index }}
+                      | WHERE @timestamp >= ?_tstart AND @timestamp <= ?_tend AND http_requests_total IS NOT NULL
+                      | STATS request_rate = SUM(RATE(http_requests_total)) BY service, @timestamp = BUCKET(@timestamp, 1 minute)
+                  x: { column: "@timestamp" }
+                  y:
+                    - column: request_rate
+                  breakdown_by: { column: service }
+          - id: http-5xx
+            type: vis
+            grid: { x: 24, y: 22, w: 24, h: 16 }
+            config:
+              type: xy
+              title: Server errors (5xx) over time
+              legend:
+                visibility: visible
+                placement: outside
+                position: bottom
+              styling:
+                points: { visibility: hidden }
+              axis:
+                y:
+                  title: { text: 5xx/s, visible: true }
+                  grid: { visible: true }
+                x:
+                  title: { text: "", visible: false }
+                  grid: { visible: false }
+              layers:
+                - type: bar
+                  data_source:
+                    type: esql
+                    query: |
+                      SET unmapped_fields="nullify";
+                      TS {{ consts.metrics_index }}
+                      | WHERE @timestamp >= ?_tstart AND @timestamp <= ?_tend AND http_requests_total IS NOT NULL AND status LIKE "5*"
+                      | STATS error_rate = SUM(RATE(http_requests_total)) BY service, @timestamp = BUCKET(@timestamp, 1 minute)
+                  x: { column: "@timestamp" }
+                  y:
+                    - column: error_rate
+                  breakdown_by: { column: service }
+
+
+  - name: get_business_auth
+    type: kibana.request
+    on-failure:
+      continue: true
+    with:
+      method: GET
+      path: /api/dashboards/auto-prom-dashboard-auth
+      headers:
+        Elastic-Api-Version: "2023-10-31"
+
+  - name: upsert_business_auth
+    type: kibana.request
+    # Create only when GET missed the dashboard (preserve user edits)
+    if: "steps.get_business_auth.error.message: HTTP*404*"
+    on-failure:
+      continue: true
+    with:
+      method: PUT
+      path: /api/dashboards/auto-prom-dashboard-auth
+      body:
+        title: "Auto: Prometheus Business Auth & Logins"
+        description: "Managed PRW — login / failure scorecards + flow + gradient area — owned by prometheus-auto-dashboards"
+        time_range:
+          from: now-15m
+          to: now
+        options:
+          auto_apply_filters: true
+          hide_panel_titles: false
+          hide_panel_borders: false
+          use_margins: true
+          sync_colors: true
+          sync_tooltips: true
+          sync_cursor: true
+        filters: []
+        tags: []
+        pinned_panels: []
+        panels:
+          - id: sre-briefing
+            type: markdown
+            grid: { x: 0, y: 0, w: 48, h: 8 }
+            config:
+              title: SRE day-one briefing
+              content: |
+                ### Auto: Prometheus Business Auth & Logins
+                Logins and login failures by service from Managed PRW.
+                Custom ES|QL scorecards + scrape→PRW flow + gradient area.
+                _Owned by prometheus-auto-dashboards_
+          - id: biz-cards
+            type: custom_content
+            grid: { x: 0, y: 8, w: 48, h: 12 }
+            config:
+              title: "Login health cards"
+              template: |
+                
+
+                <style>
+                  .board { display: flex; gap: var(--cc-space-m); flex-wrap: wrap; }
+                  .card {
+                    flex: 1; min-width: 180px;
+                    background: var(--cc-color-surface);
+                    border: 1px solid var(--cc-color-border);
+                    border-left: 4px solid var(--cc-vis-0);
+                    border-radius: var(--cc-radius);
+                    padding: var(--cc-space-m);
+                  }
+                  .card.bad { border-left-color: var(--cc-color-danger); }
+                  .card.warn { border-left-color: var(--cc-color-warning); }
+                  .name { font-weight: 600; font-size: 0.95rem; margin-bottom: var(--cc-space-xs); }
+                  .pct { font-size: 2rem; line-height: 1.1; font-weight: 700; letter-spacing: -0.02em; }
+                  .meta { opacity: 0.7; font-size: 0.85rem; margin-top: var(--cc-space-xs); }
+                  .badge {
+                    display: inline-block; margin-top: var(--cc-space-s);
+                    padding: 2px 10px; border-radius: var(--cc-radius-s);
+                    background: var(--cc-vis-0); color: var(--cc-color-background);
+                    font-size: 0.72rem; font-weight: 700; letter-spacing: 0.04em;
+                  }
+                  .badge.bad { background: var(--cc-color-danger); }
+                  .empty { opacity: 0.65; padding: var(--cc-space-l); }
+                </style>
+
+
+                {{ "{% if rows.size == 0 %}" }}
+                  <p class="empty">No login samples in range.</p>
+                {{ "{% else %}" }}
+                <div class="board">
+                {{ "{% for row in rows %}" }}
+                  <div class="card {{ '{% if row["fail_pct"].value > 10 %}' }}bad{{ '{% elsif row["fail_pct"].value > 3 %}' }}warn{{ "{% endif %}" }}">
+                    <div class="name">{{ "{{" }} row["service"].value {{ "}}" }}</div>
+                    <div class="pct">{{ "{{" }} row["logins"].value {{ "}}" }}</div>
+                    <div class="meta">{{ "{{" }} row["failures"].value {{ "}}" }} failures · {{ "{{" }} row["fail_pct"].value {{ "}}" }}% fail rate</div>
+                    <span class="badge {{ '{% if row["fail_pct"].value > 10 %}' }}bad{{ "{% endif %}" }}">{{ '{% if row["fail_pct"].value > 10 %}' }}HOT{{ "{% else %}" }}OK{{ "{% endif %}" }}</span>
+                  </div>
+                {{ "{% endfor %}" }}
+                </div>
+                {{ "{% endif %}" }}
+
+                
+              esql_query:
+                - |
+                  SET unmapped_fields="nullify";
+                  FROM {{ consts.metrics_index }}
+                  | WHERE @timestamp >= ?_tstart AND @timestamp <= ?_tend AND (user_logins_total IS NOT NULL OR user_login_failures_total IS NOT NULL)
+                  | STATS logins = COUNT(*) WHERE user_logins_total IS NOT NULL,
+                          failures = COUNT(*) WHERE user_login_failures_total IS NOT NULL
+                    BY service
+                  | EVAL fail_pct = ROUND(100.0 * failures / (logins + failures + 0.001), 1)
+                  | SORT fail_pct DESC
+          - id: prom-flow
+            type: custom_content
+            grid: { x: 0, y: 20, w: 48, h: 6 }
+            config:
+              title: "Scrape → Managed PRW → Elastic"
+
+              template: |
+                
+                <style>
+                  .flow {
+                    display: flex; align-items: center; justify-content: space-between;
+                    gap: var(--cc-space-m); padding: var(--cc-space-m);
+                    background: var(--cc-color-surface); border-radius: var(--cc-radius);
+                    border: 1px solid var(--cc-color-border);
+                  }
+                  .col { flex: 1; text-align: center; }
+                  .label {
+                    font-size: 0.7rem; letter-spacing: 0.08em; text-transform: uppercase;
+                    opacity: 0.65; margin-bottom: var(--cc-space-s);
+                  }
+                  .node {
+                    display: inline-block; padding: var(--cc-space-s) var(--cc-space-m);
+                    background: var(--cc-color-background); border: 1px solid var(--cc-color-border);
+                    border-radius: var(--cc-radius-s); font-weight: 600; font-size: 0.9rem;
+                  }
+                  .node.accent { border-color: var(--cc-vis-0); box-shadow: 0 0 0 1px var(--cc-vis-0); }
+                  .arrow { opacity: 0.45; font-size: 1.4rem; }
+                  .sub { margin-top: var(--cc-space-xs); font-size: 0.75rem; opacity: 0.65; }
+                </style>
+                <div class="flow">
+                  <div class="col">
+                    <div class="label">Prometheus scrape</div>
+                    <div class="node">demo-exporter · apps</div>
+                    <div class="sub">:8000 /metrics</div>
+                  </div>
+                  <div class="arrow">→</div>
+                  <div class="col">
+                    <div class="label">Edge</div>
+                    <div class="node accent">Managed PRW</div>
+                    <div class="sub">remote_write</div>
+                  </div>
+                  <div class="arrow">→</div>
+                  <div class="col">
+                    <div class="label">Observability</div>
+                    <div class="node">Elastic</div>
+                    <div class="sub">{{ consts.metrics_index }}</div>
+                  </div>
+                </div>
+                
+
+          - id: biz-rate
+            type: vis
+            grid: { x: 0, y: 26, w: 24, h: 16 }
+            config:
+              type: xy
+              title: Login rate by service
+              legend:
+                visibility: visible
+                placement: outside
+                position: bottom
+              styling:
+                interpolation: linear
+                points: { visibility: hidden }
+                areas: { fill_opacity: 0.7, fill: gradient }
+                overlays:
+                  current_time_marker: { visible: true }
+              axis:
+                y:
+                  title: { text: login_rate, visible: true }
+                  grid: { visible: true }
+                x:
+                  title: { text: "", visible: false }
+                  grid: { visible: false }
+              layers:
+                - type: area
+                  data_source:
+                    type: esql
+                    query: |
+                      SET unmapped_fields="nullify";
+                      TS {{ consts.metrics_index }}
+                      | WHERE @timestamp >= ?_tstart AND @timestamp <= ?_tend AND user_logins_total IS NOT NULL
+                      | STATS login_rate = SUM(RATE(user_logins_total)) BY service, @timestamp = BUCKET(@timestamp, 1 minute)
+                  x: { column: "@timestamp" }
+                  y:
+                    - column: login_rate
+                  breakdown_by: { column: service }
+
+          - id: biz-fail
+            type: vis
+            grid: { x: 24, y: 26, w: 24, h: 16 }
+            config:
+              type: xy
+              title: Login failures by service
+              legend:
+                visibility: visible
+                placement: outside
+                position: bottom
+              styling:
+                points: { visibility: hidden }
+              axis:
+                y:
+                  title: { text: fail_rate, visible: true }
+                  grid: { visible: true }
+                x:
+                  title: { text: "", visible: false }
+                  grid: { visible: false }
+              layers:
+                - type: bar
+                  data_source:
+                    type: esql
+                    query: |
+                      SET unmapped_fields="nullify";
+                      TS {{ consts.metrics_index }}
+                      | WHERE @timestamp >= ?_tstart AND @timestamp <= ?_tend AND user_login_failures_total IS NOT NULL
+                      | STATS fail_rate = SUM(RATE(user_login_failures_total)) BY service, @timestamp = BUCKET(@timestamp, 1 minute)
+                  x: { column: "@timestamp" }
+                  y:
+                    - column: fail_rate
+                  breakdown_by: { column: service }
+
+
+  - name: get_business_purchases
+    type: kibana.request
+    on-failure:
+      continue: true
+    with:
+      method: GET
+      path: /api/dashboards/auto-prom-dashboard-purchases
+      headers:
+        Elastic-Api-Version: "2023-10-31"
+
+  - name: upsert_business_purchases
+    type: kibana.request
+    # Create only when GET missed the dashboard (preserve user edits)
+    if: "steps.get_business_purchases.error.message: HTTP*404*"
+    on-failure:
+      continue: true
+    with:
+      method: PUT
+      path: /api/dashboards/auto-prom-dashboard-purchases
+      body:
+        title: "Auto: Prometheus Business Purchases & Revenue"
+        description: "Managed PRW — purchase / payment-failure scorecards + flow + gradient area — owned by prometheus-auto-dashboards"
+        time_range:
+          from: now-15m
+          to: now
+        options:
+          auto_apply_filters: true
+          hide_panel_titles: false
+          hide_panel_borders: false
+          use_margins: true
+          sync_colors: true
+          sync_tooltips: true
+          sync_cursor: true
+        filters: []
+        tags: []
+        pinned_panels: []
+        panels:
+          - id: sre-briefing
+            type: markdown
+            grid: { x: 0, y: 0, w: 48, h: 8 }
+            config:
+              title: SRE day-one briefing
+              content: |
+                ### Auto: Prometheus Business Purchases & Revenue
+                Purchases and payment failures from Managed PRW.
+                Custom ES|QL scorecards + scrape→PRW flow + gradient area.
+                _Owned by prometheus-auto-dashboards_
+          - id: biz-cards
+            type: custom_content
+            grid: { x: 0, y: 8, w: 48, h: 12 }
+            config:
+              title: "Purchase health cards"
+              template: |
+                
+
+                <style>
+                  .board { display: flex; gap: var(--cc-space-m); flex-wrap: wrap; }
+                  .card {
+                    flex: 1; min-width: 180px;
+                    background: var(--cc-color-surface);
+                    border: 1px solid var(--cc-color-border);
+                    border-left: 4px solid var(--cc-vis-0);
+                    border-radius: var(--cc-radius);
+                    padding: var(--cc-space-m);
+                  }
+                  .card.bad { border-left-color: var(--cc-color-danger); }
+                  .card.warn { border-left-color: var(--cc-color-warning); }
+                  .name { font-weight: 600; font-size: 0.95rem; margin-bottom: var(--cc-space-xs); }
+                  .pct { font-size: 2rem; line-height: 1.1; font-weight: 700; letter-spacing: -0.02em; }
+                  .meta { opacity: 0.7; font-size: 0.85rem; margin-top: var(--cc-space-xs); }
+                  .badge {
+                    display: inline-block; margin-top: var(--cc-space-s);
+                    padding: 2px 10px; border-radius: var(--cc-radius-s);
+                    background: var(--cc-vis-0); color: var(--cc-color-background);
+                    font-size: 0.72rem; font-weight: 700; letter-spacing: 0.04em;
+                  }
+                  .badge.bad { background: var(--cc-color-danger); }
+                  .empty { opacity: 0.65; padding: var(--cc-space-l); }
+                </style>
+
+
+                {{ "{% if rows.size == 0 %}" }}
+                  <p class="empty">No purchase samples in range.</p>
+                {{ "{% else %}" }}
+                <div class="board">
+                {{ "{% for row in rows %}" }}
+                  <div class="card {{ '{% if row["fail_pct"].value > 8 %}' }}bad{{ '{% elsif row["fail_pct"].value > 2 %}' }}warn{{ "{% endif %}" }}">
+                    <div class="name">{{ "{{" }} row["service"].value {{ "}}" }}</div>
+                    <div class="pct">{{ "{{" }} row["purchases"].value {{ "}}" }}</div>
+                    <div class="meta">{{ "{{" }} row["failures"].value {{ "}}" }} payment fails · {{ "{{" }} row["fail_pct"].value {{ "}}" }}%</div>
+                    <span class="badge {{ '{% if row["fail_pct"].value > 8 %}' }}bad{{ "{% endif %}" }}">{{ '{% if row["fail_pct"].value > 8 %}' }}HOT{{ "{% else %}" }}OK{{ "{% endif %}" }}</span>
+                  </div>
+                {{ "{% endfor %}" }}
+                </div>
+                {{ "{% endif %}" }}
+
+                
+              esql_query:
+                - |
+                  SET unmapped_fields="nullify";
+                  FROM {{ consts.metrics_index }}
+                  | WHERE @timestamp >= ?_tstart AND @timestamp <= ?_tend AND (purchases_total IS NOT NULL OR payment_failures_total IS NOT NULL)
+                  | STATS purchases = COUNT(*) WHERE purchases_total IS NOT NULL,
+                          failures = COUNT(*) WHERE payment_failures_total IS NOT NULL
+                    BY service
+                  | EVAL fail_pct = ROUND(100.0 * failures / (purchases + failures + 0.001), 1)
+                  | SORT fail_pct DESC
+          - id: prom-flow
+            type: custom_content
+            grid: { x: 0, y: 20, w: 48, h: 6 }
+            config:
+              title: "Scrape → Managed PRW → Elastic"
+
+              template: |
+                
+                <style>
+                  .flow {
+                    display: flex; align-items: center; justify-content: space-between;
+                    gap: var(--cc-space-m); padding: var(--cc-space-m);
+                    background: var(--cc-color-surface); border-radius: var(--cc-radius);
+                    border: 1px solid var(--cc-color-border);
+                  }
+                  .col { flex: 1; text-align: center; }
+                  .label {
+                    font-size: 0.7rem; letter-spacing: 0.08em; text-transform: uppercase;
+                    opacity: 0.65; margin-bottom: var(--cc-space-s);
+                  }
+                  .node {
+                    display: inline-block; padding: var(--cc-space-s) var(--cc-space-m);
+                    background: var(--cc-color-background); border: 1px solid var(--cc-color-border);
+                    border-radius: var(--cc-radius-s); font-weight: 600; font-size: 0.9rem;
+                  }
+                  .node.accent { border-color: var(--cc-vis-0); box-shadow: 0 0 0 1px var(--cc-vis-0); }
+                  .arrow { opacity: 0.45; font-size: 1.4rem; }
+                  .sub { margin-top: var(--cc-space-xs); font-size: 0.75rem; opacity: 0.65; }
+                </style>
+                <div class="flow">
+                  <div class="col">
+                    <div class="label">Prometheus scrape</div>
+                    <div class="node">demo-exporter · apps</div>
+                    <div class="sub">:8000 /metrics</div>
+                  </div>
+                  <div class="arrow">→</div>
+                  <div class="col">
+                    <div class="label">Edge</div>
+                    <div class="node accent">Managed PRW</div>
+                    <div class="sub">remote_write</div>
+                  </div>
+                  <div class="arrow">→</div>
+                  <div class="col">
+                    <div class="label">Observability</div>
+                    <div class="node">Elastic</div>
+                    <div class="sub">{{ consts.metrics_index }}</div>
+                  </div>
+                </div>
+                
+
+          - id: biz-rate
+            type: vis
+            grid: { x: 0, y: 26, w: 24, h: 16 }
+            config:
+              type: xy
+              title: Purchase rate by service
+              legend:
+                visibility: visible
+                placement: outside
+                position: bottom
+              styling:
+                interpolation: linear
+                points: { visibility: hidden }
+                areas: { fill_opacity: 0.7, fill: gradient }
+                overlays:
+                  current_time_marker: { visible: true }
+              axis:
+                y:
+                  title: { text: purchase_rate, visible: true }
+                  grid: { visible: true }
+                x:
+                  title: { text: "", visible: false }
+                  grid: { visible: false }
+              layers:
+                - type: area
+                  data_source:
+                    type: esql
+                    query: |
+                      SET unmapped_fields="nullify";
+                      TS {{ consts.metrics_index }}
+                      | WHERE @timestamp >= ?_tstart AND @timestamp <= ?_tend AND purchases_total IS NOT NULL
+                      | STATS purchase_rate = SUM(RATE(purchases_total)) BY service, @timestamp = BUCKET(@timestamp, 1 minute)
+                  x: { column: "@timestamp" }
+                  y:
+                    - column: purchase_rate
+                  breakdown_by: { column: service }
+
+          - id: biz-fail
+            type: vis
+            grid: { x: 24, y: 26, w: 24, h: 16 }
+            config:
+              type: xy
+              title: Payment failures by service
+              legend:
+                visibility: visible
+                placement: outside
+                position: bottom
+              styling:
+                points: { visibility: hidden }
+              axis:
+                y:
+                  title: { text: fail_rate, visible: true }
+                  grid: { visible: true }
+                x:
+                  title: { text: "", visible: false }
+                  grid: { visible: false }
+              layers:
+                - type: bar
+                  data_source:
+                    type: esql
+                    query: |
+                      SET unmapped_fields="nullify";
+                      TS {{ consts.metrics_index }}
+                      | WHERE @timestamp >= ?_tstart AND @timestamp <= ?_tend AND payment_failures_total IS NOT NULL
+                      | STATS fail_rate = SUM(RATE(payment_failures_total)) BY service, @timestamp = BUCKET(@timestamp, 1 minute)
+                  x: { column: "@timestamp" }
+                  y:
+                    - column: fail_rate
+                  breakdown_by: { column: service }
+
+
+  - name: get_business_signups
+    type: kibana.request
+    on-failure:
+      continue: true
+    with:
+      method: GET
+      path: /api/dashboards/auto-prom-dashboard-signups
+      headers:
+        Elastic-Api-Version: "2023-10-31"
+
+  - name: upsert_business_signups
+    type: kibana.request
+    # Create only when GET missed the dashboard (preserve user edits)
+    if: "steps.get_business_signups.error.message: HTTP*404*"
+    on-failure:
+      continue: true
+    with:
+      method: PUT
+      path: /api/dashboards/auto-prom-dashboard-signups
+      body:
+        title: "Auto: Prometheus Business Signups"
+        description: "Managed PRW — signup scorecards + flow + gradient area — owned by prometheus-auto-dashboards"
+        time_range:
+          from: now-15m
+          to: now
+        options:
+          auto_apply_filters: true
+          hide_panel_titles: false
+          hide_panel_borders: false
+          use_margins: true
+          sync_colors: true
+          sync_tooltips: true
+          sync_cursor: true
+        filters: []
+        tags: []
+        pinned_panels: []
+        panels:
+          - id: sre-briefing
+            type: markdown
+            grid: { x: 0, y: 0, w: 48, h: 8 }
+            config:
+              title: SRE day-one briefing
+              content: |
+                ### Auto: Prometheus Business Signups
+                User signups by service from Managed PRW.
+                Custom ES|QL scorecards + scrape→PRW flow + gradient area.
+                _Owned by prometheus-auto-dashboards_
+          - id: biz-cards
+            type: custom_content
+            grid: { x: 0, y: 8, w: 48, h: 12 }
+            config:
+              title: "Signup cards"
+              template: |
+                
+
+                <style>
+                  .board { display: flex; gap: var(--cc-space-m); flex-wrap: wrap; }
+                  .card {
+                    flex: 1; min-width: 180px;
+                    background: var(--cc-color-surface);
+                    border: 1px solid var(--cc-color-border);
+                    border-left: 4px solid var(--cc-vis-0);
+                    border-radius: var(--cc-radius);
+                    padding: var(--cc-space-m);
+                  }
+                  .card.bad { border-left-color: var(--cc-color-danger); }
+                  .card.warn { border-left-color: var(--cc-color-warning); }
+                  .name { font-weight: 600; font-size: 0.95rem; margin-bottom: var(--cc-space-xs); }
+                  .pct { font-size: 2rem; line-height: 1.1; font-weight: 700; letter-spacing: -0.02em; }
+                  .meta { opacity: 0.7; font-size: 0.85rem; margin-top: var(--cc-space-xs); }
+                  .badge {
+                    display: inline-block; margin-top: var(--cc-space-s);
+                    padding: 2px 10px; border-radius: var(--cc-radius-s);
+                    background: var(--cc-vis-0); color: var(--cc-color-background);
+                    font-size: 0.72rem; font-weight: 700; letter-spacing: 0.04em;
+                  }
+                  .badge.bad { background: var(--cc-color-danger); }
+                  .empty { opacity: 0.65; padding: var(--cc-space-l); }
+                </style>
+
+
+                {{ "{% if rows.size == 0 %}" }}
+                  <p class="empty">No signup samples in range.</p>
+                {{ "{% else %}" }}
+                <div class="board">
+                {{ "{% for row in rows %}" }}
+                  <div class="card">
+                    <div class="name">{{ "{{" }} row["service"].value {{ "}}" }}</div>
+                    <div class="pct">{{ "{{" }} row["signups"].value {{ "}}" }}</div>
+                    <div class="meta">signup samples in range</div>
+                    <span class="badge">OK</span>
+                  </div>
+                {{ "{% endfor %}" }}
+                </div>
+                {{ "{% endif %}" }}
+
+                
+              esql_query:
+                - |
+                  SET unmapped_fields="nullify";
+                  FROM {{ consts.metrics_index }}
+                  | WHERE @timestamp >= ?_tstart AND @timestamp <= ?_tend AND user_signups_total IS NOT NULL
+                  | STATS signups = COUNT(*) BY service
+                  | SORT signups DESC
+          - id: prom-flow
+            type: custom_content
+            grid: { x: 0, y: 20, w: 48, h: 6 }
+            config:
+              title: "Scrape → Managed PRW → Elastic"
+
+              template: |
+                
+                <style>
+                  .flow {
+                    display: flex; align-items: center; justify-content: space-between;
+                    gap: var(--cc-space-m); padding: var(--cc-space-m);
+                    background: var(--cc-color-surface); border-radius: var(--cc-radius);
+                    border: 1px solid var(--cc-color-border);
+                  }
+                  .col { flex: 1; text-align: center; }
+                  .label {
+                    font-size: 0.7rem; letter-spacing: 0.08em; text-transform: uppercase;
+                    opacity: 0.65; margin-bottom: var(--cc-space-s);
+                  }
+                  .node {
+                    display: inline-block; padding: var(--cc-space-s) var(--cc-space-m);
+                    background: var(--cc-color-background); border: 1px solid var(--cc-color-border);
+                    border-radius: var(--cc-radius-s); font-weight: 600; font-size: 0.9rem;
+                  }
+                  .node.accent { border-color: var(--cc-vis-0); box-shadow: 0 0 0 1px var(--cc-vis-0); }
+                  .arrow { opacity: 0.45; font-size: 1.4rem; }
+                  .sub { margin-top: var(--cc-space-xs); font-size: 0.75rem; opacity: 0.65; }
+                </style>
+                <div class="flow">
+                  <div class="col">
+                    <div class="label">Prometheus scrape</div>
+                    <div class="node">demo-exporter · apps</div>
+                    <div class="sub">:8000 /metrics</div>
+                  </div>
+                  <div class="arrow">→</div>
+                  <div class="col">
+                    <div class="label">Edge</div>
+                    <div class="node accent">Managed PRW</div>
+                    <div class="sub">remote_write</div>
+                  </div>
+                  <div class="arrow">→</div>
+                  <div class="col">
+                    <div class="label">Observability</div>
+                    <div class="node">Elastic</div>
+                    <div class="sub">{{ consts.metrics_index }}</div>
+                  </div>
+                </div>
+                
+
+          - id: biz-rate
+            type: vis
+            grid: { x: 0, y: 26, w: 48, h: 16 }
+            config:
+              type: xy
+              title: Signup rate by service
+              legend:
+                visibility: visible
+                placement: outside
+                position: bottom
+              styling:
+                interpolation: linear
+                points: { visibility: hidden }
+                areas: { fill_opacity: 0.7, fill: gradient }
+                overlays:
+                  current_time_marker: { visible: true }
+              axis:
+                y:
+                  title: { text: signup_rate, visible: true }
+                  grid: { visible: true }
+                x:
+                  title: { text: "", visible: false }
+                  grid: { visible: false }
+              layers:
+                - type: area
+                  data_source:
+                    type: esql
+                    query: |
+                      SET unmapped_fields="nullify";
+                      TS {{ consts.metrics_index }}
+                      | WHERE @timestamp >= ?_tstart AND @timestamp <= ?_tend AND user_signups_total IS NOT NULL
+                      | STATS signup_rate = SUM(RATE(user_signups_total)) BY service, @timestamp = BUCKET(@timestamp, 1 minute)
+                  x: { column: "@timestamp" }
+                  y:
+                    - column: signup_rate
+                  breakdown_by: { column: service }
+
+
+  - name: get_business_checkout
+    type: kibana.request
+    on-failure:
+      continue: true
+    with:
+      method: GET
+      path: /api/dashboards/auto-prom-dashboard-checkout
+      headers:
+        Elastic-Api-Version: "2023-10-31"
+
+  - name: upsert_business_checkout
+    type: kibana.request
+    # Create only when GET missed the dashboard (preserve user edits)
+    if: "steps.get_business_checkout.error.message: HTTP*404*"
+    on-failure:
+      continue: true
+    with:
+      method: PUT
+      path: /api/dashboards/auto-prom-dashboard-checkout
+      body:
+        title: "Auto: Prometheus Business Checkout KPIs"
+        description: "Managed PRW — checkout / abandon scorecards + flow + gradient area — owned by prometheus-auto-dashboards"
+        time_range:
+          from: now-15m
+          to: now
+        options:
+          auto_apply_filters: true
+          hide_panel_titles: false
+          hide_panel_borders: false
+          use_margins: true
+          sync_colors: true
+          sync_tooltips: true
+          sync_cursor: true
+        filters: []
+        tags: []
+        pinned_panels: []
+        panels:
+          - id: sre-briefing
+            type: markdown
+            grid: { x: 0, y: 0, w: 48, h: 8 }
+            config:
+              title: SRE day-one briefing
+              content: |
+                ### Auto: Prometheus Business Checkout KPIs
+                Orders vs cart abandonments from Managed PRW.
+                Custom ES|QL scorecards + scrape→PRW flow + gradient area.
+                _Owned by prometheus-auto-dashboards_
+          - id: biz-cards
+            type: custom_content
+            grid: { x: 0, y: 8, w: 48, h: 12 }
+            config:
+              title: "Checkout funnel cards"
+              template: |
+                
+
+                <style>
+                  .board { display: flex; gap: var(--cc-space-m); flex-wrap: wrap; }
+                  .card {
+                    flex: 1; min-width: 180px;
+                    background: var(--cc-color-surface);
+                    border: 1px solid var(--cc-color-border);
+                    border-left: 4px solid var(--cc-vis-0);
+                    border-radius: var(--cc-radius);
+                    padding: var(--cc-space-m);
+                  }
+                  .card.bad { border-left-color: var(--cc-color-danger); }
+                  .card.warn { border-left-color: var(--cc-color-warning); }
+                  .name { font-weight: 600; font-size: 0.95rem; margin-bottom: var(--cc-space-xs); }
+                  .pct { font-size: 2rem; line-height: 1.1; font-weight: 700; letter-spacing: -0.02em; }
+                  .meta { opacity: 0.7; font-size: 0.85rem; margin-top: var(--cc-space-xs); }
+                  .badge {
+                    display: inline-block; margin-top: var(--cc-space-s);
+                    padding: 2px 10px; border-radius: var(--cc-radius-s);
+                    background: var(--cc-vis-0); color: var(--cc-color-background);
+                    font-size: 0.72rem; font-weight: 700; letter-spacing: 0.04em;
+                  }
+                  .badge.bad { background: var(--cc-color-danger); }
+                  .empty { opacity: 0.65; padding: var(--cc-space-l); }
+                </style>
+
+
+                {{ "{% if rows.size == 0 %}" }}
+                  <p class="empty">No checkout samples in range.</p>
+                {{ "{% else %}" }}
+                <div class="board">
+                {{ "{% for row in rows %}" }}
+                  <div class="card {{ '{% if row["abandon_pct"].value > 40 %}' }}bad{{ '{% elsif row["abandon_pct"].value > 20 %}' }}warn{{ "{% endif %}" }}">
+                    <div class="name">{{ "{{" }} row["service"].value {{ "}}" }}</div>
+                    <div class="pct">{{ "{{" }} row["orders"].value {{ "}}" }}</div>
+                    <div class="meta">{{ "{{" }} row["abandons"].value {{ "}}" }} abandons · {{ "{{" }} row["abandon_pct"].value {{ "}}" }}%</div>
+                    <span class="badge {{ '{% if row["abandon_pct"].value > 40 %}' }}bad{{ "{% endif %}" }}">{{ '{% if row["abandon_pct"].value > 40 %}' }}HOT{{ "{% else %}" }}OK{{ "{% endif %}" }}</span>
+                  </div>
+                {{ "{% endfor %}" }}
+                </div>
+                {{ "{% endif %}" }}
+
+                
+              esql_query:
+                - |
+                  SET unmapped_fields="nullify";
+                  FROM {{ consts.metrics_index }}
+                  | WHERE @timestamp >= ?_tstart AND @timestamp <= ?_tend AND (checkout_orders_total IS NOT NULL OR cart_abandonments_total IS NOT NULL)
+                  | STATS orders = COUNT(*) WHERE checkout_orders_total IS NOT NULL,
+                          abandons = COUNT(*) WHERE cart_abandonments_total IS NOT NULL
+                    BY service
+                  | EVAL abandon_pct = ROUND(100.0 * abandons / (orders + abandons + 0.001), 1)
+                  | SORT abandon_pct DESC
+          - id: prom-flow
+            type: custom_content
+            grid: { x: 0, y: 20, w: 48, h: 6 }
+            config:
+              title: "Scrape → Managed PRW → Elastic"
+
+              template: |
+                
+                <style>
+                  .flow {
+                    display: flex; align-items: center; justify-content: space-between;
+                    gap: var(--cc-space-m); padding: var(--cc-space-m);
+                    background: var(--cc-color-surface); border-radius: var(--cc-radius);
+                    border: 1px solid var(--cc-color-border);
+                  }
+                  .col { flex: 1; text-align: center; }
+                  .label {
+                    font-size: 0.7rem; letter-spacing: 0.08em; text-transform: uppercase;
+                    opacity: 0.65; margin-bottom: var(--cc-space-s);
+                  }
+                  .node {
+                    display: inline-block; padding: var(--cc-space-s) var(--cc-space-m);
+                    background: var(--cc-color-background); border: 1px solid var(--cc-color-border);
+                    border-radius: var(--cc-radius-s); font-weight: 600; font-size: 0.9rem;
+                  }
+                  .node.accent { border-color: var(--cc-vis-0); box-shadow: 0 0 0 1px var(--cc-vis-0); }
+                  .arrow { opacity: 0.45; font-size: 1.4rem; }
+                  .sub { margin-top: var(--cc-space-xs); font-size: 0.75rem; opacity: 0.65; }
+                </style>
+                <div class="flow">
+                  <div class="col">
+                    <div class="label">Prometheus scrape</div>
+                    <div class="node">demo-exporter · apps</div>
+                    <div class="sub">:8000 /metrics</div>
+                  </div>
+                  <div class="arrow">→</div>
+                  <div class="col">
+                    <div class="label">Edge</div>
+                    <div class="node accent">Managed PRW</div>
+                    <div class="sub">remote_write</div>
+                  </div>
+                  <div class="arrow">→</div>
+                  <div class="col">
+                    <div class="label">Observability</div>
+                    <div class="node">Elastic</div>
+                    <div class="sub">{{ consts.metrics_index }}</div>
+                  </div>
+                </div>
+                
+
+          - id: biz-rate
+            type: vis
+            grid: { x: 0, y: 26, w: 24, h: 16 }
+            config:
+              type: xy
+              title: Checkout order rate by service
+              legend:
+                visibility: visible
+                placement: outside
+                position: bottom
+              styling:
+                interpolation: linear
+                points: { visibility: hidden }
+                areas: { fill_opacity: 0.7, fill: gradient }
+                overlays:
+                  current_time_marker: { visible: true }
+              axis:
+                y:
+                  title: { text: order_rate, visible: true }
+                  grid: { visible: true }
+                x:
+                  title: { text: "", visible: false }
+                  grid: { visible: false }
+              layers:
+                - type: area
+                  data_source:
+                    type: esql
+                    query: |
+                      SET unmapped_fields="nullify";
+                      TS {{ consts.metrics_index }}
+                      | WHERE @timestamp >= ?_tstart AND @timestamp <= ?_tend AND checkout_orders_total IS NOT NULL
+                      | STATS order_rate = SUM(RATE(checkout_orders_total)) BY service, @timestamp = BUCKET(@timestamp, 1 minute)
+                  x: { column: "@timestamp" }
+                  y:
+                    - column: order_rate
+                  breakdown_by: { column: service }
+
+          - id: biz-fail
+            type: vis
+            grid: { x: 24, y: 26, w: 24, h: 16 }
+            config:
+              type: xy
+              title: Cart abandonments by service
+              legend:
+                visibility: visible
+                placement: outside
+                position: bottom
+              styling:
+                points: { visibility: hidden }
+              axis:
+                y:
+                  title: { text: abandon_rate, visible: true }
+                  grid: { visible: true }
+                x:
+                  title: { text: "", visible: false }
+                  grid: { visible: false }
+              layers:
+                - type: bar
+                  data_source:
+                    type: esql
+                    query: |
+                      SET unmapped_fields="nullify";
+                      TS {{ consts.metrics_index }}
+                      | WHERE @timestamp >= ?_tstart AND @timestamp <= ?_tend AND cart_abandonments_total IS NOT NULL
+                      | STATS abandon_rate = SUM(RATE(cart_abandonments_total)) BY service, @timestamp = BUCKET(@timestamp, 1 minute)
+                  x: { column: "@timestamp" }
+                  y:
+                    - column: abandon_rate
+                  breakdown_by: { column: service }
+
+
+  - name: get_business_engagement
+    type: kibana.request
+    on-failure:
+      continue: true
+    with:
+      method: GET
+      path: /api/dashboards/auto-prom-dashboard-engagement
+      headers:
+        Elastic-Api-Version: "2023-10-31"
+
+  - name: upsert_business_engagement
+    type: kibana.request
+    # Create only when GET missed the dashboard (preserve user edits)
+    if: "steps.get_business_engagement.error.message: HTTP*404*"
+    on-failure:
+      continue: true
+    with:
+      method: PUT
+      path: /api/dashboards/auto-prom-dashboard-engagement
+      body:
+        title: "Auto: Prometheus Business Engagement"
+        description: "Managed PRW — product views / search scorecards + flow + gradient area — owned by prometheus-auto-dashboards"
+        time_range:
+          from: now-15m
+          to: now
+        options:
+          auto_apply_filters: true
+          hide_panel_titles: false
+          hide_panel_borders: false
+          use_margins: true
+          sync_colors: true
+          sync_tooltips: true
+          sync_cursor: true
+        filters: []
+        tags: []
+        pinned_panels: []
+        panels:
+          - id: sre-briefing
+            type: markdown
+            grid: { x: 0, y: 0, w: 48, h: 8 }
+            config:
+              title: SRE day-one briefing
+              content: |
+                ### Auto: Prometheus Business Engagement
+                Product views and search queries from Managed PRW.
+                Custom ES|QL scorecards + scrape→PRW flow + gradient area.
+                _Owned by prometheus-auto-dashboards_
+          - id: biz-cards
+            type: custom_content
+            grid: { x: 0, y: 8, w: 48, h: 12 }
+            config:
+              title: "Engagement cards"
+              template: |
+                
+
+                <style>
+                  .board { display: flex; gap: var(--cc-space-m); flex-wrap: wrap; }
+                  .card {
+                    flex: 1; min-width: 180px;
+                    background: var(--cc-color-surface);
+                    border: 1px solid var(--cc-color-border);
+                    border-left: 4px solid var(--cc-vis-0);
+                    border-radius: var(--cc-radius);
+                    padding: var(--cc-space-m);
+                  }
+                  .card.bad { border-left-color: var(--cc-color-danger); }
+                  .card.warn { border-left-color: var(--cc-color-warning); }
+                  .name { font-weight: 600; font-size: 0.95rem; margin-bottom: var(--cc-space-xs); }
+                  .pct { font-size: 2rem; line-height: 1.1; font-weight: 700; letter-spacing: -0.02em; }
+                  .meta { opacity: 0.7; font-size: 0.85rem; margin-top: var(--cc-space-xs); }
+                  .badge {
+                    display: inline-block; margin-top: var(--cc-space-s);
+                    padding: 2px 10px; border-radius: var(--cc-radius-s);
+                    background: var(--cc-vis-0); color: var(--cc-color-background);
+                    font-size: 0.72rem; font-weight: 700; letter-spacing: 0.04em;
+                  }
+                  .badge.bad { background: var(--cc-color-danger); }
+                  .empty { opacity: 0.65; padding: var(--cc-space-l); }
+                </style>
+
+
+                {{ "{% if rows.size == 0 %}" }}
+                  <p class="empty">No engagement samples in range.</p>
+                {{ "{% else %}" }}
+                <div class="board">
+                {{ "{% for row in rows %}" }}
+                  <div class="card">
+                    <div class="name">{{ "{{" }} row["service"].value {{ "}}" }}</div>
+                    <div class="pct">{{ "{{" }} row["views"].value {{ "}}" }}</div>
+                    <div class="meta">{{ "{{" }} row["searches"].value {{ "}}" }} searches · product views in range</div>
+                    <span class="badge">OK</span>
+                  </div>
+                {{ "{% endfor %}" }}
+                </div>
+                {{ "{% endif %}" }}
+
+                
+              esql_query:
+                - |
+                  SET unmapped_fields="nullify";
+                  FROM {{ consts.metrics_index }}
+                  | WHERE @timestamp >= ?_tstart AND @timestamp <= ?_tend AND (product_views_total IS NOT NULL OR search_queries_total IS NOT NULL)
+                  | STATS views = COUNT(*) WHERE product_views_total IS NOT NULL,
+                          searches = COUNT(*) WHERE search_queries_total IS NOT NULL
+                    BY service
+                  | SORT views DESC
+          - id: prom-flow
+            type: custom_content
+            grid: { x: 0, y: 20, w: 48, h: 6 }
+            config:
+              title: "Scrape → Managed PRW → Elastic"
+
+              template: |
+                
+                <style>
+                  .flow {
+                    display: flex; align-items: center; justify-content: space-between;
+                    gap: var(--cc-space-m); padding: var(--cc-space-m);
+                    background: var(--cc-color-surface); border-radius: var(--cc-radius);
+                    border: 1px solid var(--cc-color-border);
+                  }
+                  .col { flex: 1; text-align: center; }
+                  .label {
+                    font-size: 0.7rem; letter-spacing: 0.08em; text-transform: uppercase;
+                    opacity: 0.65; margin-bottom: var(--cc-space-s);
+                  }
+                  .node {
+                    display: inline-block; padding: var(--cc-space-s) var(--cc-space-m);
+                    background: var(--cc-color-background); border: 1px solid var(--cc-color-border);
+                    border-radius: var(--cc-radius-s); font-weight: 600; font-size: 0.9rem;
+                  }
+                  .node.accent { border-color: var(--cc-vis-0); box-shadow: 0 0 0 1px var(--cc-vis-0); }
+                  .arrow { opacity: 0.45; font-size: 1.4rem; }
+                  .sub { margin-top: var(--cc-space-xs); font-size: 0.75rem; opacity: 0.65; }
+                </style>
+                <div class="flow">
+                  <div class="col">
+                    <div class="label">Prometheus scrape</div>
+                    <div class="node">demo-exporter · apps</div>
+                    <div class="sub">:8000 /metrics</div>
+                  </div>
+                  <div class="arrow">→</div>
+                  <div class="col">
+                    <div class="label">Edge</div>
+                    <div class="node accent">Managed PRW</div>
+                    <div class="sub">remote_write</div>
+                  </div>
+                  <div class="arrow">→</div>
+                  <div class="col">
+                    <div class="label">Observability</div>
+                    <div class="node">Elastic</div>
+                    <div class="sub">{{ consts.metrics_index }}</div>
+                  </div>
+                </div>
+                
+
+          - id: biz-rate
+            type: vis
+            grid: { x: 0, y: 26, w: 24, h: 16 }
+            config:
+              type: xy
+              title: Product view rate by service
+              legend:
+                visibility: visible
+                placement: outside
+                position: bottom
+              styling:
+                interpolation: linear
+                points: { visibility: hidden }
+                areas: { fill_opacity: 0.7, fill: gradient }
+                overlays:
+                  current_time_marker: { visible: true }
+              axis:
+                y:
+                  title: { text: view_rate, visible: true }
+                  grid: { visible: true }
+                x:
+                  title: { text: "", visible: false }
+                  grid: { visible: false }
+              layers:
+                - type: area
+                  data_source:
+                    type: esql
+                    query: |
+                      SET unmapped_fields="nullify";
+                      TS {{ consts.metrics_index }}
+                      | WHERE @timestamp >= ?_tstart AND @timestamp <= ?_tend AND product_views_total IS NOT NULL
+                      | STATS view_rate = SUM(RATE(product_views_total)) BY service, @timestamp = BUCKET(@timestamp, 1 minute)
+                  x: { column: "@timestamp" }
+                  y:
+                    - column: view_rate
+                  breakdown_by: { column: service }
+
+          - id: biz-fail
+            type: vis
+            grid: { x: 24, y: 26, w: 24, h: 16 }
+            config:
+              type: xy
+              title: Search query rate by service
+              legend:
+                visibility: visible
+                placement: outside
+                position: bottom
+              styling:
+                points: { visibility: hidden }
+              axis:
+                y:
+                  title: { text: search_rate, visible: true }
+                  grid: { visible: true }
+                x:
+                  title: { text: "", visible: false }
+                  grid: { visible: false }
+              layers:
+                - type: bar
+                  data_source:
+                    type: esql
+                    query: |
+                      SET unmapped_fields="nullify";
+                      TS {{ consts.metrics_index }}
+                      | WHERE @timestamp >= ?_tstart AND @timestamp <= ?_tend AND search_queries_total IS NOT NULL
+                      | STATS search_rate = SUM(RATE(search_queries_total)) BY service, @timestamp = BUCKET(@timestamp, 1 minute)
+                  x: { column: "@timestamp" }
+                  y:
+                    - column: search_rate
+                  breakdown_by: { column: service }
+
+
+  # Agent polish only — business boards are upserted above with fixed IDs.
+  - name: polish_business_dashboards
+    type: ai.agent
+    agent-id: __install__.agent-id
+    on-failure:
+      continue: true
+    with:
+      message: |
+        Prometheus business-dashboard polish on this Observability project.
+        Index: {{ consts.metrics_index }}
+        Sample counts (last 30m) — ES|QL columns/values:
+        {{ steps.detect_metric_families.output | json }}
+
+        Deterministic kibana.request steps already upsert these titles (do NOT recreate):
+        - Auto: Prometheus HTTP / CPU / Go / Health Monitor
+        - Auto: Prometheus Business Auth & Logins
+        - Auto: Prometheus Business Purchases & Revenue
+        - Auto: Prometheus Business Signups
+        - Auto: Prometheus Business Checkout KPIs
+        - Auto: Prometheus Business Engagement
+
+        YOUR JOB: only fix broken panels (empty custom_content, TS COUNT(*) mistakes).
+        Prefer kibana.request GET+PUT. If everything looks healthy, reply "nothing to do".
+        End with short summary.
+
