@@ -47,13 +47,9 @@ triggers:
       additionalProperties: false
 
 steps:
-  # One block per alert, in dispatch order: the rule name with the status and
-  # severity, then the last event time with a link to the alert, then the alert
-  # id. A count header is added only when the group holds more than one alert.
-  # The rule name is resolved through the payload's rule map and falls back to
-  # "Unnamed rule" for externally-sourced alerts (rule_id is null); severity is
-  # optional and left out when absent. Matches Kibana's default Slack message
-  # for alerting action policies.
+  # Matches Kibana's default Slack message for action policies: one block per
+  # alert with the rule name, status, severity, last event time, and a link.
+  # Alerts without a rule (rule_id is null) show "Unnamed rule".
   - name: post_group_digest
     type: slack2.sendMessage
     connector-id: __install__.slack-connector
