@@ -1,15 +1,15 @@
 template-metadata:
   slug: remediate-genai-suspicious-skill
-  version: '1.0.0'
+  version: "1.1.0"
   availability: '>=9.5.0'
   name: Suspicious GenAI Agent Skills — Detection and Removal
   description: >-
     Hunt skill-file changes or triage files from detection alerts. Read complete
-    SKILL.md text with Elastic Defend, classify it with ES|QL COMPLETION, create
-    Cases, and remove verified MALICIOUS files. Removal is enabled by default
-    and can be disabled for review-only use.
+    SKILL.md text with Elastic Defend, classify with ES|QL COMPLETION, write
+    evidence, and optionally remove verified MALICIOUS files. Removal is enabled
+    by default and can be disabled for review-only use.
   solutions: [security]
-  categories: [hunting, response, case-management]
+  categories: [hunting, response]
   install:
     form:
       - name: completion-inference-id
@@ -35,27 +35,32 @@ template-metadata:
       - name: enable-endpoint-remediation
         label: Remove verified malicious skill files
         description: >-
-          Enabled by default. After creating a Case, delete only MALICIOUS
-          SKILL.md files whose current identity and hash pass verification.
-          SUSPICIOUS files remain for review. Model false positives are possible;
-          disable this option for review-only operation. Requires Elastic Defend
-          response-action Execute privileges on reachable endpoints.
+          Enabled by default. Delete only MALICIOUS SKILL.md files whose current
+          identity and hash pass verification. SUSPICIOUS files remain on disk
+          for review; evidence is written to the skill evidence index. Model
+          false positives are possible; disable this option for review-only
+          operation. Requires Elastic Defend response-action Execute privileges
+          on reachable endpoints.
         inputType: boolean
         required: true
         default: true
 
 # Runs daily when enabled; Run manually starts the same hunt immediately.
-# Requires Defend file telemetry, response-action Execute, Cases, and inference access.
+# Requires Defend file telemetry, response-action Execute, and inference access.
+# Prefer one run per alert with rule alert suppression on agent.id + file.path.
 # Complete skill text is stored in consts.triage_index and sent to the inference endpoint.
 # Set consts.enable_endpoint_remediation to false for review-only operation.
 # MALICIOUS verdicts can include false positives; file guards verify identity, not intent.
 # To respond to a rule, add this enabled workflow to its Actions > Workflows.
-# Use one run per alert. Required source fields: file.path, agent.id (Defend endpoint),
-# host.os.type. Nested/dotted fields and singleton arrays are accepted.
+# Required source fields: file.path, agent.id (Defend endpoint), host.os.type.
+# Nested/dotted fields and singleton arrays are accepted.
 # Rule input never falls back to the hunt; preserve source fields in the rule output.
 name: Suspicious GenAI Agent Skills — Detection and Removal
-description: Run as imported on a daily schedule or manually, or attach to a detection rule. Read complete SKILL.md text with
-  Elastic Defend, classify with ES|QL COMPLETION, retain evidence in Cases, and remove verified MALICIOUS files.
+description: >-
+  Run on a daily schedule, manually, or from a detection rule. Read complete
+  SKILL.md text with Elastic Defend, classify with ES|QL COMPLETION, write
+  evidence, and remove verified MALICIOUS files when remediation is enabled.
+  SUSPICIOUS files are retained for review.
 consts:
   completion_inference_id: __install__.completion-inference-id
   triage_index: __install__.triage-index
@@ -499,23 +504,20 @@ steps:
     - name: build_suspicious_log_line
       type: data.set
       with:
-        log_message: |
-          ### {{ steps.set_skill_context.output.file_path }}
-
-          | Field | Value |
-          | --- | --- |
-          | **host.name** | `{{ steps.set_skill_context.output.host_name }}` |
-          | **agent.id** | `{{ steps.set_skill_context.output.agent_id }}` |
-          | **os** | `{{ steps.set_skill_context.output.os_type }}` |
-          | **loads under** | `{{ steps.set_skill_context.output.agents_loading }}` |
-          | **verdict** | `{{ steps.finalize_verdict.output.verdict }}` |
-          | **confidence** | `{{ steps.finalize_verdict.output.confidence }}` |
-          | **reasons** | `{{ steps.finalize_verdict.output.reasons }}` |
-
-          Collected SHA-256: `{{ variables.expected_sha256 }}`
-          Staged evidence key: `{{ steps.set_skill_context.output.triage_key }}`
-
-          Source: {{ variables.trigger_mode }}; alert: {{ steps.set_skill_context.output.alert_id | default: "none" }}; rule: {{ event.rule.name | default: "scheduled/manual hunt" }}
+        log_message: >-
+          path={{ steps.set_skill_context.output.file_path }}
+          host={{ steps.set_skill_context.output.host_name }}
+          agent.id={{ steps.set_skill_context.output.agent_id }}
+          os={{ steps.set_skill_context.output.os_type }}
+          agents={{ steps.set_skill_context.output.agents_loading }}
+          verdict={{ steps.finalize_verdict.output.verdict }}
+          confidence={{ steps.finalize_verdict.output.confidence }}
+          reasons={{ steps.finalize_verdict.output.reasons }}
+          sha256={{ variables.expected_sha256 }}
+          evidence_key={{ steps.set_skill_context.output.triage_key }}
+          source={{ variables.trigger_mode }}
+          alert={{ steps.set_skill_context.output.alert_id | default: "none" }}
+          rule={{ event.rule.name | default: "scheduled/manual hunt" }}
     - name: accumulate_result
       type: data.set
       with:
@@ -560,74 +562,29 @@ steps:
   type: if
   condition: 'variables.candidate_overflow: true or variables.inconclusive_count > 0 or variables.input_errors.length > 0'
   steps:
-  - name: create_coverage_case
-    type: cases.createCase
+  - name: log_coverage_incomplete
+    type: console
     with:
-      owner: securitySolution
-      title: '[GenAI Skills] Incomplete scan — {{ execution.id }}'
-      description: |-
-        Skill triage needs follow-up. Execution: {{ execution.id }}. Mode: {{ variables.trigger_mode }}.
-
-        {% if variables.candidate_overflow == true or variables.candidate_overflow == 'true' %}Candidate limit exceeded: {{ variables.candidate_rows | size }} validated paths are available; at most {{ consts.max_skills_per_run }} are processed. Alert input count: {{ variables.input_alert_count }}. Excess candidates are not queued automatically. Use one workflow run per alert or scoped follow-up runs. Rerunning the same hunt can select the same newest paths.{% endif %}
-
-        Input validation: {{ variables.input_errors | join: '; ' }}
-
-        INCONCLUSIVE files (never treated as benign or removed): {{ variables.inconclusive_count }}.
+      message: |-
+        Incomplete skill triage. execution={{ execution.id }} mode={{ variables.trigger_mode }}
+        overflow={{ variables.candidate_overflow }} candidates={{ variables.candidate_rows | size }} max={{ consts.max_skills_per_run }}
+        alert_input_count={{ variables.input_alert_count }}
+        input_errors={{ variables.input_errors | join: '; ' }}
+        inconclusive={{ variables.inconclusive_count }}
         {{ variables.inconclusive_details | join: '
 
         ' }}
-
-        Scheduled/manual mode uses a 25-hour lookback with one hour of overlap; later telemetry can be missed. Alert mode processes supplied candidates only and does not fall back to this hunt.
-      tags:
-      - genai-skills
-      - workflow-triage
-      - incomplete-scan
-      severity: medium
-      settings:
-        syncAlerts: false
-- name: when_suspicious_case
+- name: when_remediate_malicious
   type: if
-  condition: variables.suspicious_count > 0
+  condition: 'consts.enable_endpoint_remediation: true and variables.suspicious_count > 0'
   steps:
-  - name: build_case_body
-    type: data.set
-    with:
-      case_hits_body: |-
-        {% assign line_count = variables.suspicious_detail_lines | size %}{% if line_count == 0 %}No suspicious detail lines captured.{% else %}{{ variables.suspicious_detail_lines | join: '
-
-        ---
-
-        ' }}{% endif %}
-  - name: create_suspicious_skills_case
-    type: cases.createCase
-    with:
-      owner: securitySolution
-      title: '[GenAI Skills] Suspicious agent skills — {{ ''now'' | date: ''%Y-%m-%d'' }}'
-      description: Provider-default SKILL.md files were classified as SUSPICIOUS or MALICIOUS by ES|QL COMPLETION. Review
-        the evidence and removal results. With endpoint remediation enabled, only MALICIOUS files whose current hash matches
-        the collected evidence are removed. SUSPICIOUS files require review. Skill instructions are never executed.
-      tags:
-      - genai-skills
-      - workflow-triage
-      - suspicious-skill
-      severity: high
-      settings:
-        syncAlerts: false
-  - name: add_case_hits
-    type: cases.addComment
-    with:
-      case_id: '{{ steps.create_suspicious_skills_case.output.case.id }}'
-      comment: |
-        ## Suspicious skills
-
-        {{ steps.build_case_body.output.case_hits_body }}
   - name: remediate_malicious_skills
     type: foreach
     foreach: '{{ variables.suspicious_skills }}'
     steps:
     - name: when_removal_allowed
       type: if
-      condition: 'consts.enable_endpoint_remediation: true and foreach.item.verdict: "MALICIOUS"'
+      condition: 'foreach.item.verdict: "MALICIOUS"'
       steps:
       - name: set_removal_context
         type: data.set
@@ -662,8 +619,7 @@ steps:
             agent_type: endpoint
             endpoint_ids:
             - '{{ steps.set_removal_context.output.agent_id }}'
-            comment: SKILL-HUNT|remove|case={{ steps.create_suspicious_skills_case.output.case.id }}|{{ steps.set_removal_context.output.file_path
-              }}
+            comment: SKILL-HUNT|remove|{{ steps.set_removal_context.output.file_path }}
             parameters:
               command: '{{ steps.set_removal_command.output.command }}'
               timeout: 90
@@ -716,34 +672,26 @@ steps:
             1 }}{% else %}{{ variables.removed_count }}{% endif %}'
           removal_unconfirmed_count: '{% if steps.verify_removal_result.output.status != ''REMOVED'' %}{{ variables.removal_unconfirmed_count
             | plus: 1 }}{% else %}{{ variables.removal_unconfirmed_count }}{% endif %}'
-      - name: record_removal_in_case
-        type: cases.addComment
+      - name: record_removal_result
+        type: console
         with:
-          case_id: '{{ steps.create_suspicious_skills_case.output.case.id }}'
-          comment: |-
-            Endpoint removal: {{ steps.verify_removal_result.output.status }}
-            File: {{ steps.set_removal_context.output.file_path }}
-            Endpoint: {{ steps.set_removal_context.output.agent_id }}
-            Evidence SHA-256: {{ steps.set_removal_context.output.sha256 }}
-            Staged evidence key: {{ steps.set_removal_context.output.triage_key }}
-            Response action: {{ variables.removal_action_id | default: "not submitted" }}
-            Only REMOVED confirms a successful response with the expected hash marker and matching action ID. UNCONFIRMED requires response-action review; a pending action may still finish within its five-minute command expiry.
-
-            Response receipt: {{ steps.verify_removal_result.output.receipt }}
-
-            On POSIX, QUARANTINED means the detached file was retained in a protected sibling directory after a race or verification failure; the fourth pipe-delimited receipt field is its Base64-encoded path. Preserve it for review. Replacement files are not overwritten. UNCONFIRMED is not proof of removal.
+          message: |-
+            Endpoint removal status={{ steps.verify_removal_result.output.status }}
+            path={{ steps.set_removal_context.output.file_path }}
+            agent.id={{ steps.set_removal_context.output.agent_id }}
+            sha256={{ steps.set_removal_context.output.sha256 }}
+            evidence_key={{ steps.set_removal_context.output.triage_key }}
+            response_action={{ variables.removal_action_id | default: "not submitted" }}
+            receipt={{ steps.verify_removal_result.output.receipt }}
+            REMOVED confirms the expected hash marker for this action ID. UNCONFIRMED needs review and is not proof of removal. QUARANTINED (POSIX) keeps the detached file in a protected sibling directory; the fourth receipt field is its Base64 path.
       else:
       - name: record_removal_skipped
-        type: cases.addComment
+        type: console
         with:
-          case_id: '{{ steps.create_suspicious_skills_case.output.case.id }}'
-          comment: Removal not requested for {{ foreach.item.file_path }} (verdict={{ foreach.item.verdict }}, endpoint_remediation={{
-            consts.enable_endpoint_remediation }}).
-  - name: log_case_created
-    type: console
-    with:
-      message: 'Kibana case created for {{ variables.suspicious_count }} suspicious skill(s): {{ steps.create_suspicious_skills_case.output.case.id
-        }}'
+          message: >-
+            Removal skipped path={{ foreach.item.file_path }}
+            verdict={{ foreach.item.verdict }} remediation={{ consts.enable_endpoint_remediation }}
+            evidence_index={{ consts.triage_index }}
 - name: emit_summary
   type: console
   with:
@@ -755,3 +703,6 @@ steps:
 enabled: true
 settings:
   timeout: 4h
+  concurrency:
+    max: 1
+    strategy: queue
