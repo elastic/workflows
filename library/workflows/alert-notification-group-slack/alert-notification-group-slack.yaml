@@ -1,13 +1,13 @@
 template-metadata:
   slug: alert-notification-group-slack
-  version: "2.0.0"
+  version: "2.1.0"
   availability: ">=9.6.0"
   name: "Alert Notification Group to Slack"
   description: >-
     Post a Slack digest for a notification group dispatched by an alerting
     action policy. Summarises every alert in the group with its
-    status, severity, and originating rule, so responders receive one
-    message per group instead of one per alert.
+    originating rule, status, severity, and a link to the alert in Kibana,
+    so responders receive one message per group instead of one per alert.
   categories: [notification]
   install:
     form:
@@ -47,23 +47,31 @@ triggers:
       additionalProperties: false
 
 steps:
-  # Alerts are listed in dispatch order. Severity is optional and rule_id is
-  # null for externally-sourced alerts, so both are rendered conditionally; the
-  # rule name is resolved through the payload's rule map.
+  # One block per alert, in dispatch order: the rule name with the status and
+  # severity, then the last event time with a link to the alert, then the alert
+  # id. A count header is added only when the group holds more than one alert.
+  # The rule name is resolved through the payload's rule map and falls back to
+  # "Unnamed rule" for externally-sourced alerts (rule_id is null); severity is
+  # optional and left out when absent. Matches Kibana's default Slack message
+  # for alerting action policies.
   - name: post_group_digest
     type: slack2.sendMessage
     connector-id: __install__.slack-connector
     with:
       channel: "{{ consts.slack_channel }}"
       text: |
-        *{{ inputs.payload.alerts | size }} alert(s)* — policy `{{ inputs.payload.policyId }}`
-        {%- if inputs.payload.groupKey %}
-        > Group: {{ inputs.payload.groupKey | json }}
-        {%- endif %}
+        {%- assign alert_count = inputs.payload.alerts | size -%}
+        {%- if alert_count > 1 -%}
+        *{{ alert_count }} alerts*
 
-        {% for a in inputs.payload.alerts -%}
-        • `{{ a.alert_id }}` — *{{ a.alert_status }}*{% if a.severity %} · {{ a.severity }}{% endif %}{% if a.rule_id %} · {{ inputs.payload.rules[a.rule_id].name }}{% endif %} · last event {{ a.last_event_timestamp | date: "%Y-%m-%d %H:%M UTC" }}
-        {% endfor %}
+        {% endif -%}
+        {%- for alert in inputs.payload.alerts -%}
+        *{{ inputs.payload.rules[alert.rule_id].name | default: "Unnamed rule" }}* — {{ alert.alert_status | capitalize }}{% if alert.severity %} · {{ alert.severity | capitalize }}{% endif %}
+        Last event {{ alert.last_event_timestamp | date: "%Y-%m-%d %H:%M UTC" }} · <{{ alert.alert_url }}|View in app>
+        Alert id: {{ alert.alert_id }}
+        {% unless forloop.last %}
+        {% endunless -%}
+        {%- endfor -%}
     on-failure:
       retry:
         max-attempts: 2
