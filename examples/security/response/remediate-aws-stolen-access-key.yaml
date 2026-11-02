@@ -1,0 +1,173 @@
+version: "1"
+name: Remediate AWS - Stolen Access Key
+description: |
+  Identity containment for a compromised AWS principal whose credentials are being
+  abused against the AWS API (e.g. a stolen IAM user access key performing EC2/API
+  enumeration). Network controls (NACL / security group) cannot stop stolen-credential
+  API calls: those calls hit the AWS public API endpoints and never traverse the
+  customer's VPC subnets, so a subnet control never sees them. Containment therefore
+  acts on the identity.
+
+  Correlation pulls the offending principal from open alerts raised by an AWS detection
+  rule (matched by rule_id). For each IAM user it: deactivates the access key(s), revokes
+  already-issued sessions (AWSRevokeOlderSessions), then quarantines the principal
+  (deny-all). A case is opened with the indicators. All AWS mutations run through a
+  least-privilege containment Lambda invoked via the AWS Lambda connector.
+
+  Prerequisites:
+    - A customer-deployed containment Lambda (source, env, IAM in the companion setup
+      doc) that validates a shared bearer token and performs iam:UpdateAccessKey,
+      iam:PutUserPolicy (revoke-older-sessions and deny-all) on the named principal.
+    - AWS Lambda connector (".aws_lambda") backed by least-privilege credentials
+      allowing lambda:InvokeFunction on the containment function.
+    - Keep the rule_id filter in sync with the installed AWS rule(s). Default targets
+      "AWS EC2 Bulk User Data Enumeration" (detection-rules #7116).
+enabled: false
+tags:
+  - security
+  - workflow-template
+  - domain:cloud
+  - provider:aws
+  - action:contain
+  - ir-phase:containment
+  - attack:T1078.004
+  - attack:T1552
+
+triggers:
+  - type: manual
+  - type: scheduled
+    with:
+      every: 15m
+
+consts:
+  # Name of the pre-deployed identity-containment Lambda.
+  containment_function: "[CONTAINMENT_LAMBDA_FUNCTION_NAME]"
+  # Shared bearer the Lambda validates before acting. Store as a secret / rotate.
+  containment_token: "[CONTAINMENT_SHARED_TOKEN]"
+  # rule_id(s) whose alerts identify compromised principals.
+  rule_id: "7f6bc52c-fb52-46b5-8081-b78db15af501"
+
+steps:
+  # Phase 1: correlation. Pull offending principals from open alerts.
+  # ES|QL cannot read passthrough fields (aws.cloudtrail.*) on the alerts index,
+  # so a DSL search with runtime fields extracts the ARN and identity type.
+  # A terms aggregation deduplicates principals: a single compromised key can
+  # raise many open alerts, and we want to contain each principal exactly once
+  # (collapse does not work here because runtime fields have no doc_values).
+  - name: find_principals
+    type: elasticsearch.request
+    with:
+      method: POST
+      path: /.alerts-security.alerts-*/_search
+      body:
+        size: 0
+        query:
+          bool:
+            filter:
+              - term:
+                  kibana.alert.rule.rule_id: "{{ consts.rule_id }}"
+              - term:
+                  kibana.alert.workflow_status: "open"
+        runtime_mappings:
+          rt_principal_arn:
+            type: keyword
+            script: "emit(params._source['aws.cloudtrail.user_identity.arn'])"
+          rt_principal_type:
+            type: keyword
+            script: "emit(params._source['aws.cloudtrail.user_identity.type'])"
+        aggs:
+          by_principal:
+            terms:
+              field: rt_principal_arn
+              size: 100
+            aggs:
+              ptype:
+                terms:
+                  field: rt_principal_type
+                  size: 1
+
+  - name: contain_principals
+    type: if
+    condition: "steps.find_principals.output.aggregations.by_principal.buckets.length > 0"
+    steps:
+      - name: per_principal
+        type: foreach
+        foreach: "{{ steps.find_principals.output.aggregations.by_principal.buckets }}"
+        steps:
+          - name: log_candidate
+            type: console
+            with:
+              message: "Containing principal {{ foreach.item.key }} (type={{ foreach.item.ptype.buckets[0].key }})."
+
+          # Deactivate long-lived access keys (IAM user only). Assumed-role /
+          # instance creds are temporary and cannot be deactivated; they are
+          # handled by revoke_sessions plus host remediation (manual follow-up).
+          - name: deactivate_key
+            type: if
+            condition: "foreach.item.ptype.buckets[0].key : \"IAMUser\""
+            steps:
+              - name: do_deactivate_key
+                type: aws_lambda.invoke
+                connector-id: "[AWS_LAMBDA_CONNECTOR_ID]"
+                with:
+                  functionName: "{{ consts.containment_function }}"
+                  payload:
+                    headers:
+                      authorization: "Bearer {{ consts.containment_token }}"
+                    body: '{"action":"deactivate_access_key","principal_arn":"{{ foreach.item.key }}"}'
+                on-failure:
+                  continue: true
+
+          # Revoke already-issued sessions (AWSRevokeOlderSessions). A deactivated
+          # key does NOT invalidate STS tokens already minted from it.
+          - name: revoke_sessions
+            type: aws_lambda.invoke
+            connector-id: "[AWS_LAMBDA_CONNECTOR_ID]"
+            with:
+              functionName: "{{ consts.containment_function }}"
+              payload:
+                headers:
+                  authorization: "Bearer {{ consts.containment_token }}"
+                body: '{"action":"revoke_sessions","principal_arn":"{{ foreach.item.key }}"}'
+            on-failure:
+              continue: true
+
+          # Quarantine the principal (deny-all). Teams may gate this behind a
+          # waitForApproval step; shown automatic here for a confirmed exposed key.
+          - name: quarantine_principal
+            type: aws_lambda.invoke
+            connector-id: "[AWS_LAMBDA_CONNECTOR_ID]"
+            with:
+              functionName: "{{ consts.containment_function }}"
+              payload:
+                headers:
+                  authorization: "Bearer {{ consts.containment_token }}"
+                body: '{"action":"quarantine_principal","principal_arn":"{{ foreach.item.key }}"}'
+            on-failure:
+              continue: true
+
+          - name: open_case
+            type: cases.createCase
+            with:
+              title: "AWS stolen-key containment: {{ foreach.item.key }}"
+              description: |
+                Automated identity containment of a compromised AWS principal.
+
+                - Principal: {{ foreach.item.key }}
+                - Identity type: {{ foreach.item.ptype.buckets[0].key }}
+
+                Actions (via containment Lambda):
+                - deactivate_access_key (IAM user access keys set Inactive)
+                - revoke_sessions (AWSRevokeOlderSessions deny attached)
+                - quarantine_principal (deny-all attached)
+
+                Manual follow-up:
+                - Rotate, then delete, the exposed key after confirmation
+                - For instance-role creds, remediate the host and require IMDSv2
+                - Review for attacker-created persistence (users, keys, roles, policies)
+                - Rotate any secrets the principal could read (Secrets Manager, EC2 user data)
+              tags: ["aws", "stolen-key", "identity-containment", "automated-containment"]
+              owner: "securitySolution"
+              severity: "high"
+              settings:
+                syncAlerts: true
