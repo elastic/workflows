@@ -1,6 +1,6 @@
 template-metadata:
   slug: prometheus-auto-dashboards
-  version: "1.0.0"
+  version: "1.0.1"
   availability: ">=9.6.0"
   name: "Prometheus auto dashboards (Agent Builder)"
   description: >-
@@ -162,9 +162,9 @@ steps:
                 <div class="board">
                 {{ "{% for row in rows %}" }}
                   <div class="card {{ '{% if row["sli_pct"].value < row["target"].value %}' }}bad{{ '{% elsif row["sli_pct"].value < 99.99 %}' }}warn{{ "{% endif %}" }}">
-                    <div class="name">{{ "{{" }} row["service"].value {{ "}}" }}</div>
-                    <div class="pct">{{ "{{" }} row["sli_pct"].value {{ "}}" }}%</div>
-                    <div class="meta">SLO target {{ "{{" }} row["target"].value {{ "}}" }}% · {{ "{{" }} row["errors"].value {{ "}}" }} 5xx · {{ "{{" }} row["total"].value {{ "}}" }} samples</div>
+                    <div class="name">{{ "{{ row[\"service\"].value }}" }}</div>
+                    <div class="pct">{{ "{{ row[\"sli_pct\"].value }}" }}%</div>
+                    <div class="meta">SLO target {{ "{{ row[\"target\"].value }}" }}% · {{ "{{ row[\"errors\"].value }}" }} 5xx · {{ "{{ row[\"total\"].value }}" }} samples</div>
                     <span class="badge {{ '{% if row["sli_pct"].value < row["target"].value %}' }}bad{{ '{% elsif row["sli_pct"].value < 99.99 %}' }}warn{{ "{% endif %}" }}">
                       {{ '{% if row["sli_pct"].value < row["target"].value %}' }}VIOLATED{{ '{% elsif row["sli_pct"].value < 99.99 %}' }}WATCH{{ "{% else %}" }}HEALTHY{{ "{% endif %}" }}
                     </span>
@@ -391,9 +391,9 @@ steps:
                 <div class="board">
                 {{ "{% for row in rows %}" }}
                   <div class="card {{ '{% if row["cpu"].value > 0.8 %}' }}bad{{ '{% elsif row["cpu"].value > 0.5 %}' }}warn{{ "{% endif %}" }}">
-                    <div class="name">{{ "{{" }} row["service"].value {{ "}}" }}</div>
-                    <div class="pct">{{ "{{" }} row["cpu"].value {{ "}}" }}</div>
-                    <div class="meta">{{ "{{" }} row["samples"].value {{ "}}" }} samples · process_cpu_usage_ratio</div>
+                    <div class="name">{{ "{{ row[\"service\"].value }}" }}</div>
+                    <div class="pct">{{ "{{ row[\"cpu\"].value }}" }}</div>
+                    <div class="meta">{{ "{{ row[\"samples\"].value }}" }} samples · process_cpu_usage_ratio</div>
                     <span class="badge {{ '{% if row["cpu"].value > 0.8 %}' }}bad{{ '{% elsif row["cpu"].value > 0.5 %}' }}warn{{ "{% endif %}" }}">
                       {{ '{% if row["cpu"].value > 0.8 %}' }}HOT{{ '{% elsif row["cpu"].value > 0.5 %}' }}WATCH{{ "{% else %}" }}OK{{ "{% endif %}" }}
                     </span>
@@ -581,9 +581,9 @@ steps:
                 <div class="board">
                 {{ "{% for row in rows %}" }}
                   <div class="card {{ '{% if row["goroutines"].value > 500 %}' }}bad{{ '{% elsif row["goroutines"].value > 200 %}' }}warn{{ "{% endif %}" }}">
-                    <div class="name">{{ "{{" }} row["job"].value {{ "}}" }}</div>
-                    <div class="pct">{{ "{{" }} row["goroutines"].value {{ "}}" }}</div>
-                    <div class="meta">{{ "{{" }} row["samples"].value {{ "}}" }} samples · go_goroutines</div>
+                    <div class="name">{{ "{{ row[\"job\"].value }}" }}</div>
+                    <div class="pct">{{ "{{ row[\"goroutines\"].value }}" }}</div>
+                    <div class="meta">{{ "{{ row[\"samples\"].value }}" }} samples · go_goroutines</div>
                     <span class="badge {{ '{% if row["goroutines"].value > 500 %}' }}bad{{ '{% elsif row["goroutines"].value > 200 %}' }}warn{{ "{% endif %}" }}">
                       {{ '{% if row["goroutines"].value > 500 %}' }}HIGH{{ '{% elsif row["goroutines"].value > 200 %}' }}WATCH{{ "{% else %}" }}OK{{ "{% endif %}" }}
                     </span>
@@ -760,9 +760,9 @@ steps:
                 <div class="board">
                 {{ "{% for row in rows %}" }}
                   <div class="card {{ '{% if row["sli_pct"].value < row["target"].value %}' }}bad{{ '{% elsif row["sli_pct"].value < 99.99 %}' }}warn{{ "{% endif %}" }}">
-                    <div class="name">{{ "{{" }} row["service"].value {{ "}}" }}</div>
-                    <div class="pct">{{ "{{" }} row["sli_pct"].value {{ "}}" }}%</div>
-                    <div class="meta">SLO target {{ "{{" }} row["target"].value {{ "}}" }}% · {{ "{{" }} row["errors"].value {{ "}}" }} 5xx · {{ "{{" }} row["total"].value {{ "}}" }} samples</div>
+                    <div class="name">{{ "{{ row[\"service\"].value }}" }}</div>
+                    <div class="pct">{{ "{{ row[\"sli_pct\"].value }}" }}%</div>
+                    <div class="meta">SLO target {{ "{{ row[\"target\"].value }}" }}% · {{ "{{ row[\"errors\"].value }}" }} 5xx · {{ "{{ row[\"total\"].value }}" }} samples</div>
                     <span class="badge {{ '{% if row["sli_pct"].value < row["target"].value %}' }}bad{{ '{% elsif row["sli_pct"].value < 99.99 %}' }}warn{{ "{% endif %}" }}">
                       {{ '{% if row["sli_pct"].value < row["target"].value %}' }}VIOLATED{{ '{% elsif row["sli_pct"].value < 99.99 %}' }}WATCH{{ "{% else %}" }}HEALTHY{{ "{% endif %}" }}
                     </span>
@@ -990,9 +990,9 @@ steps:
                 <div class="board">
                 {{ "{% for row in rows %}" }}
                   <div class="card {{ '{% if row["fail_pct"].value > 10 %}' }}bad{{ '{% elsif row["fail_pct"].value > 3 %}' }}warn{{ "{% endif %}" }}">
-                    <div class="name">{{ "{{" }} row["service"].value {{ "}}" }}</div>
-                    <div class="pct">{{ "{{" }} row["logins"].value {{ "}}" }}</div>
-                    <div class="meta">{{ "{{" }} row["failures"].value {{ "}}" }} failures · {{ "{{" }} row["fail_pct"].value {{ "}}" }}% fail rate</div>
+                    <div class="name">{{ "{{ row[\"service\"].value }}" }}</div>
+                    <div class="pct">{{ "{{ row[\"logins\"].value }}" }}</div>
+                    <div class="meta">{{ "{{ row[\"failures\"].value }}" }} failures · {{ "{{ row[\"fail_pct\"].value }}" }}% fail rate</div>
                     <span class="badge {{ '{% if row["fail_pct"].value > 10 %}' }}bad{{ "{% endif %}" }}">{{ '{% if row["fail_pct"].value > 10 %}' }}HOT{{ "{% else %}" }}OK{{ "{% endif %}" }}</span>
                   </div>
                 {{ "{% endfor %}" }}
@@ -1218,9 +1218,9 @@ steps:
                 <div class="board">
                 {{ "{% for row in rows %}" }}
                   <div class="card {{ '{% if row["fail_pct"].value > 8 %}' }}bad{{ '{% elsif row["fail_pct"].value > 2 %}' }}warn{{ "{% endif %}" }}">
-                    <div class="name">{{ "{{" }} row["service"].value {{ "}}" }}</div>
-                    <div class="pct">{{ "{{" }} row["purchases"].value {{ "}}" }}</div>
-                    <div class="meta">{{ "{{" }} row["failures"].value {{ "}}" }} payment fails · {{ "{{" }} row["fail_pct"].value {{ "}}" }}%</div>
+                    <div class="name">{{ "{{ row[\"service\"].value }}" }}</div>
+                    <div class="pct">{{ "{{ row[\"purchases\"].value }}" }}</div>
+                    <div class="meta">{{ "{{ row[\"failures\"].value }}" }} payment fails · {{ "{{ row[\"fail_pct\"].value }}" }}%</div>
                     <span class="badge {{ '{% if row["fail_pct"].value > 8 %}' }}bad{{ "{% endif %}" }}">{{ '{% if row["fail_pct"].value > 8 %}' }}HOT{{ "{% else %}" }}OK{{ "{% endif %}" }}</span>
                   </div>
                 {{ "{% endfor %}" }}
@@ -1446,8 +1446,8 @@ steps:
                 <div class="board">
                 {{ "{% for row in rows %}" }}
                   <div class="card">
-                    <div class="name">{{ "{{" }} row["service"].value {{ "}}" }}</div>
-                    <div class="pct">{{ "{{" }} row["signups"].value {{ "}}" }}</div>
+                    <div class="name">{{ "{{ row[\"service\"].value }}" }}</div>
+                    <div class="pct">{{ "{{ row[\"signups\"].value }}" }}</div>
                     <div class="meta">signup samples in range</div>
                     <span class="badge">OK</span>
                   </div>
@@ -1638,9 +1638,9 @@ steps:
                 <div class="board">
                 {{ "{% for row in rows %}" }}
                   <div class="card {{ '{% if row["abandon_pct"].value > 40 %}' }}bad{{ '{% elsif row["abandon_pct"].value > 20 %}' }}warn{{ "{% endif %}" }}">
-                    <div class="name">{{ "{{" }} row["service"].value {{ "}}" }}</div>
-                    <div class="pct">{{ "{{" }} row["orders"].value {{ "}}" }}</div>
-                    <div class="meta">{{ "{{" }} row["abandons"].value {{ "}}" }} abandons · {{ "{{" }} row["abandon_pct"].value {{ "}}" }}%</div>
+                    <div class="name">{{ "{{ row[\"service\"].value }}" }}</div>
+                    <div class="pct">{{ "{{ row[\"orders\"].value }}" }}</div>
+                    <div class="meta">{{ "{{ row[\"abandons\"].value }}" }} abandons · {{ "{{ row[\"abandon_pct\"].value }}" }}%</div>
                     <span class="badge {{ '{% if row["abandon_pct"].value > 40 %}' }}bad{{ "{% endif %}" }}">{{ '{% if row["abandon_pct"].value > 40 %}' }}HOT{{ "{% else %}" }}OK{{ "{% endif %}" }}</span>
                   </div>
                 {{ "{% endfor %}" }}
@@ -1866,9 +1866,9 @@ steps:
                 <div class="board">
                 {{ "{% for row in rows %}" }}
                   <div class="card">
-                    <div class="name">{{ "{{" }} row["service"].value {{ "}}" }}</div>
-                    <div class="pct">{{ "{{" }} row["views"].value {{ "}}" }}</div>
-                    <div class="meta">{{ "{{" }} row["searches"].value {{ "}}" }} searches · product views in range</div>
+                    <div class="name">{{ "{{ row[\"service\"].value }}" }}</div>
+                    <div class="pct">{{ "{{ row[\"views\"].value }}" }}</div>
+                    <div class="meta">{{ "{{ row[\"searches\"].value }}" }} searches · product views in range</div>
                     <span class="badge">OK</span>
                   </div>
                 {{ "{% endfor %}" }}
