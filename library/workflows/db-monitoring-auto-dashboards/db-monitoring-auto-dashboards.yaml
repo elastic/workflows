@@ -1,0 +1,208 @@
+template-metadata:
+  slug: db-monitoring-auto-dashboards
+  version: "1.0.0"
+  availability: ">=9.6.0"
+  name: "Database monitoring auto dashboards"
+  description: >-
+    Detect OpenTelemetry database receivers (PostgreSQL, Redis, MySQL, SQL Server,
+    MongoDB, Oracle, Db2) and create or refresh Auto: DB Monitoring dashboards via
+    the Dashboards API — TSDB-safe TS + LAST_OVER_TIME panels, fixed ids, full catalog.
+  solutions: [observability]
+  categories: [monitoring, ai-agent]
+  install:
+    form:
+      - name: agent-id
+        label: "Agent Builder agent ID"
+        description: >-
+          Agent Builder agent used to upsert Auto: DB dashboards.
+          Default Serverless agent is elastic-ai-agent.
+        inputType: text
+        required: true
+        default: "elastic-ai-agent"
+      - name: metrics-index
+        label: "Database metrics index pattern"
+        description: >-
+          Elasticsearch index / data stream pattern for OTel DB receiver metrics
+          (postgresqlreceiver, redisreceiver, sqlserverreceiver, etc.).
+        inputType: esIndex
+        required: true
+        default: "metrics-*"
+      - name: logs-index
+        label: "Database logs index pattern"
+        description: >-
+          Index pattern for MySQL slowlog / error (and similar) log datasets.
+        inputType: esIndex
+        required: true
+        default: "logs-*"
+
+version: "1"
+name: db-monitoring-auto-dashboards
+description: >
+  Hourly (and on demand): detect OpenTelemetry database metric/log datasets
+  (PostgreSQL, Redis, MySQL, SQL Server, MongoDB, Oracle, Db2), then create or
+  refresh Auto: DB Monitoring dashboards via the Dashboards API — adapted for
+  Serverless TSDB (TS + LAST_OVER_TIME).
+enabled: true
+tags:
+  - auto-ops
+  - dashboards
+  - db-monitoring
+triggers:
+  - type: manual
+  - type: scheduled
+    with:
+      every: 1h
+settings:
+  timeout: 20m
+  concurrency:
+    key: "{{ workflow.id }}"
+    strategy: drop
+    max: 1
+consts:
+  agent_id: __install__.agent-id
+  metrics_index: __install__.metrics-index
+  logs_index: __install__.logs-index
+  catalog_titles: |
+    Auto: DB PostgreSQL — Performance & Health
+    Auto: DB Redis — Memory & Clients
+    Auto: DB MySQL — Slow Query & Errors
+    Auto: DB SQL Server — Performance & Health
+    Auto: DB SQL Server — Overview (Datadog Equivalent)
+    Auto: DB MongoDB — Operations & Health
+    Auto: DB Oracle — Performance & Health
+    Auto: DB IBM Db2 — Performance & Health
+  fixed_ids: |
+    postgresql → auto-dbmon-postgresql
+    redis → auto-dbmon-redis
+    mysql → auto-dbmon-mysql
+    sqlserver → auto-dbmon-sqlserver
+    sqlserver_overview → auto-dbmon-sqlserver-overview
+    mongodb → auto-dbmon-mongodb
+    oracle → auto-dbmon-oracle
+    db2 → auto-dbmon-db2
+
+steps:
+  - name: ensure_tag_auto
+    type: kibana.request
+    on-failure:
+      continue: true
+    with:
+      method: PUT
+      path: /api/tags/auto
+      headers:
+        Elastic-Api-Version: "2023-10-31"
+      body:
+        name: auto
+        description: Auto-ops generated assets
+        color: "#00BFB3"
+
+  - name: ensure_tag_db_monitoring
+    type: kibana.request
+    on-failure:
+      continue: true
+    with:
+      method: PUT
+      path: /api/tags/db-monitoring
+      headers:
+        Elastic-Api-Version: "2023-10-31"
+      body:
+        name: db-monitoring
+        description: Database monitoring Auto-ops
+        color: "#361DD1"
+
+  - name: detect_db_metrics
+    type: elasticsearch.esql.query
+    with:
+      format: json
+      query: |
+        FROM {{ consts.metrics_index }}
+        | WHERE @timestamp > NOW() - 7 days AND data_stream.dataset IS NOT NULL
+        | STATS docs = COUNT(*) BY data_stream.dataset
+        | WHERE data_stream.dataset LIKE "*postgres*"
+            OR data_stream.dataset LIKE "*redis*"
+            OR data_stream.dataset LIKE "*mysql*"
+            OR data_stream.dataset LIKE "*sqlserver*"
+            OR data_stream.dataset LIKE "*mongo*"
+            OR data_stream.dataset LIKE "*oracle*"
+            OR data_stream.dataset LIKE "*db2*"
+        | SORT docs DESC
+        | LIMIT 40
+
+  - name: detect_db_logs
+    type: elasticsearch.esql.query
+    with:
+      format: json
+      query: |
+        FROM {{ consts.logs_index }}
+        | WHERE @timestamp > NOW() - 7 days AND data_stream.dataset IS NOT NULL
+        | STATS docs = COUNT(*) BY data_stream.dataset
+        | WHERE data_stream.dataset LIKE "*mysql*"
+            OR data_stream.dataset LIKE "*sql*"
+            OR data_stream.dataset LIKE "*postgres*"
+        | SORT docs DESC
+        | LIMIT 20
+
+  - name: ensure_db_dashboards
+    type: ai.agent
+    agent-id: "{{ consts.agent_id }}"
+    create-conversation: true
+    on-failure:
+      continue: true
+    with:
+      message: |
+        You are **DB Monitoring Auto-ops** for Elastic Observability Serverless.
+
+        Goal: ensure the full **Auto: DB …** catalog for OTel database receivers —
+        same product shape as the dbmonitoring pack, adapted for Serverless TSDB.
+
+        ## Live inventory
+        Metrics datasets (7d) from `{{ consts.metrics_index }}`:
+        ```
+        {{ steps.detect_db_metrics.output | json }}
+        ```
+        Log datasets (7d) from `{{ consts.logs_index }}`:
+        ```
+        {{ steps.detect_db_logs.output | json }}
+        ```
+        Also `GET /api/saved_objects/_find?type=dashboard&search_fields=title&search=Auto:%20DB&per_page=30`
+        and `GET /api/dashboards/auto-dbmon-{platform}` to see what already exists.
+
+        ## Family map (dataset → fixed dashboard id)
+        {{ consts.fixed_ids }}
+
+        Catalog titles:
+        {{ consts.catalog_titles }}
+
+        ## Rules
+        1. Ensure the **full catalog** (all fixed ids above) exists — create missing
+           boards even if that engine has no live data yet (empty panels OK; they
+           light up when receivers start). Prefer updating live families first.
+        2. Skip only when `auto-dbmon-*` already exists and panels look healthy.
+        3. Use **Dashboards API** `PUT /api/dashboards/{id}` with header
+           `Elastic-Api-Version: 2023-10-31`.
+        4. Panels must be inline **`type: vis`** (not lens). ES|QL in
+           `config.data_source` / layer `data_source`: `{ "type": "esql", "query": "…" }`.
+        5. **TSDB critical**: for gauge metrics use **`TS {{ consts.metrics_index }}`** +
+           `MAX(LAST_OVER_TIME(field))` and `WHERE data_stream.dataset == "…"`.
+           Do **not** use plain `FROM` + `AVG`/`MAX` on redis/postgresqlreceiver —
+           those return null on Serverless TSDB.
+        6. Time buckets: `BUCKET(@timestamp, 75, ?_tstart, ?_tend)`.
+        7. Tags on dashboard: `auto`, `auto-ops`, `db-monitoring`.
+        8. time_range: `now-2h` → `now`.
+        9. Redis: use `redis.memory.peak` (there is no `redis.maxmemory` on OTel).
+        10. MySQL boards may use `FROM {{ consts.logs_index }}` for slowlog/error.
+
+        ## Minimum panel set per family
+        - **postgresql** (`postgresqlreceiver.otel`): backends, deadlocks, db_size,
+          connection.max KPIs + backends/deadlocks/tup_* over time.
+        - **redis** (`redisreceiver.otel`): memory.used/peak, clients.connected,
+          fragmentation_ratio + memory/clients/keyspace/commands charts.
+        - **mysql** (slowlog/error logs): COUNT/AVG query_time KPIs + trends.
+        - **sqlserver** + **sqlserver_overview** (Datadog-style): connections, locks,
+          buffer cache, batch requests, I/O, per-instance bars.
+        - **mongodb / oracle / db2**: KPI strip + 1–2 time series.
+
+        ## End report
+        | family | dashboard_id | action (created|updated|skipped) | reason |
+        Then: CREATED=… UPDATED=… SKIPPED=…
+    timeout: 15m
