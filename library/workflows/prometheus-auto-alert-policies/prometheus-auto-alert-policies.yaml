@@ -26,7 +26,7 @@ template-metadata:
 name: Prometheus Auto Alert Policies
 description: >
   Gap-only Universal Alerting (ES|QL) for Managed Prometheus remote_write.
-  Creates via POST /api/alerting/v2/rules only — deletes leftover Classic auto-prom ids.
+  Creates via POST /api/alerting/v2/rules only (always attempt create; on-failure continue). Deletes leftover Classic auto-prom ids.
 enabled: true
 triggers:
   - type: manual
@@ -163,7 +163,6 @@ steps:
 
   - name: create_universal_http_5xx
     type: kibana.request
-    if: "${{ not (steps.list_universal_rules.output | json | contains: 'Auto: Prometheus HTTP 5xx Rate Spike') }}"
     on-failure:
       continue: true
     with:
@@ -201,7 +200,6 @@ steps:
 
   - name: create_universal_cpu
     type: kibana.request
-    if: "${{ not (steps.list_universal_rules.output | json | contains: 'Auto: Prometheus High CPU Usage Ratio') }}"
     on-failure:
       continue: true
     with:
@@ -238,7 +236,6 @@ steps:
 
   - name: create_universal_go
     type: kibana.request
-    if: "${{ not (steps.list_universal_rules.output | json | contains: 'Auto: Prometheus Go Goroutines Abnormal Growth') }}"
     on-failure:
       continue: true
     with:
@@ -275,7 +272,6 @@ steps:
 
   - name: create_universal_login
     type: kibana.request
-    if: "${{ not (steps.list_universal_rules.output | json | contains: 'Auto: Prometheus Login Failures Spike') }}"
     on-failure:
       continue: true
     with:
@@ -313,7 +309,6 @@ steps:
 
   - name: create_universal_purchases
     type: kibana.request
-    if: "${{ not (steps.list_universal_rules.output | json | contains: 'Auto: Prometheus Purchases Drop') }}"
     on-failure:
       continue: true
     with:
@@ -351,7 +346,6 @@ steps:
 
   - name: create_universal_payment
     type: kibana.request
-    if: "${{ not (steps.list_universal_rules.output | json | contains: 'Auto: Prometheus Payment Failures Spike') }}"
     on-failure:
       continue: true
     with:
@@ -389,7 +383,6 @@ steps:
 
   - name: create_universal_signups
     type: kibana.request
-    if: "${{ not (steps.list_universal_rules.output | json | contains: 'Auto: Prometheus Signups Drop') }}"
     on-failure:
       continue: true
     with:
@@ -427,7 +420,6 @@ steps:
 
   - name: create_universal_cart
     type: kibana.request
-    if: "${{ not (steps.list_universal_rules.output | json | contains: 'Auto: Prometheus Cart Abandonments Spike') }}"
     on-failure:
       continue: true
     with:
@@ -465,7 +457,6 @@ steps:
 
   - name: create_universal_views
     type: kibana.request
-    if: "${{ not (steps.list_universal_rules.output | json | contains: 'Auto: Prometheus Product Views Drop') }}"
     on-failure:
       continue: true
     with:
