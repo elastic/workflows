@@ -1,12 +1,12 @@
 template-metadata:
   slug: prometheus-auto-alert-policies
-  version: "1.4.0"
+  version: "1.4.1"
   availability: ">=9.6.0"
   name: "Auto Alert Policies"
   description: >-
     Gap-only Universal Alerting (ES|QL) for Managed Prometheus remote_write
     or OTel-shaped metrics. POST /api/alerting/v2/rules only (no Classic).
-    Dual-shape queries (service/status or service.name/http.status_code).
+    Dual-shape queries; estate-level deltas (no per-service alert fan-out); workshop-quiet thresholds.
   solutions: [observability]
   categories: [detection, monitoring, ai-agent]
   install:
@@ -193,12 +193,14 @@ steps:
             | EVAL http_cnt = COALESCE(http_requests_total, `http.server.requests`)
             | WHERE svc IS NOT NULL AND st == "500" AND http_cnt IS NOT NULL
             | EVAL v = TO_DOUBLE(http_cnt)
-            | STATS error_delta = MAX(v) - MIN(v) BY svc
-            | KEEP svc, error_delta
+            | STATS d = MAX(v) - MIN(v) BY svc, method, route
+            | WHERE d > 0
+            | STATS error_delta = SUM(d)
+            | KEEP error_delta
           breach:
-            segment: "| WHERE error_delta > 50"
+            segment: "| WHERE error_delta > 3000"
         grouping:
-          fields: [svc]
+          fields: []
         recovery:
           strategy: no_breach
         no_data:
@@ -235,9 +237,9 @@ steps:
             | STATS max_cpu = MAX(cpu) BY svc
             | KEEP svc, max_cpu
           breach:
-            segment: "| WHERE max_cpu > 0.85"
+            segment: "| WHERE max_cpu > 0.95"
         grouping:
-          fields: [svc]
+          fields: []
         recovery:
           strategy: no_breach
         no_data:
@@ -274,9 +276,9 @@ steps:
             | STATS max_go = MAX(g) BY svc
             | KEEP svc, max_go
           breach:
-            segment: "| WHERE max_go > 500"
+            segment: "| WHERE max_go > 2000"
         grouping:
-          fields: [svc]
+          fields: []
         recovery:
           strategy: no_breach
         no_data:
@@ -311,12 +313,14 @@ steps:
             | EVAL fails = COALESCE(user_login_failures_total, `user.login.failures`)
             | WHERE svc IS NOT NULL AND fails IS NOT NULL
             | EVAL v = TO_DOUBLE(fails)
-            | STATS fail_delta = MAX(v) - MIN(v) BY svc
-            | KEEP svc, fail_delta
+            | STATS d = MAX(v) - MIN(v) BY svc, reason, channel
+            | WHERE d > 0
+            | STATS fail_delta = SUM(d)
+            | KEEP fail_delta
           breach:
-            segment: "| WHERE fail_delta > 20"
+            segment: "| WHERE fail_delta > 3000"
         grouping:
-          fields: [svc]
+          fields: []
         recovery:
           strategy: no_breach
         no_data:
@@ -351,12 +355,14 @@ steps:
             | EVAL p = COALESCE(purchases_total, purchases)
             | WHERE svc IS NOT NULL AND p IS NOT NULL
             | EVAL v = TO_DOUBLE(p)
-            | STATS purchase_delta = MAX(v) - MIN(v) BY svc
-            | KEEP svc, purchase_delta
+            | STATS d = MAX(v) - MIN(v) BY svc, channel
+            | WHERE d > 0
+            | STATS purchase_delta = SUM(d)
+            | KEEP purchase_delta
           breach:
-            segment: "| WHERE purchase_delta < 1"
+            segment: "| WHERE purchase_delta == 0"
         grouping:
-          fields: [svc]
+          fields: []
         recovery:
           strategy: no_breach
         no_data:
@@ -391,12 +397,14 @@ steps:
             | EVAL fails = COALESCE(payment_failures_total, `payment.failures`)
             | WHERE svc IS NOT NULL AND fails IS NOT NULL
             | EVAL v = TO_DOUBLE(fails)
-            | STATS fail_delta = MAX(v) - MIN(v) BY svc
-            | KEEP svc, fail_delta
+            | STATS d = MAX(v) - MIN(v) BY svc, channel, reason
+            | WHERE d > 0
+            | STATS fail_delta = SUM(d)
+            | KEEP fail_delta
           breach:
-            segment: "| WHERE fail_delta > 10"
+            segment: "| WHERE fail_delta > 2000"
         grouping:
-          fields: [svc]
+          fields: []
         recovery:
           strategy: no_breach
         no_data:
@@ -431,12 +439,14 @@ steps:
             | EVAL s = COALESCE(user_signups_total, `user.signups`)
             | WHERE svc IS NOT NULL AND s IS NOT NULL
             | EVAL v = TO_DOUBLE(s)
-            | STATS signup_delta = MAX(v) - MIN(v) BY svc
-            | KEEP svc, signup_delta
+            | STATS d = MAX(v) - MIN(v) BY svc, channel
+            | WHERE d > 0
+            | STATS signup_delta = SUM(d)
+            | KEEP signup_delta
           breach:
-            segment: "| WHERE signup_delta < 1"
+            segment: "| WHERE signup_delta == 0"
         grouping:
-          fields: [svc]
+          fields: []
         recovery:
           strategy: no_breach
         no_data:
@@ -471,12 +481,14 @@ steps:
             | EVAL c = COALESCE(cart_abandonments_total, `cart.abandonments`)
             | WHERE svc IS NOT NULL AND c IS NOT NULL
             | EVAL v = TO_DOUBLE(c)
-            | STATS abandon_delta = MAX(v) - MIN(v) BY svc
-            | KEEP svc, abandon_delta
+            | STATS d = MAX(v) - MIN(v) BY svc, channel
+            | WHERE d > 0
+            | STATS abandon_delta = SUM(d)
+            | KEEP abandon_delta
           breach:
-            segment: "| WHERE abandon_delta > 25"
+            segment: "| WHERE abandon_delta > 3000"
         grouping:
-          fields: [svc]
+          fields: []
         recovery:
           strategy: no_breach
         no_data:
@@ -511,12 +523,14 @@ steps:
             | EVAL vws = COALESCE(product_views_total, `product.views`)
             | WHERE svc IS NOT NULL AND vws IS NOT NULL
             | EVAL v = TO_DOUBLE(vws)
-            | STATS views_delta = MAX(v) - MIN(v) BY svc
-            | KEEP svc, views_delta
+            | STATS d = MAX(v) - MIN(v) BY svc, channel
+            | WHERE d > 0
+            | STATS views_delta = SUM(d)
+            | KEEP views_delta
           breach:
-            segment: "| WHERE views_delta < 1"
+            segment: "| WHERE views_delta == 0"
         grouping:
-          fields: [svc]
+          fields: []
         recovery:
           strategy: no_breach
         no_data:
