@@ -1,12 +1,11 @@
 template-metadata:
   slug: prometheus-auto-alert-policies
-  version: "1.2.0"
+  version: "1.3.0"
   availability: ">=9.6.0"
   name: "Prometheus Auto Alert Policies"
   description: >-
-    Detect Prometheus / OTel metric families and gap-only create Observability
-    ES|QL (.es-query) alert rules with deterministic auto-prom ids via Kibana API
-    (not agent-only). Works on Managed PRW (service/status) streams.
+    Gap-only Universal Alerting (ES|QL) via POST /api/alerting/v2/rules.
+    No Classic .es-query rules. Cleans leftover Classic auto-prom ids.
   solutions: [observability]
   categories: [detection, monitoring, ai-agent]
   install:
@@ -19,17 +18,15 @@ template-metadata:
       - name: metrics-index
         label: "Metrics index pattern"
         description: >-
-          Managed PRW: metrics-generic.prometheus-default (or prometheus-*).
-          Detection prefers Prom labels (service + status).
+          Managed PRW: metrics-generic.prometheus-default.
         inputType: esIndex
         required: true
         default: "metrics-generic.prometheus-default"
 
 name: Prometheus Auto Alert Policies
 description: >
-  Hourly (and on demand): detect Prometheus metric families, then gap-only create
-  a canonical set of Observability ES|QL alert policies (deterministic rule ids).
-  First-run get_* 404s are expected; matching upsert_* steps create the rules.
+  Gap-only Universal Alerting (ES|QL) for Managed Prometheus remote_write.
+  Creates via POST /api/alerting/v2/rules only — deletes leftover Classic auto-prom ids.
 enabled: true
 triggers:
   - type: manual
@@ -66,460 +63,449 @@ steps:
                 views_samples = COUNT(*) WHERE product_views_total IS NOT NULL,
                 services = COUNT_DISTINCT(service)
 
-  - name: list_alert_rules
+  - name: list_universal_rules
     type: kibana.request
     with:
       method: GET
-      path: /api/alerting/rules/_find
-      query:
-        page: "1"
-        per_page: "100"
-        search: "auto-prom"
+      path: /api/alerting/v2/rules
       headers:
         Elastic-Api-Version: "2023-10-31"
 
-  - name: get_rule_http_5xx
+  - name: delete_classic_auto_prom_http_5xx_rate
     type: kibana.request
     on-failure:
       continue: true
     with:
-      method: GET
+      method: DELETE
       path: /api/alerting/rule/auto-prom-http-5xx-rate
       headers:
         Elastic-Api-Version: "2023-10-31"
-  - name: get_rule_cpu
+
+  - name: delete_classic_auto_prom_cpu_usage_high
     type: kibana.request
     on-failure:
       continue: true
     with:
-      method: GET
+      method: DELETE
       path: /api/alerting/rule/auto-prom-cpu-usage-high
       headers:
         Elastic-Api-Version: "2023-10-31"
-  - name: get_rule_go
+
+  - name: delete_classic_auto_prom_go_goroutines_high
     type: kibana.request
     on-failure:
       continue: true
     with:
-      method: GET
+      method: DELETE
       path: /api/alerting/rule/auto-prom-go-goroutines-high
       headers:
         Elastic-Api-Version: "2023-10-31"
-  - name: get_rule_login
+
+  - name: delete_classic_auto_prom_login_failures_spike
     type: kibana.request
     on-failure:
       continue: true
     with:
-      method: GET
+      method: DELETE
       path: /api/alerting/rule/auto-prom-login-failures-spike
       headers:
         Elastic-Api-Version: "2023-10-31"
-  - name: get_rule_purchases
+
+  - name: delete_classic_auto_prom_purchases_drop
     type: kibana.request
     on-failure:
       continue: true
     with:
-      method: GET
+      method: DELETE
       path: /api/alerting/rule/auto-prom-purchases-drop
       headers:
         Elastic-Api-Version: "2023-10-31"
-  - name: get_rule_payment
+
+  - name: delete_classic_auto_prom_payment_failures_spike
     type: kibana.request
     on-failure:
       continue: true
     with:
-      method: GET
+      method: DELETE
       path: /api/alerting/rule/auto-prom-payment-failures-spike
       headers:
         Elastic-Api-Version: "2023-10-31"
-  - name: get_rule_signups
+
+  - name: delete_classic_auto_prom_signups_drop
     type: kibana.request
     on-failure:
       continue: true
     with:
-      method: GET
+      method: DELETE
       path: /api/alerting/rule/auto-prom-signups-drop
       headers:
         Elastic-Api-Version: "2023-10-31"
-  - name: get_rule_cart
+
+  - name: delete_classic_auto_prom_cart_abandonments_spike
     type: kibana.request
     on-failure:
       continue: true
     with:
-      method: GET
+      method: DELETE
       path: /api/alerting/rule/auto-prom-cart-abandonments-spike
       headers:
         Elastic-Api-Version: "2023-10-31"
-  - name: get_rule_views
+
+  - name: delete_classic_auto_prom_product_views_drop
     type: kibana.request
     on-failure:
       continue: true
     with:
-      method: GET
+      method: DELETE
       path: /api/alerting/rule/auto-prom-product-views-drop
       headers:
         Elastic-Api-Version: "2023-10-31"
 
-  # Deterministic Classic ES|QL creates (gap-only). Agent-only sync was reporting
-  # success without writing rules on Serverless.
-  - name: upsert_rule_http_5xx
+  - name: create_universal_http_5xx
     type: kibana.request
-    if: "steps.get_rule_http_5xx.error.message: HTTP*404*"
+    if: "${{ not (steps.list_universal_rules.output | json | contains: 'Auto: Prometheus HTTP 5xx Rate Spike') }}"
     on-failure:
       continue: true
     with:
       method: POST
-      path: /api/alerting/rule/auto-prom-http-5xx-rate
+      path: /api/alerting/v2/rules
       headers:
         Elastic-Api-Version: "2023-10-31"
       body:
-        name: "Auto: Prometheus HTTP 5xx Rate Spike"
-        rule_type_id: ".es-query"
-        consumer: alerts
-        enabled: true
+        kind: alert
+        metadata:
+          name: "Auto: Prometheus HTTP 5xx Rate Spike"
+          description: "Universal ES|QL — 5xx request deltas by service (Managed PRW)."
+          tags: [prometheus, auto-prom, universal, auto-ops]
+          routing_tags: [auto-prom]
         schedule:
-          interval: 5m
-        tags: [prometheus, auto-prom, agent-builder]
-        params:
-          searchType: esqlQuery
-          timeField: "@timestamp"
-          size: 100
-          threshold: [0]
-          thresholdComparator: ">"
-          timeWindowSize: 15
-          timeWindowUnit: m
-          excludeHitsFromPreviousRun: true
-          aggType: count
-          groupBy: row
-          esqlQuery:
-            esql: |
-              FROM {{ consts.metrics_index }}
-              | WHERE @timestamp >= ?_tstart AND @timestamp <= ?_tend
-                  AND http_requests_total IS NOT NULL AND service IS NOT NULL AND status == "500"
-              | EVAL v = TO_DOUBLE(http_requests_total)
-              | STATS error_delta = MAX(v) - MIN(v) BY service
-              | WHERE error_delta > 50
-              | KEEP service, error_delta
+          every: 5m
+          lookback: 15m
+        time_field: "@timestamp"
+        query:
+          base: |
+            FROM {{ consts.metrics_index }}
+            | WHERE @timestamp >= ?_tstart AND @timestamp <= ?_tend
+                AND http_requests_total IS NOT NULL AND service IS NOT NULL AND status == "500"
+            | EVAL v = TO_DOUBLE(http_requests_total)
+            | STATS error_delta = MAX(v) - MIN(v) BY service
+            | KEEP service, error_delta
+          breach:
+            segment: "| WHERE error_delta > 50"
+        grouping:
+          fields: [service]
+        recovery:
+          strategy: no_breach
+        no_data:
+          strategy: ignore
 
-  - name: upsert_rule_cpu
+  - name: create_universal_cpu
     type: kibana.request
-    if: "steps.get_rule_cpu.error.message: HTTP*404*"
+    if: "${{ not (steps.list_universal_rules.output | json | contains: 'Auto: Prometheus High CPU Usage Ratio') }}"
     on-failure:
       continue: true
     with:
       method: POST
-      path: /api/alerting/rule/auto-prom-cpu-usage-high
+      path: /api/alerting/v2/rules
       headers:
         Elastic-Api-Version: "2023-10-31"
       body:
-        name: "Auto: Prometheus High CPU Usage Ratio"
-        rule_type_id: ".es-query"
-        consumer: alerts
-        enabled: true
+        kind: alert
+        metadata:
+          name: "Auto: Prometheus High CPU Usage Ratio"
+          description: "Universal ES|QL — process_cpu_usage_ratio high by service."
+          tags: [prometheus, auto-prom, universal, auto-ops]
+          routing_tags: [auto-prom]
         schedule:
-          interval: 5m
-        tags: [prometheus, auto-prom, agent-builder]
-        params:
-          searchType: esqlQuery
-          timeField: "@timestamp"
-          size: 100
-          threshold: [0]
-          thresholdComparator: ">"
-          timeWindowSize: 15
-          timeWindowUnit: m
-          excludeHitsFromPreviousRun: true
-          aggType: count
-          groupBy: row
-          esqlQuery:
-            esql: |
-              FROM {{ consts.metrics_index }}
-              | WHERE @timestamp >= ?_tstart AND @timestamp <= ?_tend
-                  AND process_cpu_usage_ratio IS NOT NULL AND service IS NOT NULL
-              | STATS max_cpu = MAX(process_cpu_usage_ratio) BY service
-              | WHERE max_cpu > 0.85
-              | KEEP service, max_cpu
+          every: 5m
+          lookback: 15m
+        time_field: "@timestamp"
+        query:
+          base: |
+            FROM {{ consts.metrics_index }}
+            | WHERE @timestamp >= ?_tstart AND @timestamp <= ?_tend
+                AND process_cpu_usage_ratio IS NOT NULL AND service IS NOT NULL
+            | STATS max_cpu = MAX(process_cpu_usage_ratio) BY service
+            | KEEP service, max_cpu
+          breach:
+            segment: "| WHERE max_cpu > 0.85"
+        grouping:
+          fields: [service]
+        recovery:
+          strategy: no_breach
+        no_data:
+          strategy: ignore
 
-  - name: upsert_rule_go
+  - name: create_universal_go
     type: kibana.request
-    if: "steps.get_rule_go.error.message: HTTP*404*"
+    if: "${{ not (steps.list_universal_rules.output | json | contains: 'Auto: Prometheus Go Goroutines Abnormal Growth') }}"
     on-failure:
       continue: true
     with:
       method: POST
-      path: /api/alerting/rule/auto-prom-go-goroutines-high
+      path: /api/alerting/v2/rules
       headers:
         Elastic-Api-Version: "2023-10-31"
       body:
-        name: "Auto: Prometheus Go Goroutines Abnormal Growth"
-        rule_type_id: ".es-query"
-        consumer: alerts
-        enabled: true
+        kind: alert
+        metadata:
+          name: "Auto: Prometheus Go Goroutines Abnormal Growth"
+          description: "Universal ES|QL — go_goroutines elevated by service."
+          tags: [prometheus, auto-prom, universal, auto-ops]
+          routing_tags: [auto-prom]
         schedule:
-          interval: 5m
-        tags: [prometheus, auto-prom, agent-builder]
-        params:
-          searchType: esqlQuery
-          timeField: "@timestamp"
-          size: 100
-          threshold: [0]
-          thresholdComparator: ">"
-          timeWindowSize: 15
-          timeWindowUnit: m
-          excludeHitsFromPreviousRun: true
-          aggType: count
-          groupBy: row
-          esqlQuery:
-            esql: |
-              FROM {{ consts.metrics_index }}
-              | WHERE @timestamp >= ?_tstart AND @timestamp <= ?_tend
-                  AND go_goroutines IS NOT NULL AND service IS NOT NULL
-              | STATS max_go = MAX(go_goroutines) BY service
-              | WHERE max_go > 500
-              | KEEP service, max_go
+          every: 5m
+          lookback: 15m
+        time_field: "@timestamp"
+        query:
+          base: |
+            FROM {{ consts.metrics_index }}
+            | WHERE @timestamp >= ?_tstart AND @timestamp <= ?_tend
+                AND go_goroutines IS NOT NULL AND service IS NOT NULL
+            | STATS max_go = MAX(go_goroutines) BY service
+            | KEEP service, max_go
+          breach:
+            segment: "| WHERE max_go > 500"
+        grouping:
+          fields: [service]
+        recovery:
+          strategy: no_breach
+        no_data:
+          strategy: ignore
 
-  - name: upsert_rule_login
+  - name: create_universal_login
     type: kibana.request
-    if: "steps.get_rule_login.error.message: HTTP*404*"
+    if: "${{ not (steps.list_universal_rules.output | json | contains: 'Auto: Prometheus Login Failures Spike') }}"
     on-failure:
       continue: true
     with:
       method: POST
-      path: /api/alerting/rule/auto-prom-login-failures-spike
+      path: /api/alerting/v2/rules
       headers:
         Elastic-Api-Version: "2023-10-31"
       body:
-        name: "Auto: Prometheus Login Failures Spike"
-        rule_type_id: ".es-query"
-        consumer: alerts
-        enabled: true
+        kind: alert
+        metadata:
+          name: "Auto: Prometheus Login Failures Spike"
+          description: "Universal ES|QL — user_login_failures_total deltas by service."
+          tags: [prometheus, auto-prom, universal, auto-ops, security]
+          routing_tags: [auto-prom]
         schedule:
-          interval: 5m
-        tags: [prometheus, auto-prom, agent-builder, security]
-        params:
-          searchType: esqlQuery
-          timeField: "@timestamp"
-          size: 100
-          threshold: [0]
-          thresholdComparator: ">"
-          timeWindowSize: 15
-          timeWindowUnit: m
-          excludeHitsFromPreviousRun: true
-          aggType: count
-          groupBy: row
-          esqlQuery:
-            esql: |
-              FROM {{ consts.metrics_index }}
-              | WHERE @timestamp >= ?_tstart AND @timestamp <= ?_tend
-                  AND user_login_failures_total IS NOT NULL AND service IS NOT NULL
-              | EVAL v = TO_DOUBLE(user_login_failures_total)
-              | STATS fail_delta = MAX(v) - MIN(v) BY service
-              | WHERE fail_delta > 20
-              | KEEP service, fail_delta
+          every: 5m
+          lookback: 15m
+        time_field: "@timestamp"
+        query:
+          base: |
+            FROM {{ consts.metrics_index }}
+            | WHERE @timestamp >= ?_tstart AND @timestamp <= ?_tend
+                AND user_login_failures_total IS NOT NULL AND service IS NOT NULL
+            | EVAL v = TO_DOUBLE(user_login_failures_total)
+            | STATS fail_delta = MAX(v) - MIN(v) BY service
+            | KEEP service, fail_delta
+          breach:
+            segment: "| WHERE fail_delta > 20"
+        grouping:
+          fields: [service]
+        recovery:
+          strategy: no_breach
+        no_data:
+          strategy: ignore
 
-  - name: upsert_rule_purchases
+  - name: create_universal_purchases
     type: kibana.request
-    if: "steps.get_rule_purchases.error.message: HTTP*404*"
+    if: "${{ not (steps.list_universal_rules.output | json | contains: 'Auto: Prometheus Purchases Drop') }}"
     on-failure:
       continue: true
     with:
       method: POST
-      path: /api/alerting/rule/auto-prom-purchases-drop
+      path: /api/alerting/v2/rules
       headers:
         Elastic-Api-Version: "2023-10-31"
       body:
-        name: "Auto: Prometheus Purchases Drop"
-        rule_type_id: ".es-query"
-        consumer: alerts
-        enabled: true
+        kind: alert
+        metadata:
+          name: "Auto: Prometheus Purchases Drop"
+          description: "Universal ES|QL — purchases_total near-zero delta."
+          tags: [prometheus, auto-prom, universal, auto-ops]
+          routing_tags: [auto-prom]
         schedule:
-          interval: 5m
-        tags: [prometheus, auto-prom, agent-builder]
-        params:
-          searchType: esqlQuery
-          timeField: "@timestamp"
-          size: 100
-          threshold: [0]
-          thresholdComparator: ">"
-          timeWindowSize: 30
-          timeWindowUnit: m
-          excludeHitsFromPreviousRun: true
-          aggType: count
-          groupBy: row
-          esqlQuery:
-            esql: |
-              FROM {{ consts.metrics_index }}
-              | WHERE @timestamp >= ?_tstart AND @timestamp <= ?_tend
-                  AND purchases_total IS NOT NULL AND service IS NOT NULL
-              | EVAL v = TO_DOUBLE(purchases_total)
-              | STATS purchase_delta = MAX(v) - MIN(v) BY service
-              | WHERE purchase_delta < 1
-              | KEEP service, purchase_delta
+          every: 5m
+          lookback: 30m
+        time_field: "@timestamp"
+        query:
+          base: |
+            FROM {{ consts.metrics_index }}
+            | WHERE @timestamp >= ?_tstart AND @timestamp <= ?_tend
+                AND purchases_total IS NOT NULL AND service IS NOT NULL
+            | EVAL v = TO_DOUBLE(purchases_total)
+            | STATS purchase_delta = MAX(v) - MIN(v) BY service
+            | KEEP service, purchase_delta
+          breach:
+            segment: "| WHERE purchase_delta < 1"
+        grouping:
+          fields: [service]
+        recovery:
+          strategy: no_breach
+        no_data:
+          strategy: ignore
 
-  - name: upsert_rule_payment
+  - name: create_universal_payment
     type: kibana.request
-    if: "steps.get_rule_payment.error.message: HTTP*404*"
+    if: "${{ not (steps.list_universal_rules.output | json | contains: 'Auto: Prometheus Payment Failures Spike') }}"
     on-failure:
       continue: true
     with:
       method: POST
-      path: /api/alerting/rule/auto-prom-payment-failures-spike
+      path: /api/alerting/v2/rules
       headers:
         Elastic-Api-Version: "2023-10-31"
       body:
-        name: "Auto: Prometheus Payment Failures Spike"
-        rule_type_id: ".es-query"
-        consumer: alerts
-        enabled: true
+        kind: alert
+        metadata:
+          name: "Auto: Prometheus Payment Failures Spike"
+          description: "Universal ES|QL — payment_failures_total deltas by service."
+          tags: [prometheus, auto-prom, universal, auto-ops]
+          routing_tags: [auto-prom]
         schedule:
-          interval: 5m
-        tags: [prometheus, auto-prom, agent-builder]
-        params:
-          searchType: esqlQuery
-          timeField: "@timestamp"
-          size: 100
-          threshold: [0]
-          thresholdComparator: ">"
-          timeWindowSize: 15
-          timeWindowUnit: m
-          excludeHitsFromPreviousRun: true
-          aggType: count
-          groupBy: row
-          esqlQuery:
-            esql: |
-              FROM {{ consts.metrics_index }}
-              | WHERE @timestamp >= ?_tstart AND @timestamp <= ?_tend
-                  AND payment_failures_total IS NOT NULL AND service IS NOT NULL
-              | EVAL v = TO_DOUBLE(payment_failures_total)
-              | STATS fail_delta = MAX(v) - MIN(v) BY service
-              | WHERE fail_delta > 10
-              | KEEP service, fail_delta
+          every: 5m
+          lookback: 15m
+        time_field: "@timestamp"
+        query:
+          base: |
+            FROM {{ consts.metrics_index }}
+            | WHERE @timestamp >= ?_tstart AND @timestamp <= ?_tend
+                AND payment_failures_total IS NOT NULL AND service IS NOT NULL
+            | EVAL v = TO_DOUBLE(payment_failures_total)
+            | STATS fail_delta = MAX(v) - MIN(v) BY service
+            | KEEP service, fail_delta
+          breach:
+            segment: "| WHERE fail_delta > 10"
+        grouping:
+          fields: [service]
+        recovery:
+          strategy: no_breach
+        no_data:
+          strategy: ignore
 
-  - name: upsert_rule_signups
+  - name: create_universal_signups
     type: kibana.request
-    if: "steps.get_rule_signups.error.message: HTTP*404*"
+    if: "${{ not (steps.list_universal_rules.output | json | contains: 'Auto: Prometheus Signups Drop') }}"
     on-failure:
       continue: true
     with:
       method: POST
-      path: /api/alerting/rule/auto-prom-signups-drop
+      path: /api/alerting/v2/rules
       headers:
         Elastic-Api-Version: "2023-10-31"
       body:
-        name: "Auto: Prometheus Signups Drop"
-        rule_type_id: ".es-query"
-        consumer: alerts
-        enabled: true
+        kind: alert
+        metadata:
+          name: "Auto: Prometheus Signups Drop"
+          description: "Universal ES|QL — user_signups_total near-zero delta."
+          tags: [prometheus, auto-prom, universal, auto-ops]
+          routing_tags: [auto-prom]
         schedule:
-          interval: 5m
-        tags: [prometheus, auto-prom, agent-builder]
-        params:
-          searchType: esqlQuery
-          timeField: "@timestamp"
-          size: 100
-          threshold: [0]
-          thresholdComparator: ">"
-          timeWindowSize: 30
-          timeWindowUnit: m
-          excludeHitsFromPreviousRun: true
-          aggType: count
-          groupBy: row
-          esqlQuery:
-            esql: |
-              FROM {{ consts.metrics_index }}
-              | WHERE @timestamp >= ?_tstart AND @timestamp <= ?_tend
-                  AND user_signups_total IS NOT NULL AND service IS NOT NULL
-              | EVAL v = TO_DOUBLE(user_signups_total)
-              | STATS signup_delta = MAX(v) - MIN(v) BY service
-              | WHERE signup_delta < 1
-              | KEEP service, signup_delta
+          every: 5m
+          lookback: 30m
+        time_field: "@timestamp"
+        query:
+          base: |
+            FROM {{ consts.metrics_index }}
+            | WHERE @timestamp >= ?_tstart AND @timestamp <= ?_tend
+                AND user_signups_total IS NOT NULL AND service IS NOT NULL
+            | EVAL v = TO_DOUBLE(user_signups_total)
+            | STATS signup_delta = MAX(v) - MIN(v) BY service
+            | KEEP service, signup_delta
+          breach:
+            segment: "| WHERE signup_delta < 1"
+        grouping:
+          fields: [service]
+        recovery:
+          strategy: no_breach
+        no_data:
+          strategy: ignore
 
-  - name: upsert_rule_cart
+  - name: create_universal_cart
     type: kibana.request
-    if: "steps.get_rule_cart.error.message: HTTP*404*"
+    if: "${{ not (steps.list_universal_rules.output | json | contains: 'Auto: Prometheus Cart Abandonments Spike') }}"
     on-failure:
       continue: true
     with:
       method: POST
-      path: /api/alerting/rule/auto-prom-cart-abandonments-spike
+      path: /api/alerting/v2/rules
       headers:
         Elastic-Api-Version: "2023-10-31"
       body:
-        name: "Auto: Prometheus Cart Abandonments Spike"
-        rule_type_id: ".es-query"
-        consumer: alerts
-        enabled: true
+        kind: alert
+        metadata:
+          name: "Auto: Prometheus Cart Abandonments Spike"
+          description: "Universal ES|QL — cart_abandonments_total deltas by service."
+          tags: [prometheus, auto-prom, universal, auto-ops]
+          routing_tags: [auto-prom]
         schedule:
-          interval: 5m
-        tags: [prometheus, auto-prom, agent-builder]
-        params:
-          searchType: esqlQuery
-          timeField: "@timestamp"
-          size: 100
-          threshold: [0]
-          thresholdComparator: ">"
-          timeWindowSize: 15
-          timeWindowUnit: m
-          excludeHitsFromPreviousRun: true
-          aggType: count
-          groupBy: row
-          esqlQuery:
-            esql: |
-              FROM {{ consts.metrics_index }}
-              | WHERE @timestamp >= ?_tstart AND @timestamp <= ?_tend
-                  AND cart_abandonments_total IS NOT NULL AND service IS NOT NULL
-              | EVAL v = TO_DOUBLE(cart_abandonments_total)
-              | STATS abandon_delta = MAX(v) - MIN(v) BY service
-              | WHERE abandon_delta > 25
-              | KEEP service, abandon_delta
+          every: 5m
+          lookback: 15m
+        time_field: "@timestamp"
+        query:
+          base: |
+            FROM {{ consts.metrics_index }}
+            | WHERE @timestamp >= ?_tstart AND @timestamp <= ?_tend
+                AND cart_abandonments_total IS NOT NULL AND service IS NOT NULL
+            | EVAL v = TO_DOUBLE(cart_abandonments_total)
+            | STATS abandon_delta = MAX(v) - MIN(v) BY service
+            | KEEP service, abandon_delta
+          breach:
+            segment: "| WHERE abandon_delta > 25"
+        grouping:
+          fields: [service]
+        recovery:
+          strategy: no_breach
+        no_data:
+          strategy: ignore
 
-  - name: upsert_rule_views
+  - name: create_universal_views
     type: kibana.request
-    if: "steps.get_rule_views.error.message: HTTP*404*"
+    if: "${{ not (steps.list_universal_rules.output | json | contains: 'Auto: Prometheus Product Views Drop') }}"
     on-failure:
       continue: true
     with:
       method: POST
-      path: /api/alerting/rule/auto-prom-product-views-drop
+      path: /api/alerting/v2/rules
       headers:
         Elastic-Api-Version: "2023-10-31"
       body:
-        name: "Auto: Prometheus Product Views Drop"
-        rule_type_id: ".es-query"
-        consumer: alerts
-        enabled: true
+        kind: alert
+        metadata:
+          name: "Auto: Prometheus Product Views Drop"
+          description: "Universal ES|QL — product_views_total near-zero delta."
+          tags: [prometheus, auto-prom, universal, auto-ops]
+          routing_tags: [auto-prom]
         schedule:
-          interval: 5m
-        tags: [prometheus, auto-prom, agent-builder]
-        params:
-          searchType: esqlQuery
-          timeField: "@timestamp"
-          size: 100
-          threshold: [0]
-          thresholdComparator: ">"
-          timeWindowSize: 30
-          timeWindowUnit: m
-          excludeHitsFromPreviousRun: true
-          aggType: count
-          groupBy: row
-          esqlQuery:
-            esql: |
-              FROM {{ consts.metrics_index }}
-              | WHERE @timestamp >= ?_tstart AND @timestamp <= ?_tend
-                  AND product_views_total IS NOT NULL AND service IS NOT NULL
-              | EVAL v = TO_DOUBLE(product_views_total)
-              | STATS views_delta = MAX(v) - MIN(v) BY service
-              | WHERE views_delta < 1
-              | KEEP service, views_delta
+          every: 5m
+          lookback: 30m
+        time_field: "@timestamp"
+        query:
+          base: |
+            FROM {{ consts.metrics_index }}
+            | WHERE @timestamp >= ?_tstart AND @timestamp <= ?_tend
+                AND product_views_total IS NOT NULL AND service IS NOT NULL
+            | EVAL v = TO_DOUBLE(product_views_total)
+            | STATS views_delta = MAX(v) - MIN(v) BY service
+            | KEEP service, views_delta
+          breach:
+            segment: "| WHERE views_delta < 1"
+        grouping:
+          fields: [service]
+        recovery:
+          strategy: no_breach
+        no_data:
+          strategy: ignore
 
-  - name: verify_created_rules
+  - name: verify_universal_rules
     type: kibana.request
     with:
       method: GET
-      path: /api/alerting/rules/_find
-      query:
-        page: "1"
-        per_page: "100"
-        search: "Auto: Prometheus"
+      path: /api/alerting/v2/rules
       headers:
         Elastic-Api-Version: "2023-10-31"
 
@@ -530,18 +516,10 @@ steps:
       continue: true
     with:
       message: |
-        Summarize Prometheus Auto Alert Policies gap-fill (read-only — do not create more rules unless verify shows zero Auto: Prometheus rules).
-
+        Summarize Universal Alerting gap-fill (read-only).
         Detection: {{ steps.detect_metric_families.output | json }}
-        Before: {{ steps.list_alert_rules.output | json }}
-        After verify (search Auto: Prometheus): {{ steps.verify_created_rules.output | json }}
-
-        Expected canonical ids: auto-prom-http-5xx-rate, auto-prom-cpu-usage-high,
-        auto-prom-go-goroutines-high, auto-prom-login-failures-spike,
-        auto-prom-purchases-drop, auto-prom-payment-failures-spike,
-        auto-prom-signups-drop, auto-prom-cart-abandonments-spike,
-        auto-prom-product-views-drop.
-
-        End table: id | present(yes/no) | notes. Tell the learner to open
-        **Alerting → Rules** and search `Auto: Prometheus` or tag `auto-prom`.
+        Universal rules: {{ steps.verify_universal_rules.output | json }}
+        Open **Alerting → Rules → Universal**, search `Auto: Prometheus`.
+        Classic auto-prom leftovers were deleted when present.
+        End table: name | present(yes/no).
     timeout: 10m
