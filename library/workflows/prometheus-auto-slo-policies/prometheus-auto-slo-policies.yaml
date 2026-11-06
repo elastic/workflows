@@ -1,10 +1,12 @@
 template-metadata:
   slug: prometheus-auto-slo-policies
-  version: "1.0.0"
+  version: "1.1.0"
   availability: ">=9.6.0"
   name: "Prometheus auto SLO policies (baseline → improve)"
   description: >-
-    Measure per-service availability baselines, create gap-only SLOs just below current SLI, then ratchet targets while services stay healthy.
+    Measure per-service availability baselines on Managed Prometheus Remote Write
+    (metrics-generic.prometheus-*), create gap-only SLOs just below current SLI,
+    then ratchet targets while services stay healthy.
   solutions: [observability]
   categories: [monitoring, detection, ai-agent]
   install:
@@ -20,14 +22,15 @@ template-metadata:
       - name: metrics-index
         label: "Metrics data stream / index"
         description: >-
-          Prefer metrics-generic.otel-default (or equivalent) with http.status_code +
-          service.name. Avoid SUM() on Prometheus counter_double fields.
+          Managed Prometheus Remote Write stream. Default metrics-generic.prometheus-default.
+          PRW series use labels `service` + `status` (not service.name / http.status_code).
+          Avoid SUM() on Prometheus counter_double fields — use COUNT(*) on docs.
         inputType: esIndex
         required: true
-        default: "metrics-generic.otel-default"
+        default: "metrics-generic.prometheus-default"
       - name: service-filter
         label: "Service name filter (ES|QL LIKE)"
-        description: 'ES|QL LIKE pattern; default * matches all services with http.status_code'
+        description: 'ES|QL LIKE pattern on `service`; default * matches all services with status'
         inputType: text
         required: true
         default: "*"
@@ -66,9 +69,10 @@ template-metadata:
 
 name: Prometheus Auto SLO Policies
 description: >
-  Hourly (and on demand): measure per-service availability baselines,
-  create gap-only SLOs with targets set just below current SLI (so new coverage
-  starts Healthy), then slowly ratchet targets upward only when services stay green.
+  Hourly (and on demand): measure per-service availability baselines on Managed
+  Prometheus Remote Write, create gap-only SLOs with targets set just below current
+  SLI (so new coverage starts Healthy), then slowly ratchet targets upward only when
+  services stay green.
 enabled: true
 
 settings:
@@ -94,23 +98,26 @@ triggers:
       every: 1h
 
 steps:
-  # COUNT(*) on request docs — counter_double fields cannot be SUM()'d in ES|QL.
+  # COUNT(*) on PRW docs — counter_double fields cannot be SUM()'d in ES|QL.
+  # Labels: service + status (Managed Prometheus Remote Write).
   - name: baseline_services
     type: elasticsearch.esql.query
     with:
       format: json
       query: |
         FROM {{ consts.metrics_index }}
-        | WHERE @timestamp > NOW() - 7 days AND service.name LIKE "{{ consts.service_filter }}" AND http.status_code IS NOT NULL
+        | WHERE @timestamp > NOW() - 7 days
+            AND service LIKE "{{ consts.service_filter }}"
+            AND status IS NOT NULL
         | STATS total = COUNT(*),
-                good = COUNT(*) WHERE http.status_code != "500"
-                BY service.name
+                good = COUNT(*) WHERE status != "500"
+                BY service
         | WHERE total > 0
         | EVAL avail = ROUND(TO_DOUBLE(good) / TO_DOUBLE(total), 4)
         | EVAL raw_target = avail - {{ consts.baseline_buffer }}
         | EVAL target = ROUND(CLAMP(raw_target, {{ consts.target_floor }}, avail - 0.005), 3)
-        | KEEP service.name, avail, target
-        | SORT service.name
+        | KEEP service, avail, target
+        | SORT service
 
   - name: estate_baseline
     type: elasticsearch.esql.query
@@ -118,9 +125,11 @@ steps:
       format: json
       query: |
         FROM {{ consts.metrics_index }}
-        | WHERE @timestamp > NOW() - 7 days AND service.name LIKE "{{ consts.service_filter }}" AND http.status_code IS NOT NULL
+        | WHERE @timestamp > NOW() - 7 days
+            AND service LIKE "{{ consts.service_filter }}"
+            AND status IS NOT NULL
         | STATS total = COUNT(*),
-                good = COUNT(*) WHERE http.status_code != "500"
+                good = COUNT(*) WHERE status != "500"
         | WHERE total > 0
         | EVAL avail = ROUND(TO_DOUBLE(good) / TO_DOUBLE(total), 4)
         | EVAL raw_target = avail - {{ consts.baseline_buffer }}
@@ -158,15 +167,15 @@ steps:
             name: "{{ foreach.item[0] }} availability (Prometheus)"
             description: >
               Baseline-then-improve availability SLO for {{ foreach.item[0] }}.
-              Good = non-5xx request docs. Initial target from 7d baseline
+              Good = non-5xx PRW docs (status label). Initial target from 7d baseline
               (~{{ foreach.item[1] }} avail → target {{ foreach.item[2] }}).
             indicator:
               type: sli.kql.custom
               params:
                 index: "{{ consts.metrics_index }}"
-                filter: 'service.name: "{{ foreach.item[0] }}" and http.status_code: *'
-                good: 'NOT http.status_code: "500"'
-                total: 'http.status_code: *'
+                filter: 'service: "{{ foreach.item[0] }}" and status: *'
+                good: 'NOT status: "500"'
+                total: 'status: *'
                 timestampField: "@timestamp"
             timeWindow:
               duration: 7d
@@ -201,12 +210,12 @@ steps:
           type: sli.kql.custom
           params:
             index: "{{ consts.metrics_index }}"
-            filter: 'service.name: {{ consts.service_filter }} and http.status_code: *'
-            good: 'NOT http.status_code: "500"'
-            total: 'http.status_code: *'
+            filter: 'service: {{ consts.service_filter }} and status: *'
+            good: 'NOT status: "500"'
+            total: 'status: *'
             timestampField: "@timestamp"
         groupBy:
-          - service.name
+          - service
         timeWindow:
           duration: 7d
           type: rolling
@@ -228,9 +237,9 @@ steps:
       message: |
         Continuous-improvement SLO steward on this Observability project.
         Index: {{ consts.metrics_index }}
-        SLI: sli.kql.custom — good = NOT http.status_code: "500".
+        SLI: sli.kql.custom — good = NOT status: "500" (Managed PRW label).
 
-        Live baselines (columns service.name, avail, target):
+        Live baselines (columns service, avail, target):
         {{ steps.baseline_services.output | json }}
 
         Estate baseline (avail, target):
@@ -253,7 +262,8 @@ steps:
 
         For each in-scope SLO: rebase if violated / target >= avail / still 0.999;
         ratchet up only when Healthy and SLI >= target + gap; migrate old
-        prometheus-* / http_requests_total indicators to kql.custom on {{ consts.metrics_index }}.
+        otel-default / http.status_code / service.name indicators to kql.custom on
+        {{ consts.metrics_index }} using `service` + `status`.
 
         End with a table: name | old_target | new_target | action | status.
     timeout: 30m
