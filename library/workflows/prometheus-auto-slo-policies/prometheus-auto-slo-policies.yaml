@@ -231,7 +231,7 @@ steps:
               type: rolling
             budgetingMethod: occurrences
             objective:
-              target: ${{ foreach.item[2] }}
+              target: "${{ foreach.item[2] }}"
             tags:
               - prometheus
               - auto-prom
@@ -270,7 +270,7 @@ steps:
           type: rolling
         budgetingMethod: occurrences
         objective:
-          target: ${{ steps.estate_baseline.output.values[0][1] | default: steps.estate_baseline_otel.output.values[0][1] }}
+          target: "${{ steps.estate_baseline.output.values[0][1] | default: steps.estate_baseline_otel.output.values[0][1] }}"
         tags:
           - prometheus
           - auto-prom
