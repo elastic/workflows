@@ -1,6 +1,6 @@
 template-metadata:
   slug: prometheus-auto-alert-policies
-  version: "1.4.1"
+  version: "1.4.2"
   availability: ">=9.6.0"
   name: "Auto Alert Policies"
   description: >-
@@ -196,11 +196,12 @@ steps:
             | STATS d = MAX(v) - MIN(v) BY svc, method, route
             | WHERE d > 0
             | STATS error_delta = SUM(d)
-            | KEEP error_delta
+            | EVAL group_key = "estate"
+            | KEEP group_key, error_delta
           breach:
             segment: "| WHERE error_delta > 3000"
         grouping:
-          fields: []
+          fields: [group_key]
         recovery:
           strategy: no_breach
         no_data:
@@ -239,7 +240,7 @@ steps:
           breach:
             segment: "| WHERE max_cpu > 0.95"
         grouping:
-          fields: []
+          fields: [svc]
         recovery:
           strategy: no_breach
         no_data:
@@ -278,7 +279,7 @@ steps:
           breach:
             segment: "| WHERE max_go > 2000"
         grouping:
-          fields: []
+          fields: [svc]
         recovery:
           strategy: no_breach
         no_data:
@@ -316,11 +317,12 @@ steps:
             | STATS d = MAX(v) - MIN(v) BY svc, reason, channel
             | WHERE d > 0
             | STATS fail_delta = SUM(d)
-            | KEEP fail_delta
+            | EVAL group_key = "estate"
+            | KEEP group_key, fail_delta
           breach:
             segment: "| WHERE fail_delta > 3000"
         grouping:
-          fields: []
+          fields: [group_key]
         recovery:
           strategy: no_breach
         no_data:
@@ -358,11 +360,12 @@ steps:
             | STATS d = MAX(v) - MIN(v) BY svc, channel
             | WHERE d > 0
             | STATS purchase_delta = SUM(d)
-            | KEEP purchase_delta
+            | EVAL group_key = "estate"
+            | KEEP group_key, purchase_delta
           breach:
             segment: "| WHERE purchase_delta == 0"
         grouping:
-          fields: []
+          fields: [group_key]
         recovery:
           strategy: no_breach
         no_data:
@@ -400,11 +403,12 @@ steps:
             | STATS d = MAX(v) - MIN(v) BY svc, channel, reason
             | WHERE d > 0
             | STATS fail_delta = SUM(d)
-            | KEEP fail_delta
+            | EVAL group_key = "estate"
+            | KEEP group_key, fail_delta
           breach:
             segment: "| WHERE fail_delta > 2000"
         grouping:
-          fields: []
+          fields: [group_key]
         recovery:
           strategy: no_breach
         no_data:
@@ -442,11 +446,12 @@ steps:
             | STATS d = MAX(v) - MIN(v) BY svc, channel
             | WHERE d > 0
             | STATS signup_delta = SUM(d)
-            | KEEP signup_delta
+            | EVAL group_key = "estate"
+            | KEEP group_key, signup_delta
           breach:
             segment: "| WHERE signup_delta == 0"
         grouping:
-          fields: []
+          fields: [group_key]
         recovery:
           strategy: no_breach
         no_data:
@@ -484,11 +489,12 @@ steps:
             | STATS d = MAX(v) - MIN(v) BY svc, channel
             | WHERE d > 0
             | STATS abandon_delta = SUM(d)
-            | KEEP abandon_delta
+            | EVAL group_key = "estate"
+            | KEEP group_key, abandon_delta
           breach:
             segment: "| WHERE abandon_delta > 3000"
         grouping:
-          fields: []
+          fields: [group_key]
         recovery:
           strategy: no_breach
         no_data:
@@ -526,11 +532,12 @@ steps:
             | STATS d = MAX(v) - MIN(v) BY svc, channel
             | WHERE d > 0
             | STATS views_delta = SUM(d)
-            | KEEP views_delta
+            | EVAL group_key = "estate"
+            | KEEP group_key, views_delta
           breach:
             segment: "| WHERE views_delta == 0"
         grouping:
-          fields: []
+          fields: [group_key]
         recovery:
           strategy: no_breach
         no_data:
