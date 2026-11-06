@@ -1,11 +1,12 @@
 template-metadata:
   slug: prometheus-auto-alert-policies
-  version: "1.3.0"
+  version: "1.4.0"
   availability: ">=9.6.0"
-  name: "Prometheus Auto Alert Policies"
+  name: "Auto Alert Policies"
   description: >-
-    Gap-only Universal Alerting (ES|QL) via POST /api/alerting/v2/rules.
-    No Classic .es-query rules. Cleans leftover Classic auto-prom ids.
+    Gap-only Universal Alerting (ES|QL) for Managed Prometheus remote_write
+    or OTel-shaped metrics. POST /api/alerting/v2/rules only (no Classic).
+    Dual-shape queries (service/status or service.name/http.status_code).
   solutions: [observability]
   categories: [detection, monitoring, ai-agent]
   install:
@@ -16,17 +17,18 @@ template-metadata:
         required: true
         default: "elastic-ai-agent"
       - name: metrics-index
-        label: "Metrics index pattern"
+        label: "Metrics index / data stream"
         description: >-
-          Managed PRW: metrics-generic.prometheus-default.
+          PRW: metrics-generic.prometheus-default. OTel: metrics-generic.otel-default.
+          Queries COALESCE both label shapes when SET unmapped_fields is supported.
         inputType: esIndex
         required: true
         default: "metrics-generic.prometheus-default"
 
-name: Prometheus Auto Alert Policies
+name: Auto Alert Policies
 description: >
-  Gap-only Universal Alerting (ES|QL) for Managed Prometheus remote_write.
-  Creates via POST /api/alerting/v2/rules only (always attempt create; on-failure continue). Deletes leftover Classic auto-prom ids.
+  Gap-only Universal Alerting (ES|QL) for Prometheus remote_write or OTel metrics.
+  Creates via POST /api/alerting/v2/rules; removes leftover Classic auto-prom ids.
 enabled: true
 triggers:
   - type: manual
@@ -47,21 +49,21 @@ consts:
 steps:
   - name: detect_metric_families
     type: elasticsearch.esql.query
+    on-failure:
+      continue: true
     with:
       format: json
       query: |
+        SET unmapped_fields="nullify";
         FROM {{ consts.metrics_index }}
         | WHERE @timestamp > NOW() - 30 minutes
-        | STATS http_samples = COUNT(*) WHERE http_requests_total IS NOT NULL,
-                cpu_samples = COUNT(*) WHERE process_cpu_usage_ratio IS NOT NULL,
-                go_samples = COUNT(*) WHERE go_goroutines IS NOT NULL,
+        | STATS http_samples = COUNT(*) WHERE http_requests_total IS NOT NULL OR `http.server.requests` IS NOT NULL,
+                cpu_samples = COUNT(*) WHERE process_cpu_usage_ratio IS NOT NULL OR `process.cpu.usage` IS NOT NULL,
+                go_samples = COUNT(*) WHERE go_goroutines IS NOT NULL OR `go.goroutines` IS NOT NULL,
                 login_samples = COUNT(*) WHERE user_login_failures_total IS NOT NULL,
-                purchase_samples = COUNT(*) WHERE purchases_total IS NOT NULL,
-                payment_samples = COUNT(*) WHERE payment_failures_total IS NOT NULL,
-                signup_samples = COUNT(*) WHERE user_signups_total IS NOT NULL,
-                cart_samples = COUNT(*) WHERE cart_abandonments_total IS NOT NULL,
-                views_samples = COUNT(*) WHERE product_views_total IS NOT NULL,
-                services = COUNT_DISTINCT(service)
+                purchase_samples = COUNT(*) WHERE purchases_total IS NOT NULL OR purchases IS NOT NULL,
+                services_prom = COUNT_DISTINCT(service),
+                services_otel = COUNT_DISTINCT(`service.name`)
 
   - name: list_universal_rules
     type: kibana.request
@@ -173,9 +175,9 @@ steps:
       body:
         kind: alert
         metadata:
-          name: "Auto: Prometheus HTTP 5xx Rate Spike"
-          description: "Universal ES|QL — 5xx request deltas by service (Managed PRW)."
-          tags: [prometheus, auto-prom, universal, auto-ops]
+          name: "Auto: HTTP 5xx Rate Spike"
+          description: "Universal ES|QL — 5xx deltas by service (PRW service/status or OTel service.name/http.status_code)."
+          tags: [auto-prom, universal, auto-ops, metrics]
           routing_tags: [auto-prom]
         schedule:
           every: 5m
@@ -183,16 +185,20 @@ steps:
         time_field: "@timestamp"
         query:
           base: |
+            SET unmapped_fields="nullify";
             FROM {{ consts.metrics_index }}
             | WHERE @timestamp >= ?_tstart AND @timestamp <= ?_tend
-                AND http_requests_total IS NOT NULL AND service IS NOT NULL AND status == "500"
-            | EVAL v = TO_DOUBLE(http_requests_total)
-            | STATS error_delta = MAX(v) - MIN(v) BY service
-            | KEEP service, error_delta
+            | EVAL svc = COALESCE(service, `service.name`)
+            | EVAL st = COALESCE(status, http.status_code)
+            | EVAL http_cnt = COALESCE(http_requests_total, `http.server.requests`)
+            | WHERE svc IS NOT NULL AND st == "500" AND http_cnt IS NOT NULL
+            | EVAL v = TO_DOUBLE(http_cnt)
+            | STATS error_delta = MAX(v) - MIN(v) BY svc
+            | KEEP svc, error_delta
           breach:
             segment: "| WHERE error_delta > 50"
         grouping:
-          fields: [service]
+          fields: [svc]
         recovery:
           strategy: no_breach
         no_data:
@@ -210,9 +216,9 @@ steps:
       body:
         kind: alert
         metadata:
-          name: "Auto: Prometheus High CPU Usage Ratio"
-          description: "Universal ES|QL — process_cpu_usage_ratio high by service."
-          tags: [prometheus, auto-prom, universal, auto-ops]
+          name: "Auto: High CPU Usage Ratio"
+          description: "Universal ES|QL — CPU high by service (PRW or OTel process CPU fields)."
+          tags: [auto-prom, universal, auto-ops, metrics]
           routing_tags: [auto-prom]
         schedule:
           every: 5m
@@ -220,15 +226,18 @@ steps:
         time_field: "@timestamp"
         query:
           base: |
+            SET unmapped_fields="nullify";
             FROM {{ consts.metrics_index }}
             | WHERE @timestamp >= ?_tstart AND @timestamp <= ?_tend
-                AND process_cpu_usage_ratio IS NOT NULL AND service IS NOT NULL
-            | STATS max_cpu = MAX(process_cpu_usage_ratio) BY service
-            | KEEP service, max_cpu
+            | EVAL svc = COALESCE(service, `service.name`)
+            | EVAL cpu = COALESCE(process_cpu_usage_ratio, `process.cpu.usage`)
+            | WHERE svc IS NOT NULL AND cpu IS NOT NULL
+            | STATS max_cpu = MAX(cpu) BY svc
+            | KEEP svc, max_cpu
           breach:
             segment: "| WHERE max_cpu > 0.85"
         grouping:
-          fields: [service]
+          fields: [svc]
         recovery:
           strategy: no_breach
         no_data:
@@ -246,9 +255,9 @@ steps:
       body:
         kind: alert
         metadata:
-          name: "Auto: Prometheus Go Goroutines Abnormal Growth"
-          description: "Universal ES|QL — go_goroutines elevated by service."
-          tags: [prometheus, auto-prom, universal, auto-ops]
+          name: "Auto: Go Goroutines Abnormal Growth"
+          description: "Universal ES|QL — go_goroutines / go.goroutines elevated by service."
+          tags: [auto-prom, universal, auto-ops, metrics]
           routing_tags: [auto-prom]
         schedule:
           every: 5m
@@ -256,15 +265,18 @@ steps:
         time_field: "@timestamp"
         query:
           base: |
+            SET unmapped_fields="nullify";
             FROM {{ consts.metrics_index }}
             | WHERE @timestamp >= ?_tstart AND @timestamp <= ?_tend
-                AND go_goroutines IS NOT NULL AND service IS NOT NULL
-            | STATS max_go = MAX(go_goroutines) BY service
-            | KEEP service, max_go
+            | EVAL svc = COALESCE(service, `service.name`)
+            | EVAL g = COALESCE(go_goroutines, `go.goroutines`)
+            | WHERE svc IS NOT NULL AND g IS NOT NULL
+            | STATS max_go = MAX(g) BY svc
+            | KEEP svc, max_go
           breach:
             segment: "| WHERE max_go > 500"
         grouping:
-          fields: [service]
+          fields: [svc]
         recovery:
           strategy: no_breach
         no_data:
@@ -282,9 +294,9 @@ steps:
       body:
         kind: alert
         metadata:
-          name: "Auto: Prometheus Login Failures Spike"
-          description: "Universal ES|QL — user_login_failures_total deltas by service."
-          tags: [prometheus, auto-prom, universal, auto-ops, security]
+          name: "Auto: Login Failures Spike"
+          description: "Universal ES|QL — login failure counters by service."
+          tags: [auto-prom, universal, auto-ops, metrics, security]
           routing_tags: [auto-prom]
         schedule:
           every: 5m
@@ -292,16 +304,19 @@ steps:
         time_field: "@timestamp"
         query:
           base: |
+            SET unmapped_fields="nullify";
             FROM {{ consts.metrics_index }}
             | WHERE @timestamp >= ?_tstart AND @timestamp <= ?_tend
-                AND user_login_failures_total IS NOT NULL AND service IS NOT NULL
-            | EVAL v = TO_DOUBLE(user_login_failures_total)
-            | STATS fail_delta = MAX(v) - MIN(v) BY service
-            | KEEP service, fail_delta
+            | EVAL svc = COALESCE(service, `service.name`)
+            | EVAL fails = COALESCE(user_login_failures_total, `user.login.failures`)
+            | WHERE svc IS NOT NULL AND fails IS NOT NULL
+            | EVAL v = TO_DOUBLE(fails)
+            | STATS fail_delta = MAX(v) - MIN(v) BY svc
+            | KEEP svc, fail_delta
           breach:
             segment: "| WHERE fail_delta > 20"
         grouping:
-          fields: [service]
+          fields: [svc]
         recovery:
           strategy: no_breach
         no_data:
@@ -319,9 +334,9 @@ steps:
       body:
         kind: alert
         metadata:
-          name: "Auto: Prometheus Purchases Drop"
-          description: "Universal ES|QL — purchases_total near-zero delta."
-          tags: [prometheus, auto-prom, universal, auto-ops]
+          name: "Auto: Purchases Drop"
+          description: "Universal ES|QL — purchases near-zero delta by service."
+          tags: [auto-prom, universal, auto-ops, metrics]
           routing_tags: [auto-prom]
         schedule:
           every: 5m
@@ -329,16 +344,19 @@ steps:
         time_field: "@timestamp"
         query:
           base: |
+            SET unmapped_fields="nullify";
             FROM {{ consts.metrics_index }}
             | WHERE @timestamp >= ?_tstart AND @timestamp <= ?_tend
-                AND purchases_total IS NOT NULL AND service IS NOT NULL
-            | EVAL v = TO_DOUBLE(purchases_total)
-            | STATS purchase_delta = MAX(v) - MIN(v) BY service
-            | KEEP service, purchase_delta
+            | EVAL svc = COALESCE(service, `service.name`)
+            | EVAL p = COALESCE(purchases_total, purchases)
+            | WHERE svc IS NOT NULL AND p IS NOT NULL
+            | EVAL v = TO_DOUBLE(p)
+            | STATS purchase_delta = MAX(v) - MIN(v) BY svc
+            | KEEP svc, purchase_delta
           breach:
             segment: "| WHERE purchase_delta < 1"
         grouping:
-          fields: [service]
+          fields: [svc]
         recovery:
           strategy: no_breach
         no_data:
@@ -356,9 +374,9 @@ steps:
       body:
         kind: alert
         metadata:
-          name: "Auto: Prometheus Payment Failures Spike"
-          description: "Universal ES|QL — payment_failures_total deltas by service."
-          tags: [prometheus, auto-prom, universal, auto-ops]
+          name: "Auto: Payment Failures Spike"
+          description: "Universal ES|QL — payment failure deltas by service."
+          tags: [auto-prom, universal, auto-ops, metrics]
           routing_tags: [auto-prom]
         schedule:
           every: 5m
@@ -366,16 +384,19 @@ steps:
         time_field: "@timestamp"
         query:
           base: |
+            SET unmapped_fields="nullify";
             FROM {{ consts.metrics_index }}
             | WHERE @timestamp >= ?_tstart AND @timestamp <= ?_tend
-                AND payment_failures_total IS NOT NULL AND service IS NOT NULL
-            | EVAL v = TO_DOUBLE(payment_failures_total)
-            | STATS fail_delta = MAX(v) - MIN(v) BY service
-            | KEEP service, fail_delta
+            | EVAL svc = COALESCE(service, `service.name`)
+            | EVAL fails = COALESCE(payment_failures_total, `payment.failures`)
+            | WHERE svc IS NOT NULL AND fails IS NOT NULL
+            | EVAL v = TO_DOUBLE(fails)
+            | STATS fail_delta = MAX(v) - MIN(v) BY svc
+            | KEEP svc, fail_delta
           breach:
             segment: "| WHERE fail_delta > 10"
         grouping:
-          fields: [service]
+          fields: [svc]
         recovery:
           strategy: no_breach
         no_data:
@@ -393,9 +414,9 @@ steps:
       body:
         kind: alert
         metadata:
-          name: "Auto: Prometheus Signups Drop"
-          description: "Universal ES|QL — user_signups_total near-zero delta."
-          tags: [prometheus, auto-prom, universal, auto-ops]
+          name: "Auto: Signups Drop"
+          description: "Universal ES|QL — signups near-zero delta by service."
+          tags: [auto-prom, universal, auto-ops, metrics]
           routing_tags: [auto-prom]
         schedule:
           every: 5m
@@ -403,16 +424,19 @@ steps:
         time_field: "@timestamp"
         query:
           base: |
+            SET unmapped_fields="nullify";
             FROM {{ consts.metrics_index }}
             | WHERE @timestamp >= ?_tstart AND @timestamp <= ?_tend
-                AND user_signups_total IS NOT NULL AND service IS NOT NULL
-            | EVAL v = TO_DOUBLE(user_signups_total)
-            | STATS signup_delta = MAX(v) - MIN(v) BY service
-            | KEEP service, signup_delta
+            | EVAL svc = COALESCE(service, `service.name`)
+            | EVAL s = COALESCE(user_signups_total, `user.signups`)
+            | WHERE svc IS NOT NULL AND s IS NOT NULL
+            | EVAL v = TO_DOUBLE(s)
+            | STATS signup_delta = MAX(v) - MIN(v) BY svc
+            | KEEP svc, signup_delta
           breach:
             segment: "| WHERE signup_delta < 1"
         grouping:
-          fields: [service]
+          fields: [svc]
         recovery:
           strategy: no_breach
         no_data:
@@ -430,9 +454,9 @@ steps:
       body:
         kind: alert
         metadata:
-          name: "Auto: Prometheus Cart Abandonments Spike"
-          description: "Universal ES|QL — cart_abandonments_total deltas by service."
-          tags: [prometheus, auto-prom, universal, auto-ops]
+          name: "Auto: Cart Abandonments Spike"
+          description: "Universal ES|QL — cart abandonment deltas by service."
+          tags: [auto-prom, universal, auto-ops, metrics]
           routing_tags: [auto-prom]
         schedule:
           every: 5m
@@ -440,16 +464,19 @@ steps:
         time_field: "@timestamp"
         query:
           base: |
+            SET unmapped_fields="nullify";
             FROM {{ consts.metrics_index }}
             | WHERE @timestamp >= ?_tstart AND @timestamp <= ?_tend
-                AND cart_abandonments_total IS NOT NULL AND service IS NOT NULL
-            | EVAL v = TO_DOUBLE(cart_abandonments_total)
-            | STATS abandon_delta = MAX(v) - MIN(v) BY service
-            | KEEP service, abandon_delta
+            | EVAL svc = COALESCE(service, `service.name`)
+            | EVAL c = COALESCE(cart_abandonments_total, `cart.abandonments`)
+            | WHERE svc IS NOT NULL AND c IS NOT NULL
+            | EVAL v = TO_DOUBLE(c)
+            | STATS abandon_delta = MAX(v) - MIN(v) BY svc
+            | KEEP svc, abandon_delta
           breach:
             segment: "| WHERE abandon_delta > 25"
         grouping:
-          fields: [service]
+          fields: [svc]
         recovery:
           strategy: no_breach
         no_data:
@@ -467,9 +494,9 @@ steps:
       body:
         kind: alert
         metadata:
-          name: "Auto: Prometheus Product Views Drop"
-          description: "Universal ES|QL — product_views_total near-zero delta."
-          tags: [prometheus, auto-prom, universal, auto-ops]
+          name: "Auto: Product Views Drop"
+          description: "Universal ES|QL — product views near-zero delta by service."
+          tags: [auto-prom, universal, auto-ops, metrics]
           routing_tags: [auto-prom]
         schedule:
           every: 5m
@@ -477,16 +504,19 @@ steps:
         time_field: "@timestamp"
         query:
           base: |
+            SET unmapped_fields="nullify";
             FROM {{ consts.metrics_index }}
             | WHERE @timestamp >= ?_tstart AND @timestamp <= ?_tend
-                AND product_views_total IS NOT NULL AND service IS NOT NULL
-            | EVAL v = TO_DOUBLE(product_views_total)
-            | STATS views_delta = MAX(v) - MIN(v) BY service
-            | KEEP service, views_delta
+            | EVAL svc = COALESCE(service, `service.name`)
+            | EVAL vws = COALESCE(product_views_total, `product.views`)
+            | WHERE svc IS NOT NULL AND vws IS NOT NULL
+            | EVAL v = TO_DOUBLE(vws)
+            | STATS views_delta = MAX(v) - MIN(v) BY svc
+            | KEEP svc, views_delta
           breach:
             segment: "| WHERE views_delta < 1"
         grouping:
-          fields: [service]
+          fields: [svc]
         recovery:
           strategy: no_breach
         no_data:
@@ -507,10 +537,11 @@ steps:
       continue: true
     with:
       message: |
-        Summarize Universal Alerting gap-fill (read-only).
+        Summarize Universal Auto Alert Policies gap-fill (read-only).
         Detection: {{ steps.detect_metric_families.output | json }}
         Universal rules: {{ steps.verify_universal_rules.output | json }}
-        Open **Alerting → Rules → Universal**, search `Auto: Prometheus`.
-        Classic auto-prom leftovers were deleted when present.
+        Open **Alerting → Rules → Universal**, search `Auto:`.
+        Rules work on PRW (service/status) or OTel (service.name/http.status_code)
+        when metrics-index points at the right stream.
         End table: name | present(yes/no).
     timeout: 10m
