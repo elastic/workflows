@@ -1,10 +1,12 @@
 template-metadata:
   slug: prometheus-auto-alert-policies
-  version: "1.0.0"
+  version: "1.1.0"
   availability: ">=9.6.0"
   name: "Prometheus Auto Alert Policies"
   description: >-
-    Detect Prometheus metric families and gap-only upsert Observability threshold alert rules with deterministic auto-prom ids.
+    Detect Prometheus / OTel metric families and gap-only upsert Observability
+    threshold alert rules with deterministic auto-prom ids. Works on Managed PRW
+    (service label) and OTLP-shaped streams (service.name).
   solutions: [observability]
   categories: [detection, monitoring, ai-agent]
   install:
@@ -15,14 +17,18 @@ template-metadata:
         required: true
         default: "elastic-ai-agent"
       - name: metrics-index
-        label: "Prometheus metrics index pattern"
+        label: "Metrics index pattern"
+        description: >-
+          Managed PRW: metrics-generic.prometheus-* (or prometheus-default).
+          OTLP: metrics-generic.otel-default. Detection COALESCE's service identity
+          and accepts Prom + common OTel HTTP metric names.
         inputType: esIndex
         required: true
         default: "metrics-generic.prometheus-*"
 
 name: Prometheus Auto Alert Policies
 description: >
-  Hourly (and on demand): detect Prometheus metric families, then
+  Hourly (and on demand): detect Prometheus or OTel-shaped metric families, then
   ensure a small canonical set of Observability threshold alert policies exists
   (deterministic rule ids). Gap-only — never multiply rules. ML anomaly alerts
   are owned by prometheus-auto-ml-anomaly-policies.
@@ -63,15 +69,18 @@ steps:
         SET unmapped_fields="nullify";
         FROM {{ consts.metrics_index }}
         | WHERE @timestamp > NOW() - 30 minutes
-        | STATS http_samples = COUNT(*) WHERE http_requests_total IS NOT NULL,
-                cpu_samples = COUNT(*) WHERE process_cpu_usage_ratio IS NOT NULL,
-                go_samples = COUNT(*) WHERE go_goroutines IS NOT NULL,
-                login_samples = COUNT(*) WHERE user_logins_total IS NOT NULL,
-                purchase_samples = COUNT(*) WHERE purchases_total IS NOT NULL,
-                signup_samples = COUNT(*) WHERE user_signups_total IS NOT NULL,
+        | STATS http_samples = COUNT(*) WHERE http_requests_total IS NOT NULL OR `http.server.requests` IS NOT NULL,
+                cpu_samples = COUNT(*) WHERE process_cpu_usage_ratio IS NOT NULL OR `process.cpu.usage` IS NOT NULL,
+                go_samples = COUNT(*) WHERE go_goroutines IS NOT NULL OR `go.goroutines` IS NOT NULL,
+                login_samples = COUNT(*) WHERE user_logins_total IS NOT NULL OR `user.logins` IS NOT NULL,
+                purchase_samples = COUNT(*) WHERE purchases_total IS NOT NULL OR purchases IS NOT NULL,
+                signup_samples = COUNT(*) WHERE user_signups_total IS NOT NULL OR `user.signups` IS NOT NULL,
                 checkout_samples = COUNT(*) WHERE checkout_orders_total IS NOT NULL OR cart_abandonments_total IS NOT NULL,
                 engagement_samples = COUNT(*) WHERE product_views_total IS NOT NULL OR search_queries_total IS NOT NULL,
-                services = COUNT_DISTINCT(service)
+                services_prom = COUNT_DISTINCT(service),
+                services_otel = COUNT_DISTINCT(`service.name`),
+                status_prom = COUNT(*) WHERE status IS NOT NULL,
+                status_otel = COUNT(*) WHERE http.status_code IS NOT NULL
 
   - name: list_alert_rules
     type: kibana.request
@@ -172,12 +181,21 @@ steps:
     agent-id: __install__.agent-id
     with:
       message: |
-        Prometheus THRESHOLD alert steward (not ML) on this Observability project.
+        Prometheus / OTel THRESHOLD alert steward (not ML) on this Observability project.
         (This step only runs when at least one canonical auto-prom rule id is missing.)
         Index: {{ consts.metrics_index }}
 
-        Pre-check samples:
+        Pre-check samples (dual-shape detection):
         {{ steps.detect_metric_families.output | json }}
+
+        SIGNAL SHAPE:
+        - If services_prom / status_prom dominate → group & filter with `service` + `status`
+          (Managed Prometheus Remote Write).
+        - If services_otel / status_otel dominate → group & filter with `service.name` +
+          `http.status_code` (OTLP).
+        - Prefer Prom metric names (`http_requests_total`, `process_cpu_usage_ratio`, …).
+          If only dotted OTel names exist (`http.server.requests`, `process.cpu.usage`),
+          use those in ES|QL rules instead.
 
         Existing rules page:
         {{ steps.list_alert_rules.output | json }}
@@ -194,6 +212,7 @@ steps:
            - If rule id exists → skip (or fix if Failed). Do NOT create another with a new name.
            - If missing → create ONE .es-query / custom threshold / index-threshold style rule
              with that exact id + name, tags: prometheus, auto-prom, agent-builder.
+             Group-by field must match the signal shape above.
         4) NEVER DELETE rules on scheduled or manual runs (including non-catalog / user rules).
            Report extras tagged auto-prom that are not in the catalog; do not remove them.
         5) Do NOT create ML anomaly alert rules here.
@@ -201,5 +220,5 @@ steps:
         7) No Slack/PagerDuty unless already present.
         8) If every catalog id with samples > 0 already exists, make NO writes — reply with
            a short "no gaps" table and exit.
-        9) End table: id | action (kept|created|fixed|skipped|reported-extra) | reason.
+        9) End table: id | action (kept|created|fixed|skipped|reported-extra) | reason | shape(prom|otel).
     timeout: 30m
