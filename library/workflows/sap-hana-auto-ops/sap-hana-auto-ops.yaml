@@ -1,12 +1,12 @@
 template-metadata:
   slug: sap-hana-auto-ops
-  version: "1.0.0"
+  version: "1.0.1"
   availability: ">=9.6.0"
   name: "SAP HANA Auto-ops (Prometheus)"
   description: >-
     Detect hanadb_* Prometheus metrics and upsert Auto: SAP HANA health dashboard,
-    Universal alerts, ML anomaly scaffold, and availability SLO. Pair with
-    sap-hana-prom-seed for demos or SUSE hanadb_exporter scrape for production.
+    Universal alerts, ML anomaly scaffold, and availability SLO. Expect metrics from
+    the SAP HANA Fleet integration or a SUSE hanadb_exporter scrape into Managed PRW.
   solutions: [observability]
   categories: [monitoring, reporting]
   install:
@@ -30,7 +30,7 @@ name: sap-hana-auto-ops
 description: >
   Hourly (and on demand): detect live SAP HANA Prometheus metrics (hanadb_*),
   then upsert Auto: SAP HANA dashboard, Universal alerts, ML anomaly scaffold,
-  and an availability SLO (Prom-gap Operate layer vs Datadog SAP HANA coverage).
+  and an availability SLO once hanadb_* metrics are present.
 enabled: true
 tags:
   - auto-ops
@@ -159,7 +159,7 @@ steps:
               ## Related
               - Catalog: `integrations/sap-hana/prometheus-metrics.json` (75 metrics).
               - Process: `docs/prom-gap-to-auto-ops.md`.
-              - Seed demos: **`sap-hana-prom-seed`**.
+              - Collect via Fleet **SAP HANA** integration or scrape SUSE hanadb_exporter.
         - id: hana-flow
           type: custom_content
           grid:
@@ -224,7 +224,7 @@ steps:
                 .empty { opacity: 0.65; padding: var(--cc-space-l); }
               </style>
               {{ '{%' }} if rows.size == 0 {{ '%}' }}
-                <p class="empty">No hanadb_* samples — run sap-hana-prom-seed or scrape SUSE hanadb_exporter into Managed PRW.</p>
+                <p class="empty">No hanadb_* samples — install the SAP HANA integration or scrape SUSE hanadb_exporter into Managed PRW.</p>
               {{ '{%' }} else {{ '%}' }}
               <div class="board">
               {{ '{%' }} for row in rows {{ '%}' }}
