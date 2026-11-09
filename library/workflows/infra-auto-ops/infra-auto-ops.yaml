@@ -4,33 +4,26 @@ template-metadata:
   availability: ">=9.6.0"
   name: "Infrastructure Auto-ops (no APM)"
   description: >-
-    Detect infrastructure metric datasets with the default agent: ensure a Stream
-    shell for unknown types; for supported families ensure Stream plus dashboard,
-    SLO, and Universal alerts — no APM required.
+    Inventory infra metric datasets without APM. Unsupported types get a Stream
+    shell + Observability Case; supported families get Stream + dashboard/SLO.
+    Database Integration datasets are owned by db-monitoring-auto-dashboards (SKIP).
   solutions: [observability]
-  categories: [monitoring, case-management, ai-agent]
+  categories: [monitoring, ai-agent, case-management]
   install:
     form:
       - name: agent-id
         label: "Agent Builder agent ID"
-        description: >-
-          Agent Builder agent used for classify / Stream / Universal alert steps.
-          Default agent is elastic-ai-agent.
+        description: Agent Builder agent for classify / Case / asset steps.
         inputType: text
         required: true
         default: "elastic-ai-agent"
       - name: metrics-index
-        label: "Infrastructure metrics index pattern"
-        description: >-
-          Elasticsearch index / data stream pattern for host, K8s, and other infra metrics
-          (OTel hostmetrics / kubeletstats / etc.).
+        label: "Infra metrics index pattern"
+        description: Elasticsearch index / data stream pattern for infra metrics.
         inputType: esIndex
         required: true
         default: "metrics-*"
 
-version: "1"
-
-version: "1"
 name: infra-auto-ops
 description: >
   Hourly (and on demand): inventory infra metric datasets (no APM), then the
@@ -55,7 +48,7 @@ settings:
     max: 1
 consts:
   agent_id: __install__.agent-id
-  metrics_pattern: metrics-*
+  metrics_pattern: __install__.metrics-index
   # What Auto-ops can stand up assets for today (expand over time).
   supported_families: |
     host_system          # hostmetrics / system CPU·mem·disk·net
