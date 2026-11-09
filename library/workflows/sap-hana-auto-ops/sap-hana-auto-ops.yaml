@@ -1,0 +1,455 @@
+template-metadata:
+  slug: sap-hana-auto-ops
+  version: "1.0.0"
+  availability: ">=9.6.0"
+  name: "SAP HANA Auto-ops (Prometheus)"
+  description: >-
+    Detect hanadb_* Prometheus metrics and upsert Auto: SAP HANA health dashboard,
+    Universal alerts, ML anomaly scaffold, and availability SLO. Pair with
+    sap-hana-prom-seed for demos or SUSE hanadb_exporter scrape for production.
+  solutions: [observability]
+  categories: [monitoring, reporting]
+  install:
+    form:
+      - name: metrics-index
+        label: "Prometheus metrics index pattern"
+        description: >-
+          Elasticsearch index / data stream pattern used for inventory and detect.
+        inputType: esIndex
+        required: true
+        default: "metrics-generic.prometheus-*,metrics-*"
+      - name: metrics-data-stream
+        label: "Prometheus metrics data stream"
+        description: >-
+          Primary data stream for ES|QL panels (usually the Managed PRW landing stream).
+        inputType: esIndex
+        required: true
+        default: "metrics-generic.prometheus-default"
+
+name: sap-hana-auto-ops
+description: >
+  Hourly (and on demand): detect live SAP HANA Prometheus metrics (hanadb_*),
+  then upsert Auto: SAP HANA dashboard, Universal alerts, ML anomaly scaffold,
+  and an availability SLO (Prom-gap Operate layer vs Datadog SAP HANA coverage).
+enabled: true
+tags:
+  - auto-ops
+  - sap-hana
+  - prometheus
+triggers:
+  - type: manual
+  - type: scheduled
+    with:
+      every: 1h
+settings:
+  timeout: 25m
+  concurrency:
+    key: "{{ workflow.id }}"
+    strategy: drop
+    max: 1
+
+consts:
+  metrics_index: __install__.metrics-index
+  metrics_data_stream: __install__.metrics-data-stream
+  dash_id: auto-sap-hana-health
+
+steps:
+  - name: ensure_tag_auto
+    type: kibana.request
+    on-failure:
+      continue: true
+    with:
+      method: PUT
+      path: /api/tags/auto
+      headers:
+        Elastic-Api-Version: "2023-10-31"
+      body:
+        name: auto
+        description: Auto-ops generated assets
+        color: "#00BFB3"
+
+  - name: ensure_tag_sap_hana
+    type: kibana.request
+    on-failure:
+      continue: true
+    with:
+      method: PUT
+      path: /api/tags/sap-hana
+      headers:
+        Elastic-Api-Version: "2023-10-31"
+      body:
+        name: sap-hana
+        description: SAP HANA Prom-gap Auto-ops
+        color: "#0070F2"
+
+  - name: detect_hanadb
+    type: elasticsearch.esql.query
+    on-failure:
+      continue: true
+    with:
+      format: json
+      query: |
+        FROM {{ consts.metrics_index }}
+        | WHERE @timestamp > NOW() - 7 days
+            AND (hanadb_connections_total IS NOT NULL
+                 OR hanadb_host_memory_used_total IS NOT NULL
+                 OR hanadb_alerts_current IS NOT NULL)
+        | STATS docs = COUNT(*)
+
+  - name: upsert_dashboard
+    type: kibana.request
+    if: "steps.detect_hanadb.output.values.0.0 > 0"
+    on-failure:
+      continue: true
+    with:
+      method: PUT
+      path: /api/dashboards/auto-sap-hana-health
+      headers:
+        Elastic-Api-Version: "2023-10-31"
+      body:
+        title: 'Auto: SAP HANA — Performance & Health'
+        description: Prom-gap Auto-ops for hanadb_* (SUSE hanadb_exporter → Managed PRW).
+        time_range:
+          from: now-2h
+          to: now
+        options:
+          auto_apply_filters: true
+          hide_panel_titles: false
+          hide_panel_borders: false
+          use_margins: true
+          sync_colors: true
+          sync_tooltips: true
+          sync_cursor: true
+        filters: []
+        tags:
+        - auto
+        - auto-ops
+        - sap-hana
+        - prometheus
+        pinned_panels: []
+        panels:
+        - id: hana-briefing
+          type: markdown
+          grid:
+            x: 0
+            y: 0
+            w: 48
+            h: 12
+          config:
+            title: SRE day-one briefing
+            content: |
+              ## Purpose
+              Answer: **is SAP HANA healthy right now?** Memory, connections, SQL volume, and HANA alerts from Prometheus `hanadb_*` metrics ([SUSE/hanadb_exporter](https://github.com/SUSE/hanadb_exporter)) via Managed PRW.
+
+              ## How to read it
+              1. **Host scorecards** — used memory (MB) by host (HOT ≥ 50 GB, WATCH ≥ 20 GB).
+              2. **Data path** — HANA → hanadb_exporter → Prometheus scrape → Elastic Managed PRW.
+              3. **KPI strip** — connections, memory used, SQL executions, current alerts.
+              4. **Trends** — memory / connections / SQL over the window.
+
+              ## What healthy looks like
+              Memory under alloc limit. Connections stable. `hanadb_alerts_current` near 0. Replication ship delay flat.
+
+              ## Day-one next steps
+              1. Confirm exporter scrape + PRW (`job=hanadb` / `hanadb_*` fields).
+              2. Memory HOT → check `hanadb_column_tables_used_memory` + schema consumers.
+              3. Alerts > 0 → join to HANA Statistics Server details.
+              4. Owned by **`sap-hana-auto-ops`** (Prom-gap process).
+
+              ## Related
+              - Catalog: `integrations/sap-hana/prometheus-metrics.json` (75 metrics).
+              - Process: `docs/prom-gap-to-auto-ops.md`.
+              - Seed demos: **`sap-hana-prom-seed`**.
+        - id: hana-flow
+          type: custom_content
+          grid:
+            x: 0
+            y: 12
+            w: 48
+            h: 6
+          config:
+            title: HANA → Prom exporter → Elastic
+            template: |2
+
+              <style>
+                .flow { display: flex; align-items: center; justify-content: space-between; gap: var(--cc-space-m); padding: var(--cc-space-m); background: var(--cc-color-surface); border-radius: var(--cc-radius); border: 1px solid var(--cc-color-border); }
+                .col { flex: 1; text-align: center; }
+                .label { font-size: 0.7rem; letter-spacing: 0.08em; text-transform: uppercase; opacity: 0.65; margin-bottom: var(--cc-space-s); }
+                .node { display: inline-block; padding: var(--cc-space-s) var(--cc-space-m); background: var(--cc-color-background); border: 1px solid var(--cc-color-border); border-radius: var(--cc-radius-s); font-weight: 600; font-size: 0.9rem; }
+                .node.accent { border-color: var(--cc-vis-0); box-shadow: 0 0 0 1px var(--cc-vis-0); }
+                .arrow { opacity: 0.45; font-size: 1.4rem; }
+                .sub { margin-top: var(--cc-space-xs); font-size: 0.75rem; opacity: 0.65; }
+              </style>
+              <div class="flow">
+                <div class="col"><div class="label">DB signals</div><div class="node">SAP HANA</div><div class="sub">memory · sql · replication</div></div>
+                <div class="arrow">→</div>
+                <div class="col"><div class="label">Prom</div><div class="node accent">hanadb_exporter</div><div class="sub">SUSE · :9968</div></div>
+                <div class="arrow">→</div>
+                <div class="col"><div class="label">Observability</div><div class="node">Elastic Managed PRW</div><div class="sub">hanadb_* · Auto-ops</div></div>
+              </div>
+        - id: hana-cards
+          type: custom_content
+          grid:
+            x: 0
+            y: 18
+            w: 48
+            h: 10
+          config:
+            title: Host memory scorecards
+            template: |2
+
+              <style>
+                .board { display: flex; gap: var(--cc-space-m); flex-wrap: wrap; }
+                .card {
+                  flex: 1; min-width: 160px;
+                  background: var(--cc-color-surface);
+                  border: 1px solid var(--cc-color-border);
+                  border-left: 4px solid var(--cc-vis-0);
+                  border-radius: var(--cc-radius);
+                  padding: var(--cc-space-m);
+                }
+                .card.bad { border-left-color: var(--cc-color-danger); }
+                .card.warn { border-left-color: var(--cc-color-warning); }
+                .name { font-weight: 600; font-size: 0.95rem; margin-bottom: var(--cc-space-xs); word-break: break-all; }
+                .pct { font-size: 2.1rem; line-height: 1.1; font-weight: 700; letter-spacing: -0.02em; }
+                .meta { opacity: 0.7; font-size: 0.85rem; margin-top: var(--cc-space-xs); }
+                .badge {
+                  display: inline-block; margin-top: var(--cc-space-s);
+                  padding: 2px 10px; border-radius: var(--cc-radius-s);
+                  background: var(--cc-vis-0); color: var(--cc-color-background);
+                  font-size: 0.72rem; font-weight: 700; letter-spacing: 0.04em;
+                }
+                .badge.bad { background: var(--cc-color-danger); }
+                .badge.warn { background: var(--cc-color-warning); color: var(--cc-color-background); }
+                .empty { opacity: 0.65; padding: var(--cc-space-l); }
+              </style>
+              {{ '{%' }} if rows.size == 0 {{ '%}' }}
+                <p class="empty">No hanadb_* samples — run sap-hana-prom-seed or scrape SUSE hanadb_exporter into Managed PRW.</p>
+              {{ '{%' }} else {{ '%}' }}
+              <div class="board">
+              {{ '{%' }} for row in rows {{ '%}' }}
+                <div class="card {{ '{%' }} if row["mem_mb"].value >= 50000 {{ '%}' }}bad{{ '{%' }} elsif row["mem_mb"].value >= 20000 {{ '%}' }}warn{{ '{%' }} endif {{ '%}' }}">
+                  <div class="name">{{ '{{' }} row["host"].value {{ '}}' }}</div>
+                  <div class="pct">{{ '{{' }} row["mem_mb"].value {{ '}}' }} MB</div>
+                  <div class="meta">{{ '{{' }} row["conns"].value {{ '}}' }} conns · alerts {{ '{{' }} row["alerts"].value {{ '}}' }} · {{ '{{' }} row["samples"].value {{ '}}' }} samples</div>
+                  <span class="badge {{ '{%' }} if row["mem_mb"].value >= 50000 {{ '%}' }}bad{{ '{%' }} elsif row["mem_mb"].value >= 20000 {{ '%}' }}warn{{ '{%' }} else {{ '%}' }}{{ '{%' }} endif {{ '%}' }}">
+                    {{ '{%' }} if row["mem_mb"].value >= 50000 {{ '%}' }}HOT{{ '{%' }} elsif row["mem_mb"].value >= 20000 {{ '%}' }}WATCH{{ '{%' }} else {{ '%}' }}OK{{ '{%' }} endif {{ '%}' }}
+                  </span>
+                </div>
+              {{ '{%' }} endfor {{ '%}' }}
+              </div>
+              {{ '{%' }} endif {{ '%}' }}
+            esql_query:
+            - |
+              FROM {{ consts.metrics_data_stream }}
+              | WHERE @timestamp >= ?_tstart AND @timestamp <= ?_tend
+                  AND (hanadb_host_memory_used_total IS NOT NULL OR hanadb_connections_total IS NOT NULL)
+              | STATS mem_mb = MAX(hanadb_host_memory_used_total),
+                      conns = MAX(hanadb_connections_total),
+                      alerts = MAX(hanadb_alerts_current),
+                      samples = COUNT(*)
+                  BY host = COALESCE(labels.database_name, labels.sid, "hana")
+              | WHERE samples > 0
+              | SORT mem_mb DESC
+              | LIMIT 12
+        - type: vis
+          id: hana-m-conn
+          grid:
+            x: 0
+            y: 28
+            w: 12
+            h: 5
+          config:
+            type: metric
+            title: Connections
+            data_source:
+              type: esql
+              query: |-
+                FROM {{ consts.metrics_data_stream }}
+                | WHERE hanadb_connections_total IS NOT NULL
+                | STATS `Connections` = MAX(hanadb_connections_total)
+            metrics:
+            - type: primary
+              column: Connections
+              label: Connections
+        - type: vis
+          id: hana-m-mem
+          grid:
+            x: 12
+            y: 28
+            w: 12
+            h: 5
+          config:
+            type: metric
+            title: Memory used (MB)
+            data_source:
+              type: esql
+              query: |-
+                FROM {{ consts.metrics_data_stream }}
+                | WHERE hanadb_host_memory_used_total IS NOT NULL
+                | STATS `Memory used (MB)` = MAX(hanadb_host_memory_used_total)
+            metrics:
+            - type: primary
+              column: Memory used (MB)
+              label: Memory used (MB)
+        - type: vis
+          id: hana-m-sql
+          grid:
+            x: 24
+            y: 28
+            w: 12
+            h: 5
+          config:
+            type: metric
+            title: SQL executions
+            data_source:
+              type: esql
+              query: |-
+                FROM {{ consts.metrics_data_stream }}
+                | WHERE hanadb_sql_service_executions IS NOT NULL
+                | STATS `SQL executions` = MAX(hanadb_sql_service_executions)
+            metrics:
+            - type: primary
+              column: SQL executions
+              label: SQL executions
+        - type: vis
+          id: hana-m-alerts
+          grid:
+            x: 36
+            y: 28
+            w: 12
+            h: 5
+          config:
+            type: metric
+            title: HANA alerts
+            data_source:
+              type: esql
+              query: |-
+                FROM {{ consts.metrics_data_stream }}
+                | WHERE hanadb_alerts_current IS NOT NULL
+                | STATS `HANA alerts` = MAX(hanadb_alerts_current)
+            metrics:
+            - type: primary
+              column: HANA alerts
+              label: HANA alerts
+        - type: vis
+          id: hana-xy-mem
+          grid:
+            x: 0
+            y: 33
+            w: 24
+            h: 12
+          config:
+            type: xy
+            title: Host memory used over time
+            legend:
+              visibility: visible
+              placement: outside
+              position: bottom
+            styling:
+              interpolation: linear
+              points:
+                visibility: hidden
+              areas:
+                fill_opacity: 0.55
+                fill: gradient
+            layers:
+            - type: area
+              data_source:
+                type: esql
+                query: |-
+                  FROM {{ consts.metrics_data_stream }}
+                  | WHERE hanadb_host_memory_used_total IS NOT NULL
+                  | STATS mem_mb = MAX(hanadb_host_memory_used_total)
+                      BY time_bucket = BUCKET(@timestamp, 75, ?_tstart, ?_tend),
+                         host = COALESCE(labels.database_name, labels.sid, "hana")
+                  | SORT time_bucket ASC
+              x:
+                column: time_bucket
+              y:
+              - column: mem_mb
+              breakdown_by:
+                column: host
+        - type: vis
+          id: hana-xy-conn
+          grid:
+            x: 24
+            y: 33
+            w: 24
+            h: 12
+          config:
+            type: xy
+            title: Connections over time
+            legend:
+              visibility: visible
+              placement: outside
+              position: bottom
+            styling:
+              interpolation: linear
+              points:
+                visibility: hidden
+            layers:
+            - type: line
+              data_source:
+                type: esql
+                query: |-
+                  FROM {{ consts.metrics_data_stream }}
+                  | WHERE hanadb_connections_total IS NOT NULL
+                  | STATS conns = MAX(hanadb_connections_total)
+                      BY time_bucket = BUCKET(@timestamp, 75, ?_tstart, ?_tend),
+                         host = COALESCE(labels.database_name, labels.sid, "hana")
+                  | SORT time_bucket ASC
+              x:
+                column: time_bucket
+              y:
+              - column: conns
+              breakdown_by:
+                column: host
+
+  - name: sync_alerts_ml_slo
+    type: ai.agent
+    agent-id: elastic-ai-agent
+    create-conversation: true
+    if: "steps.detect_hanadb.output.values.0.0 > 0"
+    on-failure:
+      continue: true
+    with:
+      message: |
+        You are SAP HANA Prom-gap Auto-ops on Elastic Observability Serverless.
+
+        Telemetry gate: hanadb_* docs (7d) = {{ steps.detect_hanadb.output.values.0.0 }}
+
+        ## Goal (gap-only)
+        1. **Universal alerts** via `POST /api/alerting/v2/rules` (never Classic thresholds).
+           Exact names (one each):
+           - `Auto: SAP HANA Memory High` — ES|QL on `hanadb_host_memory_used_total` by host; breach when > 50000 (MB) or > 80% of `hanadb_host_memory_alloc_limit` when present.
+           - `Auto: SAP HANA Connections High` — `hanadb_connections_total` by host; breach when > 500.
+           - `Auto: SAP HANA Alerts Current` — `hanadb_alerts_current` > 0.
+           Tags: `sap-hana`, `auto-ops`, `universal`, `prometheus`.
+           Index: `metrics-generic.prometheus-*` (and metrics-* if needed).
+        2. **ML** — if no job `auto-sap-hana-memory`, create/open a single metric anomaly job on
+           `hanadb_host_memory_used_total` (15m bucket) + Classic `xpack.ml.anomaly_detection_alert`
+           named `Auto: SAP HANA Memory Anomaly`. Skip if APIs unavailable; note in report.
+        3. **SLO** — gap-only `POST /api/observability/slos`:
+           - id `auto-sap-hana-availability`
+           - name `Auto: SAP HANA — alert-free availability`
+           - indicator: custom KQL / metric good events where `hanadb_alerts_current:0` (or burn when alerts > 0)
+           - objective 99.9% / 7d or softer 99% if estate is demo-noisy
+           - tags: sap-hana, auto-ops
+
+        Do **not** recreate healthy assets. Prefer kibana.request / execute_api.
+        Dashboard `auto-sap-hana-health` is owned by the previous step — do not rewrite panels.
+
+        ## End report
+        | asset | action | id/name | notes |
+        Then: ALERTS=… ML=… SLO=…
+    timeout: 20m
+
+  - name: log_summary
+    type: console
+    with:
+      message: |
+        sap-hana-auto-ops complete.
+        detect docs={{ steps.detect_hanadb.output.values.0.0 }}
+        dashboard=auto-sap-hana-health
+        catalog_metrics=75
