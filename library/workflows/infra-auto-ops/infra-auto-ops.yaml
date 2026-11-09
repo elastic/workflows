@@ -1,6 +1,6 @@
 template-metadata:
   slug: infra-auto-ops
-  version: "1.1.0"
+  version: "1.1.1"
   availability: ">=9.6.0"
   name: "Infrastructure Auto-ops (no APM)"
   description: >-
@@ -27,6 +27,8 @@ template-metadata:
         inputType: esIndex
         required: true
         default: "metrics-*"
+
+version: "1"
 
 version: "1"
 name: infra-auto-ops
@@ -59,13 +61,27 @@ consts:
     host_system          # hostmetrics / system CPU·mem·disk·net
     k8s_cluster          # kubeletstats / k8sclusterreceiver
     process_runtime      # process CPU / memory
-    database_postgresql  # postgresqlreceiver
+    database_postgresql  # postgresql* / postgresqlreceiver
     database_mysql       # mysql*
-    database_redis       # redisreceiver
+    database_redis       # redis* / redisreceiver
+    database_sqlserver   # microsoft_sqlserver* / mssql* / sqlserverreceiver
+    database_mongodb     # mongodb*
+    database_oracle      # oracle*
+    database_db2         # db2*
     web_nginx            # nginxreceiver
     cloud_aws
     cloud_azure
     cloud_gcp
+  # Owned by workflow db-monitoring-auto-dashboards (Auto: DB boards) — never Case as infra gaps.
+  db_owned_dataset_prefixes: |
+    postgresql.
+    mysql.
+    redis.
+    microsoft_sqlserver.
+    mssql.
+    mongodb.
+    oracle.
+    db2.
   # Prefer these OTel field names on f74145 (avoid Metricbeat host.cpu.usage /
   # system.cpu.total.norm.pct — unmapped or float/double ambiguous on metrics-*).
   preferred_fields: |
@@ -277,9 +293,17 @@ steps:
         ## Decision rules
         - Map each `data_stream.dataset` → a supported family **or** UNSUPPORTED.
         - Ignore pure APM/app datasets (`transaction*`, `service_*`, `apm.app*`) — infra-only.
+        - **DB-owned (SKIP — do not Case):** any dataset whose name starts with a prefix in:
+          ```
+          {{ consts.db_owned_dataset_prefixes }}
+          ```
+          These are covered by workflow **`db-monitoring-auto-dashboards`** (`auto-dbmon-*` boards).
+          Verdict = `SKIP_DB_OWNED`. Do **not** list them as product gaps. Do **not** open/refresh
+          the unsupported-infra Case for them. If an open gap Case only lists DB-owned datasets
+          (or becomes empty after filtering) → **CLOSE** it with a short note that Auto: DB owns them.
 
         ### UNSUPPORTED / unknown (always Stream shell + Case)
-        For **each** unsupported dataset with docs > 0:
+        For **each** unsupported dataset with docs > 0 (**after** excluding DB-owned + APM):
         1. **Ensure Stream shell** named `metrics-<dataset>-<namespace>` (see Stream naming).
            Tag / describe it as Auto-ops gap shell when the API allows.
         2. At most ONE open Case with tags `auto-ops`, `infrastructure`, `gap`, `product-request`.
