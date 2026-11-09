@@ -1,12 +1,12 @@
 template-metadata:
   slug: broken-widget-hunter
-  version: "1.0.0"
+  version: "1.1.0"
   availability: ">=9.6.0"
   name: "Broken widget hunter"
   description: >-
-    Continuously scan dashboards for broken ES|QL widgets (unknown columns /
-    indexes), auto-fix clear field renames, prune dead managed content packs,
-    and keep a single Observability Case honest when content packs rot.
+    Scan dashboards for broken ES|QL widgets (unknown columns / indexes) and keep
+    a single Observability Case honest with findings. Read-only — does not rewrite
+    or delete dashboards the workflow does not own.
   solutions: [observability]
   categories: [monitoring, case-management, ai-agent]
   install:
@@ -14,32 +14,31 @@ template-metadata:
       - name: agent-id
         label: "Agent Builder agent ID"
         description: >-
-          Agent Builder agent used for hunt / remediate / Case steps.
-          Default Serverless agent is elastic-ai-agent.
+          Agent Builder agent used for hunt / Case steps.
+          Default agent is elastic-ai-agent.
         inputType: text
         required: true
         default: "elastic-ai-agent"
       - name: metrics-index
-        label: "Metrics index pattern (prune inventory)"
+        label: "Metrics index pattern (inventory)"
         description: >-
-          Used when checking live datasets before pruning empty managed packs.
+          Used when checking live datasets for context in the Case report.
         inputType: esIndex
         required: true
         default: "metrics-*"
       - name: logs-index
-        label: "Logs index pattern (prune inventory)"
+        label: "Logs index pattern (inventory)"
         description: >-
-          Used when checking live log datasets before pruning empty managed packs.
+          Used when checking live log datasets for context in the Case report.
         inputType: esIndex
         required: true
         default: "logs-*"
 
-version: "1"
-name: broken-widget-hunter
+name: Broken widget hunter
 description: >
-  Every 15 minutes (and on demand): scan dashboards for broken ES|QL widgets,
-  auto-fix clear field drift, prune managed boards with no backing data, and
-  keep an Observability Case honest. Content packs rot — this keeps boards alive.
+  Hourly (and on demand): scan dashboards for broken ES|QL widgets and keep an
+  Observability Case honest with findings. Read-only — no panel rewrites or
+  dashboard deletes.
 enabled: true
 tags:
   - auto-ops
@@ -49,7 +48,7 @@ triggers:
   - type: manual
   - type: scheduled
     with:
-      every: 15m
+      every: 1h
 settings:
   timeout: 14m
   concurrency:
@@ -75,77 +74,75 @@ steps:
       sortField: createdAt
       sortOrder: desc
 
-  - name: hunt_and_remediate
-    type: ai.agent
-    agent-id: "{{ consts.agent_id }}"
-    create-conversation: true
+  - name: list_dashboards_page1
+    type: kibana.request
     on-failure:
       continue: true
     with:
-      message: |
-        You are the **Broken Widget Hunter** for Elastic Observability Serverless.
+      method: GET
+      path: /api/dashboards
+      query:
+        page: "1"
+      headers:
+        Elastic-Api-Version: "2023-10-31"
 
-        Broken widgets are the worst o11y UX. Content packs ship ES|QL that drifts
-        (`Unknown column [x], did you mean [y]?`). Your job: detect, ticket, fix,
-        and prune dead managed boards. This runs every 15m — stay gap-only and cheap.
+  - name: hunt_and_report
+    type: ai.agent
+    agent-id: "{{ consts.agent_id }}"
+    if: "steps.list_dashboards_page1.output: *"
+    with:
+      message: |
+        You are the **Broken Widget Hunter** for Elastic Observability.
+
+        Broken widgets are a poor UX when content packs ship ES|QL that drifts
+        (`Unknown column [x], did you mean [y]?`). Your job this run: **detect and
+        ticket only**. Do **not** rewrite panels, do **not** DELETE dashboards,
+        and do **not** overwrite user edits — even when a did-you-mean is obvious.
 
         ## Open broken-widget Cases
         ```
         {{ steps.list_open_broken_cases.output | json }}
         ```
 
-        ## Dashboard inventory (fetch yourself — typed)
-        Do **not** wait for pre-fetched lists. Call:
-        1. `GET /api/dashboards?page=1` and `page=2` (header `Elastic-Api-Version: 2023-10-31`)
-        2. `GET /api/saved_objects/_find?type=dashboard&search_fields=title&search=OTel%20OR%20Auto:%20OR%20Vercel%20OR%20Prometheus&per_page=30`
-        Prefer titles with Auto:, OTel, Vercel, Prometheus, content-pack style names.
-        Cap at **{{ consts.dashboard_pages }}** new-API pages.
+        ## Dashboard inventory (page 1 already fetched)
+        ```
+        {{ steps.list_dashboards_page1.output | json }}
+        ```
+        You may also call `GET /api/dashboards?page=2` if needed
+        (header `Elastic-Api-Version: 2023-10-31`). Prefer titles with `Auto:`,
+        `OTel`, or `Prometheus`. Cap at **{{ consts.dashboard_pages }}** pages.
 
-        ## Live data (for empty-pack pruning)
+        ## Live data (context for the Case)
         Run quick ES|QL (7d) for distinct `data_stream.dataset` on
-        `{{ consts.metrics_index }}` and `{{ consts.logs_index }}`.
-        Use that inventory before deleting anything.
+        `{{ consts.metrics_index }}` and `{{ consts.logs_index }}` so the Case
+        can note whether backing data exists.
 
-        ## Procedure (gap-only, cost-aware)
+        ## Procedure (read-only, cost-aware)
         1. Pick up to **15** dashboards to validate. Dedupe by id.
         2. For each id:
-           - `GET /api/dashboards/{id}` — extract ES|QL from `panels[].config` (`esql_query`,
-             `layers[].data_source.query` where type=esql).
-           - Also `GET /api/saved_objects/dashboard/{id}` — extract ES|QL strings containing
-             `FROM` / `TS` from `attributes.panelsJSON` / embeddableConfig when present.
+           - `GET /api/dashboards/{id}` — extract ES|QL from `panels[].config`
+             (`esql_query`, `layers[].data_source.query` where type=esql).
+           - Also `GET /api/saved_objects/dashboard/{id}` when useful — extract
+             ES|QL strings containing `FROM` / `TS` from `attributes.panelsJSON`.
         3. Run each distinct ES|QL via Elasticsearch `_query` / ES|QL tools. Replace
            `?_tstart`/`?_tend` with `NOW() - 24 hours` / `NOW()` when needed.
         4. Collect failures with `verification_exception`, `Unknown column`, `Unknown index`.
 
-        ## Remediation
-        A) **did you mean** (`Unknown column [BAD], did you mean [GOOD]?`):
-           - Classic SO: GET saved object → replace BAD with GOOD in `panelsJSON` string →
-             `PUT /api/saved_objects/dashboard/{id}` with full attributes.
-           - New API: GET dashboard → replace in panels JSON → `PUT /api/dashboards/{id}`.
-           - Re-run the query to confirm OK when practical.
-        B) **Missing `url.query`** (no did-you-mean): rewrite ES|QL to derive from `url.full`:
-           - Insert `| GROK url.full ".*\\?(?<url_query>.*)"` then use `url_query` instead of `url.query`.
-           - Goal: empty results, not red X `verification_exception`.
-        C) **Dead managed packs — prune** (`DELETE …/dashboard/{id}?force=true`):
-           - Every panel `Unknown index` (never onboarded dataset).
-           - Every panel `Unknown column [@timestamp]` on Elastic Cloud **`[Audit] *`** boards
-             when this project has **no** audit indices — do not invent `@timestamp` remaps.
-           - Windows / system auth / classic Metricbeat k8s packs with no backing datasets.
-           - Never delete Auto: / non-managed boards. Keep boards that match live data.
-        D) **unknown_index / unknown_column** on boards you must keep: Case only — do not invent fields.
-        E) **Case** (at most ONE open with tag `broken-widget`):
-           - title: `[Auto-ops] Broken dashboard widgets detected`
-           - tags: broken-widget, auto-ops, dashboard, gap
-           - owner: observability
-           - description markdown table: dashboard | panel | kind | bad→good | action (fixed|ticketed|pruned)
-           - If Case exists: UPDATE description / one short comment; if zero broken: CLOSE.
+        ## Reporting (Case only — no mutations)
+        At most ONE open Case with tag `broken-widget`:
+        - title: `[Auto-ops] Broken dashboard widgets detected`
+        - tags: broken-widget, auto-ops, dashboard, gap
+        - owner: observability
+        - description markdown table:
+          dashboard | panel | kind | error | suggested fix (advisory only) | data present?
+        - If Case exists: UPDATE description / one short comment; if zero broken: CLOSE.
 
         ## Hard rules
-        - Prefer kibana.request + ES|QL. Do not configure Security MCP.
+        - **READ-ONLY on dashboards**: no PUT/DELETE on dashboards or saved objects.
         - Do not create Universal alerts here.
         - Skip healthy panels. Cap work at 15 dashboards this run.
 
         ## End report
-        | dashboard | panel | kind | fix | result |
-        Then: BROKEN=… FIXED=… PRUNED=… CASED=… SKIPPED=…
+        | dashboard | panel | kind | error | suggested |
+        Then: BROKEN=… CASED=… SKIPPED=…
     timeout: 12m

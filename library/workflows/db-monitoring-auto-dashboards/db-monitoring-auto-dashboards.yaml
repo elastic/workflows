@@ -1,6 +1,6 @@
 template-metadata:
   slug: db-monitoring-auto-dashboards
-  version: "1.0.0"
+  version: "1.1.0"
   availability: ">=9.6.0"
   name: "Database monitoring auto dashboards"
   description: >-
@@ -15,7 +15,7 @@ template-metadata:
         label: "Agent Builder agent ID"
         description: >-
           Agent Builder agent used to upsert Auto: DB dashboards.
-          Default Serverless agent is elastic-ai-agent.
+          Default agent is elastic-ai-agent.
         inputType: text
         required: true
         default: "elastic-ai-agent"
@@ -35,13 +35,12 @@ template-metadata:
         required: true
         default: "logs-*"
 
-version: "1"
-name: db-monitoring-auto-dashboards
+name: Database monitoring auto dashboards
 description: >
   Hourly (and on demand): detect OpenTelemetry database metric/log datasets
   (PostgreSQL, Redis, MySQL, SQL Server, MongoDB, Oracle, Db2), then create or
-  refresh Auto: DB Monitoring dashboards via the Dashboards API — adapted for
-  Serverless TSDB (TS + LAST_OVER_TIME).
+  refresh Auto: DB Monitoring dashboards via the Dashboards API using
+  TSDB-safe TS + LAST_OVER_TIME panels.
 enabled: true
 tags:
   - auto-ops
@@ -67,7 +66,7 @@ consts:
     Auto: DB Redis — Memory & Clients
     Auto: DB MySQL — Slow Query & Errors
     Auto: DB SQL Server — Performance & Health
-    Auto: DB SQL Server — Overview (Datadog Equivalent)
+    Auto: DB SQL Server — Overview
     Auto: DB MongoDB — Operations & Health
     Auto: DB Oracle — Performance & Health
     Auto: DB IBM Db2 — Performance & Health
@@ -115,6 +114,7 @@ steps:
     with:
       format: json
       query: |
+        SET unmapped_fields="nullify";
         FROM {{ consts.metrics_index }}
         | WHERE @timestamp > NOW() - 7 days AND data_stream.dataset IS NOT NULL
         | STATS docs = COUNT(*) BY data_stream.dataset
@@ -133,6 +133,7 @@ steps:
     with:
       format: json
       query: |
+        SET unmapped_fields="nullify";
         FROM {{ consts.logs_index }}
         | WHERE @timestamp > NOW() - 7 days AND data_stream.dataset IS NOT NULL
         | STATS docs = COUNT(*) BY data_stream.dataset
@@ -145,15 +146,12 @@ steps:
   - name: ensure_db_dashboards
     type: ai.agent
     agent-id: "{{ consts.agent_id }}"
-    create-conversation: true
-    on-failure:
-      continue: true
     with:
       message: |
-        You are **DB Monitoring Auto-ops** for Elastic Observability Serverless.
+        You are **DB Monitoring Auto-ops** for Elastic Observability.
 
-        Goal: ensure the full **Auto: DB …** catalog for OTel database receivers —
-        same product shape as the dbmonitoring pack, adapted for Serverless TSDB.
+        Goal: ensure the full **Auto: DB …** catalog for OTel database receivers
+        with TSDB-safe panels.
 
         ## Live inventory
         Metrics datasets (7d) from `{{ consts.metrics_index }}`:
@@ -185,7 +183,7 @@ steps:
         5. **TSDB critical**: for gauge metrics use **`TS {{ consts.metrics_index }}`** +
            `MAX(LAST_OVER_TIME(field))` and `WHERE data_stream.dataset == "…"`.
            Do **not** use plain `FROM` + `AVG`/`MAX` on redis/postgresqlreceiver —
-           those return null on Serverless TSDB.
+           those return null on TSDB-backed metrics streams.
         6. Time buckets: `BUCKET(@timestamp, 75, ?_tstart, ?_tend)`.
         7. Tags on dashboard: `auto`, `auto-ops`, `db-monitoring`.
         8. time_range: `now-2h` → `now`.
@@ -198,7 +196,7 @@ steps:
         - **redis** (`redisreceiver.otel`): memory.used/peak, clients.connected,
           fragmentation_ratio + memory/clients/keyspace/commands charts.
         - **mysql** (slowlog/error logs): COUNT/AVG query_time KPIs + trends.
-        - **sqlserver** + **sqlserver_overview** (Datadog-style): connections, locks,
+        - **sqlserver** + **sqlserver_overview**: connections, locks,
           buffer cache, batch requests, I/O, per-instance bars.
         - **mongodb / oracle / db2**: KPI strip + 1–2 time series.
 
