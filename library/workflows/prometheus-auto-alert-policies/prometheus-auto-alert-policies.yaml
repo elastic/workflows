@@ -1,8 +1,8 @@
 template-metadata:
   slug: prometheus-auto-alert-policies
-  version: "1.5.0"
+  version: "2.0.0"
   availability: ">=9.6.0"
-  name: "Auto Alert Policies"
+  name: "Prometheus / OTel auto alert policies"
   description: >-
     Gap-only Universal Alerting (ES|QL) for Managed Prometheus remote_write
     or OTel-shaped metrics. Creates missing rules via PUT with deterministic ids
@@ -14,6 +14,9 @@ template-metadata:
     form:
       - name: agent-id
         label: "Agent Builder agent ID"
+        description: >-
+          Agent that summarizes Universal gap-fill results after each run.
+          Default elastic-ai-agent is the built-in Elastic AI Agent.
         inputType: text
         required: true
         default: "elastic-ai-agent"
@@ -79,7 +82,7 @@ template-metadata:
         required: true
         default: false
 
-name: Auto Alert Policies
+name: Prometheus / OTel auto alert policies
 description: >
   Gap-only Universal Alerting (ES|QL) for Prometheus remote_write or OTel metrics.
   Creates missing rules via PUT with deterministic ids; skips families with no samples.
@@ -263,7 +266,7 @@ steps:
         kind: alert
         metadata:
           name: "Auto: HTTP 5xx Rate Spike"
-          description: "Universal ES|QL — 5xx deltas by service (field names from install)."
+          description: "Universal ES|QL — estate-aggregate 5xx deltas (field names from install)."
           tags: [auto-prom, universal, auto-ops, metrics]
           routing_tags: [auto-prom]
         schedule:
@@ -276,9 +279,9 @@ steps:
             FROM {{ consts.metrics_index }}
             | WHERE @timestamp >= ?_tstart AND @timestamp <= ?_tend
             | EVAL svc = `{{ consts.service_field }}`
-            | EVAL st = `{{ consts.status_field }}`
+            | EVAL st = TO_STRING(`{{ consts.status_field }}`)
             | EVAL http_cnt = COALESCE(http_requests_total, `http.server.requests`)
-            | WHERE svc IS NOT NULL AND st == "500" AND http_cnt IS NOT NULL
+            | WHERE svc IS NOT NULL AND st LIKE "5*" AND http_cnt IS NOT NULL
             | EVAL v = TO_DOUBLE(http_cnt)
             | STATS d = MAX(v) - MIN(v) BY svc, method, route
             | WHERE d > 0
@@ -421,7 +424,7 @@ steps:
         kind: alert
         metadata:
           name: "Auto: Login Failures Spike"
-          description: "Universal ES|QL — login failure counters by service."
+          description: "Universal ES|QL — estate-aggregate login failure counters."
           tags: [auto-prom, universal, auto-ops, metrics, security]
           routing_tags: [auto-prom]
         schedule:
@@ -476,7 +479,7 @@ steps:
         kind: alert
         metadata:
           name: "Auto: Purchases Drop"
-          description: "Universal ES|QL — purchases near-zero delta by service."
+          description: "Universal ES|QL — estate-aggregate purchases near-zero delta."
           tags: [auto-prom, universal, auto-ops, metrics]
           routing_tags: [auto-prom]
         schedule:
@@ -530,7 +533,7 @@ steps:
         kind: alert
         metadata:
           name: "Auto: Payment Failures Spike"
-          description: "Universal ES|QL — payment failure deltas by service."
+          description: "Universal ES|QL — estate-aggregate payment failure deltas."
           tags: [auto-prom, universal, auto-ops, metrics]
           routing_tags: [auto-prom]
         schedule:
@@ -585,7 +588,7 @@ steps:
         kind: alert
         metadata:
           name: "Auto: Signups Drop"
-          description: "Universal ES|QL — signups near-zero delta by service."
+          description: "Universal ES|QL — estate-aggregate signups near-zero delta."
           tags: [auto-prom, universal, auto-ops, metrics]
           routing_tags: [auto-prom]
         schedule:
@@ -639,7 +642,7 @@ steps:
         kind: alert
         metadata:
           name: "Auto: Cart Abandonments Spike"
-          description: "Universal ES|QL — cart abandonment deltas by service."
+          description: "Universal ES|QL — estate-aggregate cart abandonment deltas."
           tags: [auto-prom, universal, auto-ops, metrics]
           routing_tags: [auto-prom]
         schedule:
@@ -694,7 +697,7 @@ steps:
         kind: alert
         metadata:
           name: "Auto: Product Views Drop"
-          description: "Universal ES|QL — product views near-zero delta by service."
+          description: "Universal ES|QL — estate-aggregate product views near-zero delta."
           tags: [auto-prom, universal, auto-ops, metrics]
           routing_tags: [auto-prom]
         schedule:
@@ -738,7 +741,7 @@ steps:
       continue: true
     with:
       message: |
-        Summarize Universal Auto Alert Policies gap-fill (read-only).
+        Summarize Universal Prometheus / OTel auto alert policies gap-fill (read-only).
         Detection: {{ steps.detect_metric_families.output | json }}
         Universal rules: {{ steps.verify_universal_rules.output | json }}
         Service field: {{ consts.service_field }}; status field: {{ consts.status_field }}.

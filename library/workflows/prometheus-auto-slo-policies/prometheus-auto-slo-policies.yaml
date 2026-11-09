@@ -1,6 +1,6 @@
 template-metadata:
   slug: prometheus-auto-slo-policies
-  version: "1.3.0"
+  version: "2.0.0"
   availability: ">=9.6.0"
   name: "Prometheus auto SLO policies (baseline → improve)"
   description: >-
@@ -55,35 +55,35 @@ template-metadata:
       - name: target-floor
         label: "SLO target floor"
         description: "Soft minimum objective (fraction). Also capped below live avail."
-        inputType: text
+        inputType: number
         required: true
-        default: "0.50"
+        default: 0.50
       - name: target-ceiling
         label: "SLO target ceiling"
         description: "Maximum objective (fraction) when ratcheting up."
-        inputType: text
+        inputType: number
         required: true
-        default: "0.995"
+        default: 0.995
       - name: baseline-buffer
         label: "Baseline buffer"
         description: >-
           New target = current availability minus this buffer so coverage starts Healthy.
-        inputType: text
+        inputType: number
         required: true
-        default: "0.02"
+        default: 0.02
       - name: ratchet-gap
         label: "Ratchet gap"
         description: >-
           Only raise the target when Healthy and SLI is at least this far above target.
-        inputType: text
+        inputType: number
         required: true
-        default: "0.015"
+        default: 0.015
       - name: ratchet-step
         label: "Ratchet step"
         description: "How much to raise the target each improvement cycle."
-        inputType: text
+        inputType: number
         required: true
-        default: "0.005"
+        default: 0.005
 
 name: Prometheus Auto SLO Policies
 description: >
@@ -129,7 +129,7 @@ steps:
           AND `{{ consts.service_field }}` LIKE "{{ consts.service_filter }}"
           AND `{{ consts.status_field }}` IS NOT NULL
         | STATS total = COUNT(*),
-                good = COUNT(*) WHERE `{{ consts.status_field }}` != "500"
+                good = COUNT(*) WHERE NOT (TO_STRING(`{{ consts.status_field }}`) LIKE "5*")
                 BY `{{ consts.service_field }}`
         | WHERE total > 0
         | EVAL avail = ROUND(TO_DOUBLE(good) / TO_DOUBLE(total), 4)
@@ -150,7 +150,7 @@ steps:
           AND `{{ consts.service_field }}` LIKE "{{ consts.service_filter }}"
           AND `{{ consts.status_field }}` IS NOT NULL
         | STATS total = COUNT(*),
-                good = COUNT(*) WHERE `{{ consts.status_field }}` != "500"
+                good = COUNT(*) WHERE NOT (TO_STRING(`{{ consts.status_field }}`) LIKE "5*")
         | WHERE total > 0
         | EVAL avail = ROUND(TO_DOUBLE(good) / TO_DOUBLE(total), 4)
         | EVAL raw_target = avail - {{ consts.baseline_buffer }}
@@ -195,7 +195,7 @@ steps:
               params:
                 index: "{{ consts.metrics_index }}"
                 filter: '{{ consts.service_field }}: "{{ foreach.item[0] }}" and {{ consts.status_field }}: *'
-                good: '{{ consts.status_field }}: * and not {{ consts.status_field }}: "500"'
+                good: '{{ consts.status_field }}: * and not {{ consts.status_field }}: 5*'
                 total: '{{ consts.status_field }}: *'
                 timestampField: "@timestamp"
             timeWindow:
@@ -231,7 +231,7 @@ steps:
           params:
             index: "{{ consts.metrics_index }}"
             filter: '{{ consts.service_field }}: {{ consts.service_filter }} and {{ consts.status_field }}: *'
-            good: '{{ consts.status_field }}: * and not {{ consts.status_field }}: "500"'
+            good: '{{ consts.status_field }}: * and not {{ consts.status_field }}: 5*'
             total: '{{ consts.status_field }}: *'
             timestampField: "@timestamp"
         groupBy:
