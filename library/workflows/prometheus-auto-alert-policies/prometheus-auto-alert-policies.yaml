@@ -1,12 +1,13 @@
 template-metadata:
   slug: prometheus-auto-alert-policies
-  version: "1.4.2"
+  version: "1.5.0"
   availability: ">=9.6.0"
   name: "Auto Alert Policies"
   description: >-
     Gap-only Universal Alerting (ES|QL) for Managed Prometheus remote_write
-    or OTel-shaped metrics. POST /api/alerting/v2/rules only (no Classic).
-    Dual-shape queries; estate-level deltas (no per-service alert fan-out); workshop-quiet thresholds.
+    or OTel-shaped metrics. Creates missing rules via PUT with deterministic ids
+    (never overwrites tuned thresholds). Install fields select service/status
+    label names and numeric breach thresholds.
   solutions: [observability]
   categories: [detection, monitoring, ai-agent]
   install:
@@ -20,15 +21,68 @@ template-metadata:
         label: "Metrics index / data stream"
         description: >-
           PRW: metrics-generic.prometheus-default. OTel: metrics-generic.otel-default.
-          Queries COALESCE both label shapes when SET unmapped_fields is supported.
         inputType: esIndex
         required: true
         default: "metrics-generic.prometheus-default"
+      - name: service-field
+        label: "Service field"
+        description: >-
+          service for Managed Prometheus remote_write, service.name for OTLP.
+          Enter without backticks.
+        inputType: text
+        required: true
+        default: "service"
+      - name: status-field
+        label: "HTTP status field"
+        description: >-
+          status for Managed Prometheus remote_write, http.status_code for OTLP.
+          Enter without backticks.
+        inputType: text
+        required: true
+        default: "status"
+      - name: http-5xx-delta-threshold
+        label: "HTTP 5xx estate delta threshold"
+        inputType: number
+        required: true
+        default: 3000
+      - name: cpu-threshold
+        label: "CPU usage ratio threshold"
+        inputType: number
+        required: true
+        default: 0.95
+      - name: goroutines-threshold
+        label: "Go goroutines threshold"
+        inputType: number
+        required: true
+        default: 2000
+      - name: login-failures-delta-threshold
+        label: "Login failures estate delta threshold"
+        inputType: number
+        required: true
+        default: 3000
+      - name: payment-failures-delta-threshold
+        label: "Payment failures estate delta threshold"
+        inputType: number
+        required: true
+        default: 2000
+      - name: cart-abandonments-delta-threshold
+        label: "Cart abandonments estate delta threshold"
+        inputType: number
+        required: true
+        default: 3000
+      - name: cleanup-classic-rules
+        label: "Delete leftover Classic auto-prom rules"
+        description: >-
+          If true, deletes Classic alerting rules with ids auto-prom-* left from
+          older template versions. Default false — never deletes Universal rules.
+        inputType: boolean
+        required: true
+        default: false
 
 name: Auto Alert Policies
 description: >
   Gap-only Universal Alerting (ES|QL) for Prometheus remote_write or OTel metrics.
-  Creates via POST /api/alerting/v2/rules; removes leftover Classic auto-prom ids.
+  Creates missing rules via PUT with deterministic ids; skips families with no samples.
 enabled: true
 triggers:
   - type: manual
@@ -45,6 +99,15 @@ settings:
 
 consts:
   metrics_index: __install__.metrics-index
+  service_field: __install__.service-field
+  status_field: __install__.status-field
+  http_5xx_delta_threshold: __install__.http-5xx-delta-threshold
+  cpu_threshold: __install__.cpu-threshold
+  goroutines_threshold: __install__.goroutines-threshold
+  login_failures_delta_threshold: __install__.login-failures-delta-threshold
+  payment_failures_delta_threshold: __install__.payment-failures-delta-threshold
+  cart_abandonments_delta_threshold: __install__.cart-abandonments-delta-threshold
+  cleanup_classic_rules: __install__.cleanup-classic-rules
 
 steps:
   - name: detect_metric_families
@@ -60,10 +123,13 @@ steps:
         | STATS http_samples = COUNT(*) WHERE http_requests_total IS NOT NULL OR `http.server.requests` IS NOT NULL,
                 cpu_samples = COUNT(*) WHERE process_cpu_usage_ratio IS NOT NULL OR `process.cpu.usage` IS NOT NULL,
                 go_samples = COUNT(*) WHERE go_goroutines IS NOT NULL OR `go.goroutines` IS NOT NULL,
-                login_samples = COUNT(*) WHERE user_login_failures_total IS NOT NULL,
+                login_samples = COUNT(*) WHERE user_login_failures_total IS NOT NULL OR `user.login.failures` IS NOT NULL,
                 purchase_samples = COUNT(*) WHERE purchases_total IS NOT NULL OR purchases IS NOT NULL,
-                services_prom = COUNT_DISTINCT(service),
-                services_otel = COUNT_DISTINCT(`service.name`)
+                payment_samples = COUNT(*) WHERE payment_failures_total IS NOT NULL OR `payment.failures` IS NOT NULL,
+                signup_samples = COUNT(*) WHERE user_signups_total IS NOT NULL OR `user.signups` IS NOT NULL,
+                cart_samples = COUNT(*) WHERE cart_abandonments_total IS NOT NULL OR `cart.abandonments` IS NOT NULL,
+                views_samples = COUNT(*) WHERE product_views_total IS NOT NULL OR `product.views` IS NOT NULL,
+                services = COUNT_DISTINCT(`{{ consts.service_field }}`)
 
   - name: list_universal_rules
     type: kibana.request
@@ -75,6 +141,7 @@ steps:
 
   - name: delete_classic_auto_prom_http_5xx_rate
     type: kibana.request
+    if: "consts.cleanup_classic_rules: true"
     on-failure:
       continue: true
     with:
@@ -85,6 +152,7 @@ steps:
 
   - name: delete_classic_auto_prom_cpu_usage_high
     type: kibana.request
+    if: "consts.cleanup_classic_rules: true"
     on-failure:
       continue: true
     with:
@@ -95,6 +163,7 @@ steps:
 
   - name: delete_classic_auto_prom_go_goroutines_high
     type: kibana.request
+    if: "consts.cleanup_classic_rules: true"
     on-failure:
       continue: true
     with:
@@ -105,6 +174,7 @@ steps:
 
   - name: delete_classic_auto_prom_login_failures_spike
     type: kibana.request
+    if: "consts.cleanup_classic_rules: true"
     on-failure:
       continue: true
     with:
@@ -115,6 +185,7 @@ steps:
 
   - name: delete_classic_auto_prom_purchases_drop
     type: kibana.request
+    if: "consts.cleanup_classic_rules: true"
     on-failure:
       continue: true
     with:
@@ -125,6 +196,7 @@ steps:
 
   - name: delete_classic_auto_prom_payment_failures_spike
     type: kibana.request
+    if: "consts.cleanup_classic_rules: true"
     on-failure:
       continue: true
     with:
@@ -135,6 +207,7 @@ steps:
 
   - name: delete_classic_auto_prom_signups_drop
     type: kibana.request
+    if: "consts.cleanup_classic_rules: true"
     on-failure:
       continue: true
     with:
@@ -145,6 +218,7 @@ steps:
 
   - name: delete_classic_auto_prom_cart_abandonments_spike
     type: kibana.request
+    if: "consts.cleanup_classic_rules: true"
     on-failure:
       continue: true
     with:
@@ -155,6 +229,7 @@ steps:
 
   - name: delete_classic_auto_prom_product_views_drop
     type: kibana.request
+    if: "consts.cleanup_classic_rules: true"
     on-failure:
       continue: true
     with:
@@ -163,20 +238,32 @@ steps:
       headers:
         Elastic-Api-Version: "2023-10-31"
 
-  - name: create_universal_http_5xx
+  # --- HTTP 5xx ---
+  - name: get_rule_http_5xx
     type: kibana.request
     on-failure:
       continue: true
     with:
-      method: POST
-      path: /api/alerting/v2/rules
+      method: GET
+      path: /api/alerting/v2/rules/auto-prom-http-5xx-rate
+      headers:
+        Elastic-Api-Version: "2023-10-31"
+
+  - name: create_universal_http_5xx
+    type: kibana.request
+    if: "steps.get_rule_http_5xx.error.message: HTTP*404* and steps.detect_metric_families.output.values.0.0 > 0"
+    on-failure:
+      continue: true
+    with:
+      method: PUT
+      path: /api/alerting/v2/rules/auto-prom-http-5xx-rate
       headers:
         Elastic-Api-Version: "2023-10-31"
       body:
         kind: alert
         metadata:
           name: "Auto: HTTP 5xx Rate Spike"
-          description: "Universal ES|QL — 5xx deltas by service (PRW service/status or OTel service.name/http.status_code)."
+          description: "Universal ES|QL — 5xx deltas by service (field names from install)."
           tags: [auto-prom, universal, auto-ops, metrics]
           routing_tags: [auto-prom]
         schedule:
@@ -188,8 +275,8 @@ steps:
             SET unmapped_fields="nullify";
             FROM {{ consts.metrics_index }}
             | WHERE @timestamp >= ?_tstart AND @timestamp <= ?_tend
-            | EVAL svc = COALESCE(service, `service.name`)
-            | EVAL st = COALESCE(status, http.status_code)
+            | EVAL svc = `{{ consts.service_field }}`
+            | EVAL st = `{{ consts.status_field }}`
             | EVAL http_cnt = COALESCE(http_requests_total, `http.server.requests`)
             | WHERE svc IS NOT NULL AND st == "500" AND http_cnt IS NOT NULL
             | EVAL v = TO_DOUBLE(http_cnt)
@@ -199,7 +286,7 @@ steps:
             | EVAL group_key = "estate"
             | KEEP group_key, error_delta
           breach:
-            segment: "| WHERE error_delta > 3000"
+            segment: "| WHERE error_delta > {{ consts.http_5xx_delta_threshold }}"
         grouping:
           fields: [group_key]
         recovery:
@@ -207,20 +294,32 @@ steps:
         no_data:
           strategy: ignore
 
-  - name: create_universal_cpu
+  # --- CPU ---
+  - name: get_rule_cpu
     type: kibana.request
     on-failure:
       continue: true
     with:
-      method: POST
-      path: /api/alerting/v2/rules
+      method: GET
+      path: /api/alerting/v2/rules/auto-prom-cpu-usage-high
+      headers:
+        Elastic-Api-Version: "2023-10-31"
+
+  - name: create_universal_cpu
+    type: kibana.request
+    if: "steps.get_rule_cpu.error.message: HTTP*404* and steps.detect_metric_families.output.values.0.1 > 0"
+    on-failure:
+      continue: true
+    with:
+      method: PUT
+      path: /api/alerting/v2/rules/auto-prom-cpu-usage-high
       headers:
         Elastic-Api-Version: "2023-10-31"
       body:
         kind: alert
         metadata:
           name: "Auto: High CPU Usage Ratio"
-          description: "Universal ES|QL — CPU high by service (PRW or OTel process CPU fields)."
+          description: "Universal ES|QL — CPU high by service."
           tags: [auto-prom, universal, auto-ops, metrics]
           routing_tags: [auto-prom]
         schedule:
@@ -232,13 +331,13 @@ steps:
             SET unmapped_fields="nullify";
             FROM {{ consts.metrics_index }}
             | WHERE @timestamp >= ?_tstart AND @timestamp <= ?_tend
-            | EVAL svc = COALESCE(service, `service.name`)
+            | EVAL svc = `{{ consts.service_field }}`
             | EVAL cpu = COALESCE(process_cpu_usage_ratio, `process.cpu.usage`)
             | WHERE svc IS NOT NULL AND cpu IS NOT NULL
             | STATS max_cpu = MAX(cpu) BY svc
             | KEEP svc, max_cpu
           breach:
-            segment: "| WHERE max_cpu > 0.95"
+            segment: "| WHERE max_cpu > {{ consts.cpu_threshold }}"
         grouping:
           fields: [svc]
         recovery:
@@ -246,13 +345,25 @@ steps:
         no_data:
           strategy: ignore
 
-  - name: create_universal_go
+  # --- Go goroutines ---
+  - name: get_rule_go
     type: kibana.request
     on-failure:
       continue: true
     with:
-      method: POST
-      path: /api/alerting/v2/rules
+      method: GET
+      path: /api/alerting/v2/rules/auto-prom-go-goroutines-high
+      headers:
+        Elastic-Api-Version: "2023-10-31"
+
+  - name: create_universal_go
+    type: kibana.request
+    if: "steps.get_rule_go.error.message: HTTP*404* and steps.detect_metric_families.output.values.0.2 > 0"
+    on-failure:
+      continue: true
+    with:
+      method: PUT
+      path: /api/alerting/v2/rules/auto-prom-go-goroutines-high
       headers:
         Elastic-Api-Version: "2023-10-31"
       body:
@@ -271,13 +382,13 @@ steps:
             SET unmapped_fields="nullify";
             FROM {{ consts.metrics_index }}
             | WHERE @timestamp >= ?_tstart AND @timestamp <= ?_tend
-            | EVAL svc = COALESCE(service, `service.name`)
+            | EVAL svc = `{{ consts.service_field }}`
             | EVAL g = COALESCE(go_goroutines, `go.goroutines`)
             | WHERE svc IS NOT NULL AND g IS NOT NULL
             | STATS max_go = MAX(g) BY svc
             | KEEP svc, max_go
           breach:
-            segment: "| WHERE max_go > 2000"
+            segment: "| WHERE max_go > {{ consts.goroutines_threshold }}"
         grouping:
           fields: [svc]
         recovery:
@@ -285,13 +396,25 @@ steps:
         no_data:
           strategy: ignore
 
-  - name: create_universal_login
+  # --- Login failures ---
+  - name: get_rule_login
     type: kibana.request
     on-failure:
       continue: true
     with:
-      method: POST
-      path: /api/alerting/v2/rules
+      method: GET
+      path: /api/alerting/v2/rules/auto-prom-login-failures-spike
+      headers:
+        Elastic-Api-Version: "2023-10-31"
+
+  - name: create_universal_login
+    type: kibana.request
+    if: "steps.get_rule_login.error.message: HTTP*404* and steps.detect_metric_families.output.values.0.3 > 0"
+    on-failure:
+      continue: true
+    with:
+      method: PUT
+      path: /api/alerting/v2/rules/auto-prom-login-failures-spike
       headers:
         Elastic-Api-Version: "2023-10-31"
       body:
@@ -310,7 +433,7 @@ steps:
             SET unmapped_fields="nullify";
             FROM {{ consts.metrics_index }}
             | WHERE @timestamp >= ?_tstart AND @timestamp <= ?_tend
-            | EVAL svc = COALESCE(service, `service.name`)
+            | EVAL svc = `{{ consts.service_field }}`
             | EVAL fails = COALESCE(user_login_failures_total, `user.login.failures`)
             | WHERE svc IS NOT NULL AND fails IS NOT NULL
             | EVAL v = TO_DOUBLE(fails)
@@ -320,7 +443,7 @@ steps:
             | EVAL group_key = "estate"
             | KEEP group_key, fail_delta
           breach:
-            segment: "| WHERE fail_delta > 3000"
+            segment: "| WHERE fail_delta > {{ consts.login_failures_delta_threshold }}"
         grouping:
           fields: [group_key]
         recovery:
@@ -328,13 +451,25 @@ steps:
         no_data:
           strategy: ignore
 
-  - name: create_universal_purchases
+  # --- Purchases drop (no WHERE d > 0 — zero growth must reach SUM) ---
+  - name: get_rule_purchases
     type: kibana.request
     on-failure:
       continue: true
     with:
-      method: POST
-      path: /api/alerting/v2/rules
+      method: GET
+      path: /api/alerting/v2/rules/auto-prom-purchases-drop
+      headers:
+        Elastic-Api-Version: "2023-10-31"
+
+  - name: create_universal_purchases
+    type: kibana.request
+    if: "steps.get_rule_purchases.error.message: HTTP*404* and steps.detect_metric_families.output.values.0.4 > 0"
+    on-failure:
+      continue: true
+    with:
+      method: PUT
+      path: /api/alerting/v2/rules/auto-prom-purchases-drop
       headers:
         Elastic-Api-Version: "2023-10-31"
       body:
@@ -353,12 +488,11 @@ steps:
             SET unmapped_fields="nullify";
             FROM {{ consts.metrics_index }}
             | WHERE @timestamp >= ?_tstart AND @timestamp <= ?_tend
-            | EVAL svc = COALESCE(service, `service.name`)
+            | EVAL svc = `{{ consts.service_field }}`
             | EVAL p = COALESCE(purchases_total, purchases)
             | WHERE svc IS NOT NULL AND p IS NOT NULL
             | EVAL v = TO_DOUBLE(p)
             | STATS d = MAX(v) - MIN(v) BY svc, channel
-            | WHERE d > 0
             | STATS purchase_delta = SUM(d)
             | EVAL group_key = "estate"
             | KEEP group_key, purchase_delta
@@ -371,13 +505,25 @@ steps:
         no_data:
           strategy: ignore
 
-  - name: create_universal_payment
+  # --- Payment failures ---
+  - name: get_rule_payment
     type: kibana.request
     on-failure:
       continue: true
     with:
-      method: POST
-      path: /api/alerting/v2/rules
+      method: GET
+      path: /api/alerting/v2/rules/auto-prom-payment-failures-spike
+      headers:
+        Elastic-Api-Version: "2023-10-31"
+
+  - name: create_universal_payment
+    type: kibana.request
+    if: "steps.get_rule_payment.error.message: HTTP*404* and steps.detect_metric_families.output.values.0.5 > 0"
+    on-failure:
+      continue: true
+    with:
+      method: PUT
+      path: /api/alerting/v2/rules/auto-prom-payment-failures-spike
       headers:
         Elastic-Api-Version: "2023-10-31"
       body:
@@ -396,7 +542,7 @@ steps:
             SET unmapped_fields="nullify";
             FROM {{ consts.metrics_index }}
             | WHERE @timestamp >= ?_tstart AND @timestamp <= ?_tend
-            | EVAL svc = COALESCE(service, `service.name`)
+            | EVAL svc = `{{ consts.service_field }}`
             | EVAL fails = COALESCE(payment_failures_total, `payment.failures`)
             | WHERE svc IS NOT NULL AND fails IS NOT NULL
             | EVAL v = TO_DOUBLE(fails)
@@ -406,7 +552,7 @@ steps:
             | EVAL group_key = "estate"
             | KEEP group_key, fail_delta
           breach:
-            segment: "| WHERE fail_delta > 2000"
+            segment: "| WHERE fail_delta > {{ consts.payment_failures_delta_threshold }}"
         grouping:
           fields: [group_key]
         recovery:
@@ -414,13 +560,25 @@ steps:
         no_data:
           strategy: ignore
 
-  - name: create_universal_signups
+  # --- Signups drop ---
+  - name: get_rule_signups
     type: kibana.request
     on-failure:
       continue: true
     with:
-      method: POST
-      path: /api/alerting/v2/rules
+      method: GET
+      path: /api/alerting/v2/rules/auto-prom-signups-drop
+      headers:
+        Elastic-Api-Version: "2023-10-31"
+
+  - name: create_universal_signups
+    type: kibana.request
+    if: "steps.get_rule_signups.error.message: HTTP*404* and steps.detect_metric_families.output.values.0.6 > 0"
+    on-failure:
+      continue: true
+    with:
+      method: PUT
+      path: /api/alerting/v2/rules/auto-prom-signups-drop
       headers:
         Elastic-Api-Version: "2023-10-31"
       body:
@@ -439,12 +597,11 @@ steps:
             SET unmapped_fields="nullify";
             FROM {{ consts.metrics_index }}
             | WHERE @timestamp >= ?_tstart AND @timestamp <= ?_tend
-            | EVAL svc = COALESCE(service, `service.name`)
+            | EVAL svc = `{{ consts.service_field }}`
             | EVAL s = COALESCE(user_signups_total, `user.signups`)
             | WHERE svc IS NOT NULL AND s IS NOT NULL
             | EVAL v = TO_DOUBLE(s)
             | STATS d = MAX(v) - MIN(v) BY svc, channel
-            | WHERE d > 0
             | STATS signup_delta = SUM(d)
             | EVAL group_key = "estate"
             | KEEP group_key, signup_delta
@@ -457,13 +614,25 @@ steps:
         no_data:
           strategy: ignore
 
-  - name: create_universal_cart
+  # --- Cart abandonments ---
+  - name: get_rule_cart
     type: kibana.request
     on-failure:
       continue: true
     with:
-      method: POST
-      path: /api/alerting/v2/rules
+      method: GET
+      path: /api/alerting/v2/rules/auto-prom-cart-abandonments-spike
+      headers:
+        Elastic-Api-Version: "2023-10-31"
+
+  - name: create_universal_cart
+    type: kibana.request
+    if: "steps.get_rule_cart.error.message: HTTP*404* and steps.detect_metric_families.output.values.0.7 > 0"
+    on-failure:
+      continue: true
+    with:
+      method: PUT
+      path: /api/alerting/v2/rules/auto-prom-cart-abandonments-spike
       headers:
         Elastic-Api-Version: "2023-10-31"
       body:
@@ -482,7 +651,7 @@ steps:
             SET unmapped_fields="nullify";
             FROM {{ consts.metrics_index }}
             | WHERE @timestamp >= ?_tstart AND @timestamp <= ?_tend
-            | EVAL svc = COALESCE(service, `service.name`)
+            | EVAL svc = `{{ consts.service_field }}`
             | EVAL c = COALESCE(cart_abandonments_total, `cart.abandonments`)
             | WHERE svc IS NOT NULL AND c IS NOT NULL
             | EVAL v = TO_DOUBLE(c)
@@ -492,7 +661,7 @@ steps:
             | EVAL group_key = "estate"
             | KEEP group_key, abandon_delta
           breach:
-            segment: "| WHERE abandon_delta > 3000"
+            segment: "| WHERE abandon_delta > {{ consts.cart_abandonments_delta_threshold }}"
         grouping:
           fields: [group_key]
         recovery:
@@ -500,13 +669,25 @@ steps:
         no_data:
           strategy: ignore
 
-  - name: create_universal_views
+  # --- Product views drop ---
+  - name: get_rule_views
     type: kibana.request
     on-failure:
       continue: true
     with:
-      method: POST
-      path: /api/alerting/v2/rules
+      method: GET
+      path: /api/alerting/v2/rules/auto-prom-product-views-drop
+      headers:
+        Elastic-Api-Version: "2023-10-31"
+
+  - name: create_universal_views
+    type: kibana.request
+    if: "steps.get_rule_views.error.message: HTTP*404* and steps.detect_metric_families.output.values.0.8 > 0"
+    on-failure:
+      continue: true
+    with:
+      method: PUT
+      path: /api/alerting/v2/rules/auto-prom-product-views-drop
       headers:
         Elastic-Api-Version: "2023-10-31"
       body:
@@ -525,12 +706,11 @@ steps:
             SET unmapped_fields="nullify";
             FROM {{ consts.metrics_index }}
             | WHERE @timestamp >= ?_tstart AND @timestamp <= ?_tend
-            | EVAL svc = COALESCE(service, `service.name`)
+            | EVAL svc = `{{ consts.service_field }}`
             | EVAL vws = COALESCE(product_views_total, `product.views`)
             | WHERE svc IS NOT NULL AND vws IS NOT NULL
             | EVAL v = TO_DOUBLE(vws)
             | STATS d = MAX(v) - MIN(v) BY svc, channel
-            | WHERE d > 0
             | STATS views_delta = SUM(d)
             | EVAL group_key = "estate"
             | KEEP group_key, views_delta
@@ -561,8 +741,7 @@ steps:
         Summarize Universal Auto Alert Policies gap-fill (read-only).
         Detection: {{ steps.detect_metric_families.output | json }}
         Universal rules: {{ steps.verify_universal_rules.output | json }}
+        Service field: {{ consts.service_field }}; status field: {{ consts.status_field }}.
         Open **Alerting → Rules → Universal**, search `Auto:`.
-        Rules work on PRW (service/status) or OTel (service.name/http.status_code)
-        when metrics-index points at the right stream.
         End table: name | present(yes/no).
     timeout: 10m
