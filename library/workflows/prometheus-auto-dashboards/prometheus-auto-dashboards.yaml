@@ -1,6 +1,6 @@
 template-metadata:
   slug: prometheus-auto-dashboards
-  version: "1.0.1"
+  version: "1.0.2"
   availability: ">=9.6.0"
   name: "Prometheus auto dashboards (Agent Builder)"
   description: >-
@@ -109,7 +109,7 @@ steps:
           sync_tooltips: true
           sync_cursor: true
         filters: []
-        tags: []
+        tags: [auto, auto-ops, prometheus]
         pinned_panels: []
         panels:
           - id: sre-briefing
@@ -338,7 +338,7 @@ steps:
           sync_tooltips: true
           sync_cursor: true
         filters: []
-        tags: []
+        tags: [auto, auto-ops, prometheus]
         pinned_panels: []
         panels:
           - id: sre-briefing
@@ -528,7 +528,7 @@ steps:
           sync_tooltips: true
           sync_cursor: true
         filters: []
-        tags: []
+        tags: [auto, auto-ops, prometheus]
         pinned_panels: []
         panels:
           - id: sre-briefing
@@ -719,7 +719,7 @@ steps:
           sync_tooltips: true
           sync_cursor: true
         filters: []
-        tags: []
+        tags: [auto, auto-ops, prometheus]
         pinned_panels: []
         panels:
           - id: health-cards
@@ -937,7 +937,7 @@ steps:
           sync_tooltips: true
           sync_cursor: true
         filters: []
-        tags: []
+        tags: [auto, auto-ops, prometheus]
         pinned_panels: []
         panels:
           - id: sre-briefing
@@ -1165,7 +1165,7 @@ steps:
           sync_tooltips: true
           sync_cursor: true
         filters: []
-        tags: []
+        tags: [auto, auto-ops, prometheus]
         pinned_panels: []
         panels:
           - id: sre-briefing
@@ -1393,7 +1393,7 @@ steps:
           sync_tooltips: true
           sync_cursor: true
         filters: []
-        tags: []
+        tags: [auto, auto-ops, prometheus]
         pinned_panels: []
         panels:
           - id: sre-briefing
@@ -1585,7 +1585,7 @@ steps:
           sync_tooltips: true
           sync_cursor: true
         filters: []
-        tags: []
+        tags: [auto, auto-ops, prometheus]
         pinned_panels: []
         panels:
           - id: sre-briefing
@@ -1813,7 +1813,7 @@ steps:
           sync_tooltips: true
           sync_cursor: true
         filters: []
-        tags: []
+        tags: [auto, auto-ops, prometheus]
         pinned_panels: []
         panels:
           - id: sre-briefing
