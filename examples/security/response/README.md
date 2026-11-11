@@ -17,6 +17,7 @@ Incident response, case management, and remediation workflows
 | [🔒 AD - Automated Triaging](./ad-automated-triaging.yaml) | The YAML workflow outlines an automated triaging process for security operations |
 | [createCaseTool](./createcasetool.yaml) | The `createCaseTool` workflow allows an agent to manually create a case with a s |
 | [🛡️ Remediate Identity - Suspected Phishing Kit or AiTM Compromise](./remediate-identity-suspected-phishing-kit-or-aitm-compromise.yaml) | Correlate open Entra AiTM / phishing-kit alerts, corroborate post-auth persistence, and contain (revoke sessions, disable, delete devices, revoke OAuth) with analyst approval. |
+| [🛡️ Remediate AWS - Stolen Access Key](./remediate-aws-stolen-access-key.yaml) | Correlate open alerts from an AWS detection rule (by rule_id), then contain the compromised IAM principal — deactivate access keys, revoke older sessions, quarantine (deny-all) — via a least-privilege containment Lambda (AWS Lambda connector), and open a case. Requires the companion setup. |
 
 ### Windows ClickFix Investigation setup
 
