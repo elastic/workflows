@@ -1,0 +1,3464 @@
+template-metadata:
+  slug: db-monitoring-auto-dashboards
+  version: "1.3.0"
+  availability: ">=9.6.0"
+  name: "Database monitoring auto dashboards"
+  description: >-
+    Detect live Elastic Integration / Stream database datasets (PostgreSQL, Redis,
+    MySQL, SQL Server, MongoDB, Oracle, Db2) and upsert gap-only Auto: DB dashboards
+    via kibana.request — deterministic fixed IDs and Integration field shapes (no AI).
+  solutions: [observability]
+  categories: [monitoring]
+
+version: "1"
+name: db-monitoring-auto-dashboards
+description: >
+  Hourly (and on demand): detect live database Integration / Stream datasets
+  (PostgreSQL, Redis, MySQL, SQL Server, MongoDB, Oracle, Db2), then upsert
+  gap-only Auto: DB dashboards via kibana.request — deterministic fixed IDs,
+  Integration field shapes via deterministic kibana.request upserts (gap-only).
+enabled: true
+tags:
+  - auto-ops
+  - dashboards
+  - db-monitoring
+triggers:
+  - type: manual
+  - type: scheduled
+    with:
+      every: 1h
+settings:
+  timeout: 20m
+  concurrency:
+    key: "{{ workflow.id }}"
+    strategy: drop
+    max: 1
+
+steps:
+  - name: ensure_tag_auto
+    type: kibana.request
+    on-failure:
+      continue: true
+    with:
+      method: PUT
+      path: /api/tags/auto
+      headers:
+        Elastic-Api-Version: "2023-10-31"
+      body:
+        name: auto
+        description: Auto-ops generated assets
+        color: "#00BFB3"
+
+  - name: ensure_tag_auto_ops
+    type: kibana.request
+    on-failure:
+      continue: true
+    with:
+      method: PUT
+      path: /api/tags/auto-ops
+      headers:
+        Elastic-Api-Version: "2023-10-31"
+      body:
+        name: auto-ops
+        description: Managed by Auto-ops workflows
+        color: "#FEC514"
+
+  - name: ensure_tag_db_monitoring
+    type: kibana.request
+    on-failure:
+      continue: true
+    with:
+      method: PUT
+      path: /api/tags/db-monitoring
+      headers:
+        Elastic-Api-Version: "2023-10-31"
+      body:
+        name: db-monitoring
+        description: Database monitoring Auto-ops
+        color: "#361DD1"
+
+  - name: detect_db_inventory
+    type: elasticsearch.esql.query
+    with:
+      format: json
+      query: |
+        FROM metrics-*, logs-*
+        | WHERE @timestamp > NOW() - 7 days AND data_stream.dataset IS NOT NULL
+        | STATS docs = COUNT(*) BY data_stream.dataset
+        | WHERE data_stream.dataset LIKE "*postgres*"
+            OR data_stream.dataset LIKE "*redis*"
+            OR data_stream.dataset LIKE "*mysql*"
+            OR data_stream.dataset LIKE "*sqlserver*"
+            OR data_stream.dataset LIKE "*mssql*"
+            OR data_stream.dataset LIKE "*mongo*"
+            OR data_stream.dataset LIKE "*oracle*"
+            OR data_stream.dataset LIKE "*db2*"
+        | SORT docs DESC
+        | LIMIT 40
+
+  - name: detect_postgresql
+    type: elasticsearch.esql.query
+    on-failure:
+      continue: true
+    with:
+      format: json
+      query: |
+        FROM metrics-*
+        | WHERE @timestamp > NOW() - 7 days AND (data_stream.dataset LIKE "*postgres*")
+        | STATS docs = COUNT(*)
+
+  - name: get_postgresql
+    type: kibana.request
+    if: "steps.detect_postgresql.output.values.0.0 > 0"
+    on-failure:
+      continue: true
+    with:
+      method: GET
+      path: /api/dashboards/auto-dbmon-postgresql
+      headers:
+        Elastic-Api-Version: "2023-10-31"
+
+  - name: upsert_postgresql
+    type: kibana.request
+    if: "steps.detect_postgresql.output.values.0.0 > 0 and steps.get_postgresql.error.message: HTTP*404*"
+    on-failure:
+      continue: true
+    with:
+      method: PUT
+      path: /api/dashboards/auto-dbmon-postgresql
+      headers:
+        Elastic-Api-Version: "2023-10-31"
+      body:
+        title: 'Auto: DB PostgreSQL — Performance & Health'
+        description: Auto-ops DB — PostgreSQL briefing, scorecards, TS charts (Elastic Integration + Streams).
+        time_range:
+          from: now-2h
+          to: now
+        options:
+          auto_apply_filters: true
+          hide_panel_titles: false
+          hide_panel_borders: false
+          use_margins: true
+          sync_colors: true
+          sync_tooltips: true
+          sync_cursor: true
+        filters: []
+        tags:
+        - auto
+        - auto-ops
+        - db-monitoring
+        pinned_panels: []
+        panels:
+        - id: pg-briefing
+          type: markdown
+          grid:
+            x: 0
+            y: 0
+            w: 48
+            h: 12
+          config:
+            title: SRE day-one briefing
+            content: |
+              ## Purpose
+              Answer: **is PostgreSQL healthy right now?** Backends, deadlocks, buffer hits, and row churn from the Elastic **PostgreSQL** integration (`postgresql.database`) — also works with OTel `postgresqlreceiver` Streams.
+
+              ## How to read it
+              1. **Database scorecards** — backends by `postgresql.database.name` (HOT ≥ 80, WATCH ≥ 40).
+              2. **Data path** — Postgres → Elastic Agent PostgreSQL integration (or EDOT postgresqlreceiver) → metrics-* / Streams.
+              3. **KPI strip** — backends, deadlocks, block hits, commits.
+              4. **Trends** — backends / deadlocks / row ops over the window.
+
+              ## What healthy looks like
+              Backends OK/WATCH. Deadlocks flat. Commits track load. Empty → install the Elastic PostgreSQL integration (or EDOT postgresqlreceiver).
+
+              ## Day-one next steps
+              1. HOT backends → check poolers / `max_connections`.
+              2. Deadlock spikes → pair with app lock traces + `postgresql.statement`.
+              3. Missing data → Fleet PostgreSQL integration or Streams matching `*postgres*`.
+              4. Owned by **`db-monitoring-auto-dashboards`**.
+
+              ## Related alerts & workflows
+              - Workflow **`db-monitoring-auto-dashboards`** (hourly) keeps this board present when data is live.
+              - Empty boards → install the matching Elastic database integration (or EDOT receiver).
+              - Works with Fleet Integrations, EDOT OTel receivers, or any Stream carrying these datasets.
+              - Broken panels → **`broken-widget-hunter`** Case + auto-fix.
+
+              _Managed by db-monitoring-auto-dashboards_
+        - id: pg-flow
+          type: custom_content
+          grid:
+            x: 0
+            y: 12
+            w: 48
+            h: 6
+          config:
+            title: Postgres → Elastic Integration / Stream → Elastic
+            template: |2
+
+              <style>
+                .flow {
+                  display: flex; align-items: center; justify-content: space-between;
+                  gap: var(--cc-space-m); padding: var(--cc-space-m);
+                  background: var(--cc-color-surface); border-radius: var(--cc-radius);
+                  border: 1px solid var(--cc-color-border);
+                }
+                .col { flex: 1; text-align: center; }
+                .label {
+                  font-size: 0.7rem; letter-spacing: 0.08em; text-transform: uppercase;
+                  opacity: 0.65; margin-bottom: var(--cc-space-s);
+                }
+                .node {
+                  display: inline-block; padding: var(--cc-space-s) var(--cc-space-m);
+                  background: var(--cc-color-background); border: 1px solid var(--cc-color-border);
+                  border-radius: var(--cc-radius-s); font-weight: 600; font-size: 0.9rem;
+                }
+                .node.accent { border-color: var(--cc-vis-0); box-shadow: 0 0 0 1px var(--cc-vis-0); }
+                .arrow { opacity: 0.45; font-size: 1.4rem; }
+                .sub { margin-top: var(--cc-space-xs); font-size: 0.75rem; opacity: 0.65; }
+              </style>
+              <div class="flow">
+                <div class="col">
+                  <div class="label">DB signals</div>
+                  <div class="node">PostgreSQL</div>
+                  <div class="sub">database · activity · bgwriter · statement</div>
+                </div>
+                <div class="arrow">→</div>
+                <div class="col">
+                  <div class="label">Edge</div>
+                  <div class="node accent">EDOT / OTLP</div>
+                  <div class="sub">Fleet / EDOT / Stream</div>
+                </div>
+                <div class="arrow">→</div>
+                <div class="col">
+                  <div class="label">Observability</div>
+                  <div class="node">Elastic Observability</div>
+                  <div class="sub">metrics-postgresql.* · metrics-*postgres* · Auto: DB</div>
+                </div>
+              </div>
+        - id: pg-cards
+          type: custom_content
+          grid:
+            x: 0
+            y: 18
+            w: 48
+            h: 10
+          config:
+            title: Database connection scorecards
+            template: |2
+
+              <style>
+                .board { display: flex; gap: var(--cc-space-m); flex-wrap: wrap; }
+                .card {
+                  flex: 1; min-width: 160px;
+                  background: var(--cc-color-surface);
+                  border: 1px solid var(--cc-color-border);
+                  border-left: 4px solid var(--cc-vis-0);
+                  border-radius: var(--cc-radius);
+                  padding: var(--cc-space-m);
+                }
+                .card.bad { border-left-color: var(--cc-color-danger); }
+                .card.warn { border-left-color: var(--cc-color-warning); }
+                .name { font-weight: 600; font-size: 0.95rem; margin-bottom: var(--cc-space-xs); word-break: break-all; }
+                .pct { font-size: 2.1rem; line-height: 1.1; font-weight: 700; letter-spacing: -0.02em; }
+                .meta { opacity: 0.7; font-size: 0.85rem; margin-top: var(--cc-space-xs); }
+                .badge {
+                  display: inline-block; margin-top: var(--cc-space-s);
+                  padding: 2px 10px; border-radius: var(--cc-radius-s);
+                  background: var(--cc-vis-0); color: var(--cc-color-background);
+                  font-size: 0.72rem; font-weight: 700; letter-spacing: 0.04em;
+                }
+                .badge.bad { background: var(--cc-color-danger); }
+                .badge.warn { background: var(--cc-color-warning); color: var(--cc-color-background); }
+                .empty { opacity: 0.65; padding: var(--cc-space-l); }
+              </style>
+
+              {{ "{% if rows.size == 0 %}" }}
+                <p class="empty">No PostgreSQL samples — install the Elastic PostgreSQL integration.</p>
+              {{ "{% else %}" }}
+              <div class="board">
+              {{ "{% for row in rows %}" }}
+                <div class="card {{ '{% if row["backends"].value >= 80 %}' }}bad{{ '{% elsif row["backends"].value >= 40 %}' }}warn{{ "{% endif %}" }}">
+                  <div class="name">{{ "{{ row[\"db\"].value }}" }}</div>
+                  <div class="pct">{{ "{{ row[\"backends\"].value }}" }}</div>
+                  <div class="meta">{{ "{{ row[\"samples\"].value }}" }} samples · deadlocks {{ "{{ row[\"deadlocks\"].value }}" }}</div>
+                  <span class="badge {{ '{% if row["backends"].value >= 80 %}' }}bad{{ '{% elsif row["backends"].value >= 40 %}' }}warn{{ "{% endif %}" }}">
+                    {{ '{% if row["backends"].value >= 80 %}' }}HOT{{ '{% elsif row["backends"].value >= 40 %}' }}WATCH{{ "{% else %}" }}OK{{ "{% endif %}" }}
+                  </span>
+                </div>
+              {{ "{% endfor %}" }}
+              </div>
+              {{ "{% endif %}" }}
+            esql_query:
+            - |
+              FROM metrics-*
+              | WHERE @timestamp >= ?_tstart AND @timestamp <= ?_tend
+                  AND data_stream.dataset LIKE "*postgres*"
+              | STATS backends = MAX(`postgresql.database.number_of_backends`),
+                      deadlocks = MAX(`postgresql.database.deadlocks`),
+                      samples = COUNT(*)
+                  BY db = COALESCE(`postgresql.database.name`, "unknown")
+              | WHERE samples > 0
+              | SORT backends DESC
+              | LIMIT 12
+        - type: vis
+          id: pg-m-conn
+          grid:
+            x: 0
+            y: 28
+            w: 12
+            h: 5
+          config:
+            type: metric
+            title: Active Connections
+            data_source:
+              type: esql
+              query: |-
+                FROM metrics-*
+                | WHERE data_stream.dataset LIKE "*postgres*"
+                | WHERE `postgresql.database.number_of_backends` IS NOT NULL
+                | STATS `Active Connections` = MAX(`postgresql.database.number_of_backends`)
+            metrics:
+            - type: primary
+              column: Active Connections
+              label: Active Connections
+        - type: vis
+          id: pg-m-dl
+          grid:
+            x: 12
+            y: 28
+            w: 12
+            h: 5
+          config:
+            type: metric
+            title: Total Deadlocks
+            data_source:
+              type: esql
+              query: |-
+                FROM metrics-*
+                | WHERE data_stream.dataset LIKE "*postgres*"
+                | WHERE `postgresql.database.deadlocks` IS NOT NULL
+                | STATS `Total Deadlocks` = MAX(`postgresql.database.deadlocks`)
+            metrics:
+            - type: primary
+              column: Total Deadlocks
+              label: Total Deadlocks
+        - type: vis
+          id: pg-m-hit
+          grid:
+            x: 24
+            y: 28
+            w: 12
+            h: 5
+          config:
+            type: metric
+            title: Buffer Block Hits
+            data_source:
+              type: esql
+              query: |-
+                FROM metrics-*
+                | WHERE data_stream.dataset LIKE "*postgres*"
+                | WHERE `postgresql.database.blocks.hit` IS NOT NULL
+                | STATS `Buffer Block Hits` = MAX(`postgresql.database.blocks.hit`)
+            metrics:
+            - type: primary
+              column: Buffer Block Hits
+              label: Buffer Block Hits
+        - type: vis
+          id: pg-m-cmt
+          grid:
+            x: 36
+            y: 28
+            w: 12
+            h: 5
+          config:
+            type: metric
+            title: Txn Commits
+            data_source:
+              type: esql
+              query: |-
+                FROM metrics-*
+                | WHERE data_stream.dataset LIKE "*postgres*"
+                | WHERE `postgresql.database.transactions.commit` IS NOT NULL
+                | STATS `Txn Commits` = MAX(`postgresql.database.transactions.commit`)
+            metrics:
+            - type: primary
+              column: Txn Commits
+              label: Txn Commits
+        - type: vis
+          id: pg-xy-conn
+          grid:
+            x: 0
+            y: 33
+            w: 24
+            h: 12
+          config:
+            type: xy
+            title: Active Connections Over Time
+            legend:
+              visibility: visible
+              placement: outside
+              position: bottom
+            styling:
+              points:
+                visibility: hidden
+              interpolation: linear
+              areas:
+                fill_opacity: 0.55
+                fill: gradient
+            axis:
+              x:
+                title:
+                  visible: false
+                grid:
+                  visible: false
+              y:
+                title:
+                  visible: true
+                grid:
+                  visible: true
+            layers:
+            - type: area
+              data_source:
+                type: esql
+                query: |-
+                  FROM metrics-*
+                  | WHERE data_stream.dataset LIKE "*postgres*"
+                  | WHERE `postgresql.database.number_of_backends` IS NOT NULL
+                  | STATS `backends` = MAX(`postgresql.database.number_of_backends`) BY time_bucket = BUCKET(@timestamp, 75, ?_tstart, ?_tend), `postgresql.database.name`
+                  | WHERE `postgresql.database.name` IS NOT NULL
+                  | SORT time_bucket ASC
+              x:
+                column: time_bucket
+              y:
+              - column: backends
+              breakdown_by:
+                column: postgresql.database.name
+        - type: vis
+          id: pg-xy-cmt
+          grid:
+            x: 24
+            y: 33
+            w: 24
+            h: 12
+          config:
+            type: xy
+            title: Transactions commit by database
+            legend:
+              visibility: hidden
+            styling:
+              points:
+                visibility: hidden
+            axis:
+              x:
+                title:
+                  visible: false
+                grid:
+                  visible: false
+              y:
+                title:
+                  visible: true
+                grid:
+                  visible: true
+            layers:
+            - type: bar_horizontal
+              data_source:
+                type: esql
+                query: |-
+                  FROM metrics-*
+                  | WHERE data_stream.dataset LIKE "*postgres*"
+                  | WHERE `postgresql.database.transactions.commit` IS NOT NULL
+                  | STATS `commits` = MAX(`postgresql.database.transactions.commit`) BY time_bucket = BUCKET(@timestamp, 75, ?_tstart, ?_tend), `postgresql.database.name`
+                  | WHERE `postgresql.database.name` IS NOT NULL
+                  | SORT time_bucket ASC
+              x:
+                column: postgresql.database.name
+              y:
+              - column: commits
+        - type: vis
+          id: pg-xy-dl
+          grid:
+            x: 0
+            y: 45
+            w: 24
+            h: 12
+          config:
+            type: xy
+            title: Deadlocks Over Time by Database
+            legend:
+              visibility: visible
+              placement: outside
+              position: bottom
+            styling:
+              points:
+                visibility: hidden
+            axis:
+              x:
+                title:
+                  visible: false
+                grid:
+                  visible: false
+              y:
+                title:
+                  visible: true
+                grid:
+                  visible: true
+            layers:
+            - type: bar
+              data_source:
+                type: esql
+                query: |-
+                  FROM metrics-*
+                  | WHERE data_stream.dataset LIKE "*postgres*"
+                  | WHERE `postgresql.database.deadlocks` IS NOT NULL
+                  | STATS `deadlocks` = MAX(`postgresql.database.deadlocks`) BY time_bucket = BUCKET(@timestamp, 75, ?_tstart, ?_tend), `postgresql.database.name`
+                  | WHERE `postgresql.database.name` IS NOT NULL
+                  | SORT time_bucket ASC
+              x:
+                column: time_bucket
+              y:
+              - column: deadlocks
+              breakdown_by:
+                column: postgresql.database.name
+        - type: vis
+          id: pg-xy-tup
+          grid:
+            x: 24
+            y: 45
+            w: 24
+            h: 12
+          config:
+            type: xy
+            title: Rows Inserted / Updated / Deleted
+            legend:
+              visibility: visible
+              placement: outside
+              position: bottom
+            styling:
+              points:
+                visibility: hidden
+              interpolation: linear
+            axis:
+              x:
+                title:
+                  visible: false
+                grid:
+                  visible: false
+              y:
+                title:
+                  visible: true
+                grid:
+                  visible: true
+            layers:
+            - type: line
+              data_source:
+                type: esql
+                query: |-
+                  FROM metrics-*
+                  | WHERE data_stream.dataset LIKE "*postgres*"
+                  | STATS `inserted` = MAX(`postgresql.database.rows.inserted`), `updated` = MAX(`postgresql.database.rows.updated`), `deleted` = MAX(`postgresql.database.rows.deleted`) BY time_bucket = BUCKET(@timestamp, 75, ?_tstart, ?_tend)
+                  | SORT time_bucket ASC
+              x:
+                column: time_bucket
+              y:
+              - column: inserted
+              - column: updated
+              - column: deleted
+
+  - name: detect_redis
+    type: elasticsearch.esql.query
+    on-failure:
+      continue: true
+    with:
+      format: json
+      query: |
+        FROM metrics-*
+        | WHERE @timestamp > NOW() - 7 days AND (data_stream.dataset LIKE "*redis*")
+        | STATS docs = COUNT(*)
+
+  - name: get_redis
+    type: kibana.request
+    if: "steps.detect_redis.output.values.0.0 > 0"
+    on-failure:
+      continue: true
+    with:
+      method: GET
+      path: /api/dashboards/auto-dbmon-redis
+      headers:
+        Elastic-Api-Version: "2023-10-31"
+
+  - name: upsert_redis
+    type: kibana.request
+    if: "steps.detect_redis.output.values.0.0 > 0 and steps.get_redis.error.message: HTTP*404*"
+    on-failure:
+      continue: true
+    with:
+      method: PUT
+      path: /api/dashboards/auto-dbmon-redis
+      headers:
+        Elastic-Api-Version: "2023-10-31"
+      body:
+        title: 'Auto: DB Redis — Memory & Clients'
+        description: Auto-ops DB — Redis briefing, scorecards, TS charts (Elastic Integration + Streams).
+        time_range:
+          from: now-2h
+          to: now
+        options:
+          auto_apply_filters: true
+          hide_panel_titles: false
+          hide_panel_borders: false
+          use_margins: true
+          sync_colors: true
+          sync_tooltips: true
+          sync_cursor: true
+        filters: []
+        tags:
+        - auto
+        - auto-ops
+        - db-monitoring
+        pinned_panels: []
+        panels:
+        - id: redis-briefing
+          type: markdown
+          grid:
+            x: 0
+            y: 0
+            w: 48
+            h: 12
+          config:
+            title: SRE day-one briefing
+            content: |
+              ## Purpose
+              Answer: **is Redis memory and client load healthy?** Elastic **Redis** integration `redis.info` (also OTel `redisreceiver` Streams).
+
+              ## How to read it
+              1. **Instance scorecards** — memory used (MB) by `service.name` (HOT ≥ 1.5 GB, WATCH ≥ 800 MB).
+              2. **Data path** — Redis → Fleet Redis integration / EDOT → metrics-redis.info-* or Streams.
+              3. **KPI strip** — used / peak / clients / fragmentation.
+              4. **Trends** — memory, clients, keyspace hits/misses, commands.
+
+              ## What healthy looks like
+              Memory under peak with fragmentation ~1.x. Blocked clients near zero. Miss ratio low vs hits.
+
+              ## Day-one next steps
+              1. HOT memory → check eviction / `redis.info.memory.used.peak` vs used.
+              2. Blocked clients rising → slow commands or BLPOP backlog.
+              3. Empty board → install the Elastic Redis integration (or EDOT redisreceiver).
+              4. Owned by **`db-monitoring-auto-dashboards`**.
+
+              ## Related alerts & workflows
+              - Workflow **`db-monitoring-auto-dashboards`** (hourly) keeps this board present when data is live.
+              - Empty boards → install the matching Elastic database integration (or EDOT receiver).
+              - Works with Fleet Integrations, EDOT OTel receivers, or any Stream carrying these datasets.
+              - Broken panels → **`broken-widget-hunter`** Case + auto-fix.
+
+              _Managed by db-monitoring-auto-dashboards_
+        - id: redis-flow
+          type: custom_content
+          grid:
+            x: 0
+            y: 12
+            w: 48
+            h: 6
+          config:
+            title: Redis → Elastic Integration / Stream → Elastic
+            template: |2
+
+              <style>
+                .flow {
+                  display: flex; align-items: center; justify-content: space-between;
+                  gap: var(--cc-space-m); padding: var(--cc-space-m);
+                  background: var(--cc-color-surface); border-radius: var(--cc-radius);
+                  border: 1px solid var(--cc-color-border);
+                }
+                .col { flex: 1; text-align: center; }
+                .label {
+                  font-size: 0.7rem; letter-spacing: 0.08em; text-transform: uppercase;
+                  opacity: 0.65; margin-bottom: var(--cc-space-s);
+                }
+                .node {
+                  display: inline-block; padding: var(--cc-space-s) var(--cc-space-m);
+                  background: var(--cc-color-background); border: 1px solid var(--cc-color-border);
+                  border-radius: var(--cc-radius-s); font-weight: 600; font-size: 0.9rem;
+                }
+                .node.accent { border-color: var(--cc-vis-0); box-shadow: 0 0 0 1px var(--cc-vis-0); }
+                .arrow { opacity: 0.45; font-size: 1.4rem; }
+                .sub { margin-top: var(--cc-space-xs); font-size: 0.75rem; opacity: 0.65; }
+              </style>
+              <div class="flow">
+                <div class="col">
+                  <div class="label">DB signals</div>
+                  <div class="node">Redis</div>
+                  <div class="sub">info · key · keyspace</div>
+                </div>
+                <div class="arrow">→</div>
+                <div class="col">
+                  <div class="label">Edge</div>
+                  <div class="node accent">EDOT / OTLP</div>
+                  <div class="sub">Fleet / EDOT / Stream</div>
+                </div>
+                <div class="arrow">→</div>
+                <div class="col">
+                  <div class="label">Observability</div>
+                  <div class="node">Elastic Observability</div>
+                  <div class="sub">metrics-redis.info-* · metrics-*redis* · Auto: DB</div>
+                </div>
+              </div>
+        - id: redis-cards
+          type: custom_content
+          grid:
+            x: 0
+            y: 18
+            w: 48
+            h: 10
+          config:
+            title: Redis instance memory scorecards
+            template: |2
+
+              <style>
+                .board { display: flex; gap: var(--cc-space-m); flex-wrap: wrap; }
+                .card {
+                  flex: 1; min-width: 160px;
+                  background: var(--cc-color-surface);
+                  border: 1px solid var(--cc-color-border);
+                  border-left: 4px solid var(--cc-vis-0);
+                  border-radius: var(--cc-radius);
+                  padding: var(--cc-space-m);
+                }
+                .card.bad { border-left-color: var(--cc-color-danger); }
+                .card.warn { border-left-color: var(--cc-color-warning); }
+                .name { font-weight: 600; font-size: 0.95rem; margin-bottom: var(--cc-space-xs); word-break: break-all; }
+                .pct { font-size: 2.1rem; line-height: 1.1; font-weight: 700; letter-spacing: -0.02em; }
+                .meta { opacity: 0.7; font-size: 0.85rem; margin-top: var(--cc-space-xs); }
+                .badge {
+                  display: inline-block; margin-top: var(--cc-space-s);
+                  padding: 2px 10px; border-radius: var(--cc-radius-s);
+                  background: var(--cc-vis-0); color: var(--cc-color-background);
+                  font-size: 0.72rem; font-weight: 700; letter-spacing: 0.04em;
+                }
+                .badge.bad { background: var(--cc-color-danger); }
+                .badge.warn { background: var(--cc-color-warning); color: var(--cc-color-background); }
+                .empty { opacity: 0.65; padding: var(--cc-space-l); }
+              </style>
+
+              {{ "{% if rows.size == 0 %}" }}
+                <p class="empty">No Redis samples — install the Elastic Redis integration.</p>
+              {{ "{% else %}" }}
+              <div class="board">
+              {{ "{% for row in rows %}" }}
+                <div class="card {{ '{% if row["used_mb"].value >= 1500 %}' }}bad{{ '{% elsif row["used_mb"].value >= 800 %}' }}warn{{ "{% endif %}" }}">
+                  <div class="name">{{ "{{ row[\"svc\"].value }}" }}</div>
+                  <div class="pct">{{ "{{ row[\"used_mb\"].value }}" }} MB</div>
+                  <div class="meta">{{ "{{ row[\"clients\"].value }}" }} clients · {{ "{{ row[\"samples\"].value }}" }} samples</div>
+                  <span class="badge {{ '{% if row["used_mb"].value >= 1500 %}' }}bad{{ '{% elsif row["used_mb"].value >= 800 %}' }}warn{{ "{% endif %}" }}">
+                    {{ '{% if row["used_mb"].value >= 1500 %}' }}HOT{{ '{% elsif row["used_mb"].value >= 800 %}' }}WATCH{{ "{% else %}" }}OK{{ "{% endif %}" }}
+                  </span>
+                </div>
+              {{ "{% endfor %}" }}
+              </div>
+              {{ "{% endif %}" }}
+            esql_query:
+            - |
+              FROM metrics-*
+              | WHERE @timestamp >= ?_tstart AND @timestamp <= ?_tend
+                  AND data_stream.dataset LIKE "*redis*"
+              | STATS used = MAX(`redis.info.memory.used.value`),
+                      clients = MAX(`redis.info.clients.connected`),
+                      samples = COUNT(*)
+                  BY svc = COALESCE(service.name, host.name, "unknown")
+              | EVAL used_mb = ROUND(TO_DOUBLE(used) / 1048576, 1)
+              | WHERE samples > 0
+              | SORT used_mb DESC
+              | LIMIT 12
+        - type: vis
+          id: redis-m-used
+          grid:
+            x: 0
+            y: 28
+            w: 12
+            h: 5
+          config:
+            type: metric
+            title: Memory Used
+            data_source:
+              type: esql
+              query: |-
+                FROM metrics-*
+                | WHERE data_stream.dataset LIKE "*redis*"
+                | WHERE `redis.info.memory.used.value` IS NOT NULL
+                | STATS `Memory Used` = MAX(`redis.info.memory.used.value`)
+            metrics:
+            - type: primary
+              column: Memory Used
+              label: Memory Used
+        - type: vis
+          id: redis-m-peak
+          grid:
+            x: 12
+            y: 28
+            w: 12
+            h: 5
+          config:
+            type: metric
+            title: Memory Peak
+            data_source:
+              type: esql
+              query: |-
+                FROM metrics-*
+                | WHERE data_stream.dataset LIKE "*redis*"
+                | WHERE `redis.info.memory.used.peak` IS NOT NULL
+                | STATS `Memory Peak` = MAX(`redis.info.memory.used.peak`)
+            metrics:
+            - type: primary
+              column: Memory Peak
+              label: Memory Peak
+        - type: vis
+          id: redis-m-cli
+          grid:
+            x: 24
+            y: 28
+            w: 12
+            h: 5
+          config:
+            type: metric
+            title: Connected Clients
+            data_source:
+              type: esql
+              query: |-
+                FROM metrics-*
+                | WHERE data_stream.dataset LIKE "*redis*"
+                | WHERE `redis.info.clients.connected` IS NOT NULL
+                | STATS `Connected Clients` = MAX(`redis.info.clients.connected`)
+            metrics:
+            - type: primary
+              column: Connected Clients
+              label: Connected Clients
+        - type: vis
+          id: redis-m-frag
+          grid:
+            x: 36
+            y: 28
+            w: 12
+            h: 5
+          config:
+            type: metric
+            title: Fragmentation Ratio
+            data_source:
+              type: esql
+              query: |-
+                FROM metrics-*
+                | WHERE data_stream.dataset LIKE "*redis*"
+                | WHERE `redis.info.memory.fragmentation.ratio` IS NOT NULL
+                | STATS `Fragmentation Ratio` = MAX(`redis.info.memory.fragmentation.ratio`)
+            metrics:
+            - type: primary
+              column: Fragmentation Ratio
+              label: Fragmentation Ratio
+        - type: vis
+          id: redis-xy-mem
+          grid:
+            x: 0
+            y: 33
+            w: 24
+            h: 12
+          config:
+            type: xy
+            title: Memory used / rss / peak
+            legend:
+              visibility: visible
+              placement: outside
+              position: bottom
+            styling:
+              points:
+                visibility: hidden
+              interpolation: linear
+            axis:
+              x:
+                title:
+                  visible: false
+                grid:
+                  visible: false
+              y:
+                title:
+                  visible: true
+                grid:
+                  visible: true
+            layers:
+            - type: line
+              data_source:
+                type: esql
+                query: |-
+                  FROM metrics-*
+                  | WHERE data_stream.dataset LIKE "*redis*"
+                  | STATS `used` = MAX(`redis.info.memory.used.value`), `rss` = MAX(`redis.info.memory.used.rss`), `peak` = MAX(`redis.info.memory.used.peak`) BY time_bucket = BUCKET(@timestamp, 75, ?_tstart, ?_tend)
+                  | SORT time_bucket ASC
+              x:
+                column: time_bucket
+              y:
+              - column: used
+              - column: rss
+              - column: peak
+        - type: vis
+          id: redis-xy-cli
+          grid:
+            x: 24
+            y: 33
+            w: 24
+            h: 12
+          config:
+            type: xy
+            title: Connected vs blocked clients
+            legend:
+              visibility: visible
+              placement: outside
+              position: bottom
+            styling:
+              points:
+                visibility: hidden
+              interpolation: linear
+              areas:
+                fill_opacity: 0.55
+                fill: gradient
+            axis:
+              x:
+                title:
+                  visible: false
+                grid:
+                  visible: false
+              y:
+                title:
+                  visible: true
+                grid:
+                  visible: true
+            layers:
+            - type: area
+              data_source:
+                type: esql
+                query: |-
+                  FROM metrics-*
+                  | WHERE data_stream.dataset LIKE "*redis*"
+                  | STATS `connected` = MAX(`redis.info.clients.connected`), `blocked` = MAX(`redis.info.clients.blocked`) BY time_bucket = BUCKET(@timestamp, 75, ?_tstart, ?_tend)
+                  | SORT time_bucket ASC
+              x:
+                column: time_bucket
+              y:
+              - column: connected
+              - column: blocked
+        - type: vis
+          id: redis-xy-ks
+          grid:
+            x: 0
+            y: 45
+            w: 24
+            h: 12
+          config:
+            type: xy
+            title: Keyspace hits / misses
+            legend:
+              visibility: visible
+              placement: outside
+              position: bottom
+            styling:
+              points:
+                visibility: hidden
+              interpolation: linear
+            axis:
+              x:
+                title:
+                  visible: false
+                grid:
+                  visible: false
+              y:
+                title:
+                  visible: true
+                grid:
+                  visible: true
+            layers:
+            - type: line
+              data_source:
+                type: esql
+                query: |-
+                  FROM metrics-*
+                  | WHERE data_stream.dataset LIKE "*redis*"
+                  | STATS `hits` = MAX(`redis.info.stats.keyspace.hits`), `misses` = MAX(`redis.info.stats.keyspace.misses`) BY time_bucket = BUCKET(@timestamp, 75, ?_tstart, ?_tend)
+                  | SORT time_bucket ASC
+              x:
+                column: time_bucket
+              y:
+              - column: hits
+              - column: misses
+        - type: vis
+          id: redis-xy-cmd
+          grid:
+            x: 24
+            y: 45
+            w: 24
+            h: 12
+          config:
+            type: xy
+            title: Commands processed
+            legend:
+              visibility: hidden
+            styling:
+              points:
+                visibility: hidden
+              interpolation: linear
+              areas:
+                fill_opacity: 0.55
+                fill: gradient
+            axis:
+              x:
+                title:
+                  visible: false
+                grid:
+                  visible: false
+              y:
+                title:
+                  visible: true
+                grid:
+                  visible: true
+            layers:
+            - type: area
+              data_source:
+                type: esql
+                query: |-
+                  FROM metrics-*
+                  | WHERE data_stream.dataset LIKE "*redis*"
+                  | WHERE `redis.info.stats.commands_processed` IS NOT NULL
+                  | STATS `commands` = MAX(`redis.info.stats.commands_processed`) BY time_bucket = BUCKET(@timestamp, 75, ?_tstart, ?_tend)
+                  | SORT time_bucket ASC
+              x:
+                column: time_bucket
+              y:
+              - column: commands
+
+  - name: detect_mysql
+    type: elasticsearch.esql.query
+    on-failure:
+      continue: true
+    with:
+      format: json
+      query: |
+        FROM metrics-*, logs-*
+        | WHERE @timestamp > NOW() - 7 days AND ((data_stream.dataset LIKE "*mysql*" OR data_stream.dataset LIKE "*mysql.slowlog*" OR data_stream.dataset LIKE "*mysql.error*"))
+        | STATS docs = COUNT(*)
+
+  - name: get_mysql
+    type: kibana.request
+    if: "steps.detect_mysql.output.values.0.0 > 0"
+    on-failure:
+      continue: true
+    with:
+      method: GET
+      path: /api/dashboards/auto-dbmon-mysql
+      headers:
+        Elastic-Api-Version: "2023-10-31"
+
+  - name: upsert_mysql
+    type: kibana.request
+    if: "steps.detect_mysql.output.values.0.0 > 0 and steps.get_mysql.error.message: HTTP*404*"
+    on-failure:
+      continue: true
+    with:
+      method: PUT
+      path: /api/dashboards/auto-dbmon-mysql
+      headers:
+        Elastic-Api-Version: "2023-10-31"
+      body:
+        title: 'Auto: DB MySQL — Slow Query & Errors'
+        description: Auto-ops DB — MySQL briefing, scorecards, slowlog/error + status (Elastic Integration).
+        time_range:
+          from: now-2h
+          to: now
+        options:
+          auto_apply_filters: true
+          hide_panel_titles: false
+          hide_panel_borders: false
+          use_margins: true
+          sync_colors: true
+          sync_tooltips: true
+          sync_cursor: true
+        filters: []
+        tags:
+        - auto
+        - auto-ops
+        - db-monitoring
+        pinned_panels: []
+        panels:
+        - id: mysql-briefing
+          type: markdown
+          grid:
+            x: 0
+            y: 0
+            w: 48
+            h: 12
+          config:
+            title: SRE day-one briefing
+            content: |
+              ## Purpose
+              Answer: **are MySQL queries and error logs healthy?** Elastic **MySQL** integration: `mysql.slowlog` / `mysql.error` logs plus `mysql.status` metrics.
+
+              ## How to read it
+              1. **Database scorecards** — avg slow-query time by schema (HOT ≥ 2s, WATCH ≥ 1s).
+              2. **Data path** — MySQL → Fleet MySQL integration (status + slow/error logs) → logs-* / metrics-*.
+              3. **KPI strip** — slow count, avg/max query time, error count.
+              4. **Trends** — slow rate / avg time by schema, threads connected, error bars.
+
+              ## What healthy looks like
+              Avg query time under 1s. Error log quiet. Threads connected stable.
+
+              ## Day-one next steps
+              1. HOT avg time → inspect schema + `mysql.slowlog.lock_time.sec`.
+              2. Error spikes → communication packets / lock wait / aborted connections.
+              3. Empty board → install the Elastic MySQL integration.
+              4. Owned by **`db-monitoring-auto-dashboards`**.
+
+              ## Related alerts & workflows
+              - Workflow **`db-monitoring-auto-dashboards`** (hourly) keeps this board present when data is live.
+              - Empty boards → install the matching Elastic database integration (or EDOT receiver).
+              - Works with Fleet Integrations, EDOT OTel receivers, or any Stream carrying these datasets.
+              - Broken panels → **`broken-widget-hunter`** Case + auto-fix.
+
+              _Managed by db-monitoring-auto-dashboards_
+        - id: mysql-flow
+          type: custom_content
+          grid:
+            x: 0
+            y: 12
+            w: 48
+            h: 6
+          config:
+            title: MySQL → Elastic Integration (status + slowlog/error)
+            template: |2
+
+              <style>
+                .flow {
+                  display: flex; align-items: center; justify-content: space-between;
+                  gap: var(--cc-space-m); padding: var(--cc-space-m);
+                  background: var(--cc-color-surface); border-radius: var(--cc-radius);
+                  border: 1px solid var(--cc-color-border);
+                }
+                .col { flex: 1; text-align: center; }
+                .label {
+                  font-size: 0.7rem; letter-spacing: 0.08em; text-transform: uppercase;
+                  opacity: 0.65; margin-bottom: var(--cc-space-s);
+                }
+                .node {
+                  display: inline-block; padding: var(--cc-space-s) var(--cc-space-m);
+                  background: var(--cc-color-background); border: 1px solid var(--cc-color-border);
+                  border-radius: var(--cc-radius-s); font-weight: 600; font-size: 0.9rem;
+                }
+                .node.accent { border-color: var(--cc-vis-0); box-shadow: 0 0 0 1px var(--cc-vis-0); }
+                .arrow { opacity: 0.45; font-size: 1.4rem; }
+                .sub { margin-top: var(--cc-space-xs); font-size: 0.75rem; opacity: 0.65; }
+              </style>
+              <div class="flow">
+                <div class="col">
+                  <div class="label">DB signals</div>
+                  <div class="node">MySQL</div>
+                  <div class="sub">status · slowlog · error</div>
+                </div>
+                <div class="arrow">→</div>
+                <div class="col">
+                  <div class="label">Edge</div>
+                  <div class="node accent">EDOT / OTLP</div>
+                  <div class="sub">Fleet / Filebeat / Stream</div>
+                </div>
+                <div class="arrow">→</div>
+                <div class="col">
+                  <div class="label">Observability</div>
+                  <div class="node">Elastic Observability</div>
+                  <div class="sub">metrics-mysql.status-* · logs-mysql.slowlog-* · logs-mysql.error-*</div>
+                </div>
+              </div>
+        - id: mysql-cards
+          type: custom_content
+          grid:
+            x: 0
+            y: 18
+            w: 48
+            h: 10
+          config:
+            title: Slow-query scorecards by schema
+            template: |2
+
+              <style>
+                .board { display: flex; gap: var(--cc-space-m); flex-wrap: wrap; }
+                .card {
+                  flex: 1; min-width: 160px;
+                  background: var(--cc-color-surface);
+                  border: 1px solid var(--cc-color-border);
+                  border-left: 4px solid var(--cc-vis-0);
+                  border-radius: var(--cc-radius);
+                  padding: var(--cc-space-m);
+                }
+                .card.bad { border-left-color: var(--cc-color-danger); }
+                .card.warn { border-left-color: var(--cc-color-warning); }
+                .name { font-weight: 600; font-size: 0.95rem; margin-bottom: var(--cc-space-xs); word-break: break-all; }
+                .pct { font-size: 2.1rem; line-height: 1.1; font-weight: 700; letter-spacing: -0.02em; }
+                .meta { opacity: 0.7; font-size: 0.85rem; margin-top: var(--cc-space-xs); }
+                .badge {
+                  display: inline-block; margin-top: var(--cc-space-s);
+                  padding: 2px 10px; border-radius: var(--cc-radius-s);
+                  background: var(--cc-vis-0); color: var(--cc-color-background);
+                  font-size: 0.72rem; font-weight: 700; letter-spacing: 0.04em;
+                }
+                .badge.bad { background: var(--cc-color-danger); }
+                .badge.warn { background: var(--cc-color-warning); color: var(--cc-color-background); }
+                .empty { opacity: 0.65; padding: var(--cc-space-l); }
+              </style>
+
+              {{ "{% if rows.size == 0 %}" }}
+                <p class="empty">No MySQL slowlog samples — install the Elastic MySQL integration.</p>
+              {{ "{% else %}" }}
+              <div class="board">
+              {{ "{% for row in rows %}" }}
+                <div class="card {{ '{% if row["avg_s"].value >= 2 %}' }}bad{{ '{% elsif row["avg_s"].value >= 1 %}' }}warn{{ "{% endif %}" }}">
+                  <div class="name">{{ "{{ row[\"db\"].value }}" }}</div>
+                  <div class="pct">{{ "{{ row[\"avg_s\"].value }}" }} s</div>
+                  <div class="meta">{{ "{{ row[\"slow\"].value }}" }} slow queries</div>
+                  <span class="badge {{ '{% if row["avg_s"].value >= 2 %}' }}bad{{ '{% elsif row["avg_s"].value >= 1 %}' }}warn{{ "{% endif %}" }}">
+                    {{ '{% if row["avg_s"].value >= 2 %}' }}HOT{{ '{% elsif row["avg_s"].value >= 1 %}' }}WATCH{{ "{% else %}" }}OK{{ "{% endif %}" }}
+                  </span>
+                </div>
+              {{ "{% endfor %}" }}
+              </div>
+              {{ "{% endif %}" }}
+            esql_query:
+            - |
+              FROM logs-*
+              | WHERE @timestamp >= ?_tstart AND @timestamp <= ?_tend AND (data_stream.dataset LIKE "*mysql.slowlog*")
+              | STATS slow = COUNT(*), avg_s = ROUND(AVG(COALESCE(`mysql.slowlog.query_time.sec`, TO_DOUBLE(event.duration) / 1000000000.0)), 2)
+                  BY db = COALESCE(`mysql.slowlog.schema`, "unknown")
+              | SORT avg_s DESC
+              | LIMIT 12
+        - type: vis
+          id: mysql-m-slow
+          grid:
+            x: 0
+            y: 28
+            w: 12
+            h: 5
+          config:
+            type: metric
+            title: Total Slow Queries
+            data_source:
+              type: esql
+              query: FROM logs-* | WHERE data_stream.dataset LIKE "*mysql.slowlog*" | STATS `Total Slow Queries` = COUNT(*)
+            metrics:
+            - type: primary
+              column: Total Slow Queries
+              label: Total Slow Queries
+        - type: vis
+          id: mysql-m-avg
+          grid:
+            x: 12
+            y: 28
+            w: 12
+            h: 5
+          config:
+            type: metric
+            title: Avg Query Time (s)
+            data_source:
+              type: esql
+              query: FROM logs-* | WHERE data_stream.dataset LIKE "*mysql.slowlog*" | STATS `Avg Query Time (s)` = AVG(COALESCE(`mysql.slowlog.query_time.sec`,
+                TO_DOUBLE(event.duration) / 1000000000.0))
+            metrics:
+            - type: primary
+              column: Avg Query Time (s)
+              label: Avg Query Time (s)
+        - type: vis
+          id: mysql-m-max
+          grid:
+            x: 24
+            y: 28
+            w: 12
+            h: 5
+          config:
+            type: metric
+            title: Max Query Time (s)
+            data_source:
+              type: esql
+              query: FROM logs-* | WHERE data_stream.dataset LIKE "*mysql.slowlog*" | STATS `Max Query Time (s)` = MAX(COALESCE(`mysql.slowlog.query_time.sec`,
+                TO_DOUBLE(event.duration) / 1000000000.0))
+            metrics:
+            - type: primary
+              column: Max Query Time (s)
+              label: Max Query Time (s)
+        - type: vis
+          id: mysql-m-err
+          grid:
+            x: 36
+            y: 28
+            w: 12
+            h: 5
+          config:
+            type: metric
+            title: DB Errors
+            data_source:
+              type: esql
+              query: FROM logs-* | WHERE data_stream.dataset LIKE "*mysql.error*" | STATS `DB Errors` = COUNT(*)
+            metrics:
+            - type: primary
+              column: DB Errors
+              label: DB Errors
+        - type: vis
+          id: mysql-xy-rate
+          grid:
+            x: 0
+            y: 33
+            w: 24
+            h: 12
+          config:
+            type: xy
+            title: Slow Query Rate by Schema
+            legend:
+              visibility: visible
+              placement: outside
+              position: bottom
+            styling:
+              points:
+                visibility: hidden
+              interpolation: linear
+              areas:
+                fill_opacity: 0.55
+                fill: gradient
+            axis:
+              x:
+                title:
+                  visible: false
+                grid:
+                  visible: false
+              y:
+                title:
+                  visible: true
+                grid:
+                  visible: true
+            layers:
+            - type: area
+              data_source:
+                type: esql
+                query: FROM logs-* | WHERE data_stream.dataset LIKE "*mysql.slowlog*" | STATS count = COUNT(*) BY bucket = BUCKET(@timestamp,
+                  75, ?_tstart, ?_tend), schema = COALESCE(`mysql.slowlog.schema`, "unknown")
+              x:
+                column: bucket
+              y:
+              - column: count
+              breakdown_by:
+                column: schema
+        - type: vis
+          id: mysql-xy-avg
+          grid:
+            x: 24
+            y: 33
+            w: 24
+            h: 12
+          config:
+            type: xy
+            title: Avg Query Time by Schema (s)
+            legend:
+              visibility: visible
+              placement: outside
+              position: bottom
+            styling:
+              points:
+                visibility: hidden
+              interpolation: linear
+            axis:
+              x:
+                title:
+                  visible: false
+                grid:
+                  visible: false
+              y:
+                title:
+                  visible: true
+                grid:
+                  visible: true
+            layers:
+            - type: line
+              data_source:
+                type: esql
+                query: FROM logs-* | WHERE data_stream.dataset LIKE "*mysql.slowlog*" | STATS avg_time = AVG(COALESCE(`mysql.slowlog.query_time.sec`,
+                  TO_DOUBLE(event.duration) / 1000000000.0)) BY bucket = BUCKET(@timestamp, 75, ?_tstart, ?_tend), schema = COALESCE(`mysql.slowlog.schema`,
+                  "unknown")
+              x:
+                column: bucket
+              y:
+              - column: avg_time
+              breakdown_by:
+                column: schema
+        - type: vis
+          id: mysql-xy-threads
+          grid:
+            x: 0
+            y: 45
+            w: 24
+            h: 12
+          config:
+            type: xy
+            title: MySQL threads connected (integration status)
+            legend:
+              visibility: hidden
+            styling:
+              points:
+                visibility: hidden
+              interpolation: linear
+              areas:
+                fill_opacity: 0.55
+                fill: gradient
+            axis:
+              x:
+                title:
+                  visible: false
+                grid:
+                  visible: false
+              y:
+                title:
+                  visible: true
+                grid:
+                  visible: true
+            layers:
+            - type: area
+              data_source:
+                type: esql
+                query: |-
+                  FROM metrics-*
+                  | WHERE data_stream.dataset LIKE "*mysql.status*" OR data_stream.dataset LIKE "*mysqlreceiver*"
+                  | WHERE `mysql.status.threads.connected` IS NOT NULL
+                  | STATS threads = MAX(`mysql.status.threads.connected`) BY time_bucket = BUCKET(@timestamp, 75, ?_tstart, ?_tend)
+                  | SORT time_bucket ASC
+              x:
+                column: time_bucket
+              y:
+              - column: threads
+        - type: vis
+          id: mysql-xy-err
+          grid:
+            x: 24
+            y: 45
+            w: 24
+            h: 12
+          config:
+            type: xy
+            title: Error Log Trend
+            legend:
+              visibility: hidden
+            styling:
+              points:
+                visibility: hidden
+            axis:
+              x:
+                title:
+                  visible: false
+                grid:
+                  visible: false
+              y:
+                title:
+                  visible: true
+                grid:
+                  visible: true
+            layers:
+            - type: bar
+              data_source:
+                type: esql
+                query: FROM logs-* | WHERE data_stream.dataset LIKE "*mysql.error*" | STATS count = COUNT(*) BY bucket = BUCKET(@timestamp,
+                  75, ?_tstart, ?_tend)
+              x:
+                column: bucket
+              y:
+              - column: count
+
+  - name: detect_sqlserver
+    type: elasticsearch.esql.query
+    on-failure:
+      continue: true
+    with:
+      format: json
+      query: |
+        FROM metrics-*
+        | WHERE @timestamp > NOW() - 7 days AND ((data_stream.dataset LIKE "*sqlserver*" OR data_stream.dataset LIKE "*mssql*"))
+        | STATS docs = COUNT(*)
+
+  - name: get_sqlserver
+    type: kibana.request
+    if: "steps.detect_sqlserver.output.values.0.0 > 0"
+    on-failure:
+      continue: true
+    with:
+      method: GET
+      path: /api/dashboards/auto-dbmon-sqlserver
+      headers:
+        Elastic-Api-Version: "2023-10-31"
+
+  - name: upsert_sqlserver
+    type: kibana.request
+    if: "steps.detect_sqlserver.output.values.0.0 > 0 and steps.get_sqlserver.error.message: HTTP*404*"
+    on-failure:
+      continue: true
+    with:
+      method: PUT
+      path: /api/dashboards/auto-dbmon-sqlserver
+      headers:
+        Elastic-Api-Version: "2023-10-31"
+      body:
+        title: 'Auto: DB SQL Server — Performance & Health'
+        description: Auto-ops DB — SQL Server briefing, scorecards, TS charts (Elastic Integration + Streams).
+        time_range:
+          from: now-2h
+          to: now
+        options:
+          auto_apply_filters: true
+          hide_panel_titles: false
+          hide_panel_borders: false
+          use_margins: true
+          sync_colors: true
+          sync_tooltips: true
+          sync_cursor: true
+        filters: []
+        tags:
+        - auto
+        - auto-ops
+        - db-monitoring
+        pinned_panels: []
+        panels:
+        - id: mssql-briefing
+          type: markdown
+          grid:
+            x: 0
+            y: 0
+            w: 48
+            h: 12
+          config:
+            title: SRE day-one briefing
+            content: |
+              ## Purpose
+              Answer: **is SQL Server healthy?** Elastic **Microsoft SQL Server** integration `microsoft_sqlserver.performance` (`mssql.metrics.*`) — also OTel `sqlserverreceiver` Streams.
+
+              ## How to read it
+              1. **Instance scorecards** — user connections by server (HOT ≥ 80, WATCH ≥ 40).
+              2. **Data path** — SQL Server → Fleet microsoft_sqlserver / EDOT → metrics-* / Streams.
+              3. **KPI strip** — connections, buffer hit ratio, lock waits, batch requests.
+              4. **Trends** — connections / locks / batches by service.
+
+              ## What healthy looks like
+              Buffer cache hit ≥ 0.95. Lock waits low/flat. Connections stable vs baseline.
+
+              ## Day-one next steps
+              1. HOT connections → pool saturation / blocked sessions.
+              2. Buffer cache drop → memory pressure / plan cache churn.
+              3. Also open **Auto: DB SQL Server — Overview** for the Overview layout.
+              4. Owned by **`db-monitoring-auto-dashboards`**.
+
+              ## Related alerts & workflows
+              - Workflow **`db-monitoring-auto-dashboards`** (hourly) keeps this board present when data is live.
+              - Empty boards → install the matching Elastic database integration (or EDOT receiver).
+              - Works with Fleet Integrations, EDOT OTel receivers, or any Stream carrying these datasets.
+              - Broken panels → **`broken-widget-hunter`** Case + auto-fix.
+
+              _Managed by db-monitoring-auto-dashboards_
+        - id: mssql-flow
+          type: custom_content
+          grid:
+            x: 0
+            y: 12
+            w: 48
+            h: 6
+          config:
+            title: SQL Server → Elastic Integration / Stream → Elastic
+            template: |2
+
+              <style>
+                .flow {
+                  display: flex; align-items: center; justify-content: space-between;
+                  gap: var(--cc-space-m); padding: var(--cc-space-m);
+                  background: var(--cc-color-surface); border-radius: var(--cc-radius);
+                  border: 1px solid var(--cc-color-border);
+                }
+                .col { flex: 1; text-align: center; }
+                .label {
+                  font-size: 0.7rem; letter-spacing: 0.08em; text-transform: uppercase;
+                  opacity: 0.65; margin-bottom: var(--cc-space-s);
+                }
+                .node {
+                  display: inline-block; padding: var(--cc-space-s) var(--cc-space-m);
+                  background: var(--cc-color-background); border: 1px solid var(--cc-color-border);
+                  border-radius: var(--cc-radius-s); font-weight: 600; font-size: 0.9rem;
+                }
+                .node.accent { border-color: var(--cc-vis-0); box-shadow: 0 0 0 1px var(--cc-vis-0); }
+                .arrow { opacity: 0.45; font-size: 1.4rem; }
+                .sub { margin-top: var(--cc-space-xs); font-size: 0.75rem; opacity: 0.65; }
+              </style>
+              <div class="flow">
+                <div class="col">
+                  <div class="label">DB signals</div>
+                  <div class="node">SQL Server</div>
+                  <div class="sub">performance · transaction_log</div>
+                </div>
+                <div class="arrow">→</div>
+                <div class="col">
+                  <div class="label">Edge</div>
+                  <div class="node accent">EDOT / OTLP</div>
+                  <div class="sub">Fleet / EDOT / Stream</div>
+                </div>
+                <div class="arrow">→</div>
+                <div class="col">
+                  <div class="label">Observability</div>
+                  <div class="node">Elastic Observability</div>
+                  <div class="sub">metrics-microsoft_sqlserver.* · metrics-*sqlserver* · Auto: DB</div>
+                </div>
+              </div>
+        - id: mssql-cards
+          type: custom_content
+          grid:
+            x: 0
+            y: 18
+            w: 48
+            h: 10
+          config:
+            title: SQL Server instance scorecards
+            template: |2
+
+              <style>
+                .board { display: flex; gap: var(--cc-space-m); flex-wrap: wrap; }
+                .card {
+                  flex: 1; min-width: 160px;
+                  background: var(--cc-color-surface);
+                  border: 1px solid var(--cc-color-border);
+                  border-left: 4px solid var(--cc-vis-0);
+                  border-radius: var(--cc-radius);
+                  padding: var(--cc-space-m);
+                }
+                .card.bad { border-left-color: var(--cc-color-danger); }
+                .card.warn { border-left-color: var(--cc-color-warning); }
+                .name { font-weight: 600; font-size: 0.95rem; margin-bottom: var(--cc-space-xs); word-break: break-all; }
+                .pct { font-size: 2.1rem; line-height: 1.1; font-weight: 700; letter-spacing: -0.02em; }
+                .meta { opacity: 0.7; font-size: 0.85rem; margin-top: var(--cc-space-xs); }
+                .badge {
+                  display: inline-block; margin-top: var(--cc-space-s);
+                  padding: 2px 10px; border-radius: var(--cc-radius-s);
+                  background: var(--cc-vis-0); color: var(--cc-color-background);
+                  font-size: 0.72rem; font-weight: 700; letter-spacing: 0.04em;
+                }
+                .badge.bad { background: var(--cc-color-danger); }
+                .badge.warn { background: var(--cc-color-warning); color: var(--cc-color-background); }
+                .empty { opacity: 0.65; padding: var(--cc-space-l); }
+              </style>
+
+              {{ "{% if rows.size == 0 %}" }}
+                <p class="empty">No SQL Server samples — install the Elastic Microsoft SQL Server integration.</p>
+              {{ "{% else %}" }}
+              <div class="board">
+              {{ "{% for row in rows %}" }}
+                <div class="card {{ '{% if row["conns"].value >= 80 %}' }}bad{{ '{% elsif row["conns"].value >= 40 %}' }}warn{{ "{% endif %}" }}">
+                  <div class="name">{{ "{{ row[\"svc\"].value }}" }}</div>
+                  <div class="pct">{{ "{{ row[\"conns\"].value }}" }}</div>
+                  <div class="meta">hit {{ "{{ row[\"hit\"].value }}" }} · {{ "{{ row[\"samples\"].value }}" }} samples</div>
+                  <span class="badge {{ '{% if row["conns"].value >= 80 %}' }}bad{{ '{% elsif row["conns"].value >= 40 %}' }}warn{{ "{% endif %}" }}">
+                    {{ '{% if row["conns"].value >= 80 %}' }}HOT{{ '{% elsif row["conns"].value >= 40 %}' }}WATCH{{ "{% else %}" }}OK{{ "{% endif %}" }}
+                  </span>
+                </div>
+              {{ "{% endfor %}" }}
+              </div>
+              {{ "{% endif %}" }}
+            esql_query:
+            - |
+              FROM metrics-*
+              | WHERE @timestamp >= ?_tstart AND @timestamp <= ?_tend
+                  AND (data_stream.dataset LIKE "*sqlserver*" OR data_stream.dataset LIKE "*mssql*")
+              | STATS conns = MAX(`mssql.metrics.user_connections`),
+                      hit = ROUND(MAX(`mssql.metrics.buffer_cache_hit_ratio_pct`), 3),
+                      samples = COUNT(*)
+                  BY svc = COALESCE(`mssql.metrics.server_name`, service.name, host.name, "unknown")
+              | WHERE samples > 0
+              | SORT conns DESC
+              | LIMIT 12
+        - type: vis
+          id: mssql-m-conn
+          grid:
+            x: 0
+            y: 28
+            w: 12
+            h: 5
+          config:
+            type: metric
+            title: User Connections
+            data_source:
+              type: esql
+              query: |-
+                FROM metrics-*
+                | WHERE (data_stream.dataset LIKE "*sqlserver*" OR data_stream.dataset LIKE "*mssql*")
+                | WHERE `mssql.metrics.user_connections` IS NOT NULL
+                | STATS `User Connections` = MAX(`mssql.metrics.user_connections`)
+            metrics:
+            - type: primary
+              column: User Connections
+              label: User Connections
+        - type: vis
+          id: mssql-m-buf
+          grid:
+            x: 12
+            y: 28
+            w: 12
+            h: 5
+          config:
+            type: metric
+            title: Buffer Cache Hit
+            data_source:
+              type: esql
+              query: |-
+                FROM metrics-*
+                | WHERE (data_stream.dataset LIKE "*sqlserver*" OR data_stream.dataset LIKE "*mssql*")
+                | WHERE `mssql.metrics.buffer_cache_hit_ratio_pct` IS NOT NULL
+                | STATS `Buffer Cache Hit` = MAX(`mssql.metrics.buffer_cache_hit_ratio_pct`)
+            metrics:
+            - type: primary
+              column: Buffer Cache Hit
+              label: Buffer Cache Hit
+        - type: vis
+          id: mssql-m-lock
+          grid:
+            x: 24
+            y: 28
+            w: 12
+            h: 5
+          config:
+            type: metric
+            title: Lock Waits / sec
+            data_source:
+              type: esql
+              query: |-
+                FROM metrics-*
+                | WHERE (data_stream.dataset LIKE "*sqlserver*" OR data_stream.dataset LIKE "*mssql*")
+                | WHERE `mssql.metrics.lock_waits_per_sec` IS NOT NULL
+                | STATS `Lock Waits / sec` = MAX(`mssql.metrics.lock_waits_per_sec`)
+            metrics:
+            - type: primary
+              column: Lock Waits / sec
+              label: Lock Waits / sec
+        - type: vis
+          id: mssql-m-batch
+          grid:
+            x: 36
+            y: 28
+            w: 12
+            h: 5
+          config:
+            type: metric
+            title: Batch Requests / sec
+            data_source:
+              type: esql
+              query: |-
+                FROM metrics-*
+                | WHERE (data_stream.dataset LIKE "*sqlserver*" OR data_stream.dataset LIKE "*mssql*")
+                | WHERE `mssql.metrics.batch_requests_per_sec` IS NOT NULL
+                | STATS `Batch Requests / sec` = MAX(`mssql.metrics.batch_requests_per_sec`)
+            metrics:
+            - type: primary
+              column: Batch Requests / sec
+              label: Batch Requests / sec
+        - type: vis
+          id: mssql-xy-conn
+          grid:
+            x: 0
+            y: 33
+            w: 24
+            h: 12
+          config:
+            type: xy
+            title: User Connections Over Time
+            legend:
+              visibility: visible
+              placement: outside
+              position: bottom
+            styling:
+              points:
+                visibility: hidden
+              interpolation: linear
+              areas:
+                fill_opacity: 0.55
+                fill: gradient
+            axis:
+              x:
+                title:
+                  visible: false
+                grid:
+                  visible: false
+              y:
+                title:
+                  visible: true
+                grid:
+                  visible: true
+            layers:
+            - type: area
+              data_source:
+                type: esql
+                query: |-
+                  FROM metrics-*
+                  | WHERE (data_stream.dataset LIKE "*sqlserver*" OR data_stream.dataset LIKE "*mssql*")
+                  | WHERE `mssql.metrics.user_connections` IS NOT NULL
+                  | STATS `connections` = MAX(`mssql.metrics.user_connections`) BY time_bucket = BUCKET(@timestamp, 75, ?_tstart, ?_tend), `service.name`
+                  | WHERE `service.name` IS NOT NULL
+                  | SORT time_bucket ASC
+              x:
+                column: time_bucket
+              y:
+              - column: connections
+              breakdown_by:
+                column: service.name
+        - type: vis
+          id: mssql-xy-lock
+          grid:
+            x: 24
+            y: 33
+            w: 24
+            h: 12
+          config:
+            type: xy
+            title: Lock waits / sec (or lock wait ms)
+            legend:
+              visibility: visible
+              placement: outside
+              position: bottom
+            styling:
+              points:
+                visibility: hidden
+              interpolation: linear
+            axis:
+              x:
+                title:
+                  visible: false
+                grid:
+                  visible: false
+              y:
+                title:
+                  visible: true
+                grid:
+                  visible: true
+            layers:
+            - type: line
+              data_source:
+                type: esql
+                query: |-
+                  FROM metrics-*
+                  | WHERE (data_stream.dataset LIKE "*sqlserver*" OR data_stream.dataset LIKE "*mssql*")
+                  | WHERE `mssql.metrics.lock_waits_per_sec` IS NOT NULL
+                  | STATS `lock_wait` = MAX(`mssql.metrics.lock_waits_per_sec`) BY time_bucket = BUCKET(@timestamp, 75, ?_tstart, ?_tend), `service.name`
+                  | WHERE `service.name` IS NOT NULL
+                  | SORT time_bucket ASC
+              x:
+                column: time_bucket
+              y:
+              - column: lock_wait
+              breakdown_by:
+                column: service.name
+        - type: vis
+          id: mssql-xy-batch
+          grid:
+            x: 0
+            y: 45
+            w: 48
+            h: 12
+          config:
+            type: xy
+            title: Batch Requests Over Time
+            legend:
+              visibility: visible
+              placement: outside
+              position: bottom
+            styling:
+              points:
+                visibility: hidden
+              interpolation: linear
+            axis:
+              x:
+                title:
+                  visible: false
+                grid:
+                  visible: false
+              y:
+                title:
+                  visible: true
+                grid:
+                  visible: true
+            layers:
+            - type: line
+              data_source:
+                type: esql
+                query: |-
+                  FROM metrics-*
+                  | WHERE (data_stream.dataset LIKE "*sqlserver*" OR data_stream.dataset LIKE "*mssql*")
+                  | WHERE `mssql.metrics.batch_requests_per_sec` IS NOT NULL
+                  | STATS `batches` = MAX(`mssql.metrics.batch_requests_per_sec`) BY time_bucket = BUCKET(@timestamp, 75, ?_tstart, ?_tend), `service.name`
+                  | WHERE `service.name` IS NOT NULL
+                  | SORT time_bucket ASC
+              x:
+                column: time_bucket
+              y:
+              - column: batches
+              breakdown_by:
+                column: service.name
+
+  - name: detect_sqlserver_overview
+    type: elasticsearch.esql.query
+    on-failure:
+      continue: true
+    with:
+      format: json
+      query: |
+        FROM metrics-*
+        | WHERE @timestamp > NOW() - 7 days AND ((data_stream.dataset LIKE "*sqlserver*" OR data_stream.dataset LIKE "*mssql*"))
+        | STATS docs = COUNT(*)
+
+  - name: get_sqlserver_overview
+    type: kibana.request
+    if: "steps.detect_sqlserver_overview.output.values.0.0 > 0"
+    on-failure:
+      continue: true
+    with:
+      method: GET
+      path: /api/dashboards/auto-dbmon-sqlserver-overview
+      headers:
+        Elastic-Api-Version: "2023-10-31"
+
+  - name: upsert_sqlserver_overview
+    type: kibana.request
+    if: "steps.detect_sqlserver_overview.output.values.0.0 > 0 and steps.get_sqlserver_overview.error.message: HTTP*404*"
+    on-failure:
+      continue: true
+    with:
+      method: PUT
+      path: /api/dashboards/auto-dbmon-sqlserver-overview
+      headers:
+        Elastic-Api-Version: "2023-10-31"
+      body:
+        title: 'Auto: DB SQL Server — Overview'
+        description: Auto-ops DB — SQL Server Overview layout (Elastic Integration + Streams).
+        time_range:
+          from: now-2h
+          to: now
+        options:
+          auto_apply_filters: true
+          hide_panel_titles: false
+          hide_panel_borders: false
+          use_margins: true
+          sync_colors: true
+          sync_tooltips: true
+          sync_cursor: true
+        filters: []
+        tags:
+        - auto
+        - auto-ops
+        - db-monitoring
+        pinned_panels: []
+        panels:
+        - id: mssql-ov-briefing
+          type: markdown
+          grid:
+            x: 0
+            y: 0
+            w: 48
+            h: 12
+          config:
+            title: SRE day-one briefing
+            content: |
+              ## Purpose
+              SQL Server overview on Elastic Observability: batch requests, connections, buffer cache, locks — Integration `mssql.metrics.*` or OTel receiver.
+
+              ## How to read it
+              1. **Instance scorecards** — connections by server/instance.
+              2. **Data path** — same Microsoft SQL Server integration as Performance & Health.
+              3. **KPI strip** — batches, connections, buffer hit, lock waits.
+              4. **Trends + instance bars** — connections, batches, locks, top instances.
+
+              ## What healthy looks like
+              Steady batches, buffer hit ≥ 0.95, lock waits flat.
+
+              ## Day-one next steps
+              1. Compare with **Auto: DB SQL Server — Performance & Health**.
+              2. HOT instance bar → drill `mssql.metrics.server_name` in Streams.
+              3. Empty → install the Elastic Microsoft SQL Server integration.
+              4. Owned by **`db-monitoring-auto-dashboards`**.
+
+              ## Related alerts & workflows
+              - Workflow **`db-monitoring-auto-dashboards`** (hourly) keeps this board present when data is live.
+              - Empty boards → install the matching Elastic database integration (or EDOT receiver).
+              - Works with Fleet Integrations, EDOT OTel receivers, or any Stream carrying these datasets.
+              - Broken panels → **`broken-widget-hunter`** Case + auto-fix.
+
+              _Managed by db-monitoring-auto-dashboards_
+        - id: mssql-ov-flow
+          type: custom_content
+          grid:
+            x: 0
+            y: 12
+            w: 48
+            h: 6
+          config:
+            title: SQL Server Overview → Integration / Stream → Elastic
+            template: |2
+
+              <style>
+                .flow {
+                  display: flex; align-items: center; justify-content: space-between;
+                  gap: var(--cc-space-m); padding: var(--cc-space-m);
+                  background: var(--cc-color-surface); border-radius: var(--cc-radius);
+                  border: 1px solid var(--cc-color-border);
+                }
+                .col { flex: 1; text-align: center; }
+                .label {
+                  font-size: 0.7rem; letter-spacing: 0.08em; text-transform: uppercase;
+                  opacity: 0.65; margin-bottom: var(--cc-space-s);
+                }
+                .node {
+                  display: inline-block; padding: var(--cc-space-s) var(--cc-space-m);
+                  background: var(--cc-color-background); border: 1px solid var(--cc-color-border);
+                  border-radius: var(--cc-radius-s); font-weight: 600; font-size: 0.9rem;
+                }
+                .node.accent { border-color: var(--cc-vis-0); box-shadow: 0 0 0 1px var(--cc-vis-0); }
+                .arrow { opacity: 0.45; font-size: 1.4rem; }
+                .sub { margin-top: var(--cc-space-xs); font-size: 0.75rem; opacity: 0.65; }
+              </style>
+              <div class="flow">
+                <div class="col">
+                  <div class="label">DB signals</div>
+                  <div class="node">SQL Server</div>
+                  <div class="sub">batch · conn · buffer · locks</div>
+                </div>
+                <div class="arrow">→</div>
+                <div class="col">
+                  <div class="label">Edge</div>
+                  <div class="node accent">EDOT / OTLP</div>
+                  <div class="sub">Fleet / EDOT / Stream</div>
+                </div>
+                <div class="arrow">→</div>
+                <div class="col">
+                  <div class="label">Observability</div>
+                  <div class="node">Elastic Observability</div>
+                  <div class="sub">metrics-microsoft_sqlserver.* · Overview board</div>
+                </div>
+              </div>
+        - id: mssql-ov-cards
+          type: custom_content
+          grid:
+            x: 0
+            y: 18
+            w: 48
+            h: 10
+          config:
+            title: Instance scorecards
+            template: |2
+
+              <style>
+                .board { display: flex; gap: var(--cc-space-m); flex-wrap: wrap; }
+                .card {
+                  flex: 1; min-width: 160px;
+                  background: var(--cc-color-surface);
+                  border: 1px solid var(--cc-color-border);
+                  border-left: 4px solid var(--cc-vis-0);
+                  border-radius: var(--cc-radius);
+                  padding: var(--cc-space-m);
+                }
+                .card.bad { border-left-color: var(--cc-color-danger); }
+                .card.warn { border-left-color: var(--cc-color-warning); }
+                .name { font-weight: 600; font-size: 0.95rem; margin-bottom: var(--cc-space-xs); word-break: break-all; }
+                .pct { font-size: 2.1rem; line-height: 1.1; font-weight: 700; letter-spacing: -0.02em; }
+                .meta { opacity: 0.7; font-size: 0.85rem; margin-top: var(--cc-space-xs); }
+                .badge {
+                  display: inline-block; margin-top: var(--cc-space-s);
+                  padding: 2px 10px; border-radius: var(--cc-radius-s);
+                  background: var(--cc-vis-0); color: var(--cc-color-background);
+                  font-size: 0.72rem; font-weight: 700; letter-spacing: 0.04em;
+                }
+                .badge.bad { background: var(--cc-color-danger); }
+                .badge.warn { background: var(--cc-color-warning); color: var(--cc-color-background); }
+                .empty { opacity: 0.65; padding: var(--cc-space-l); }
+              </style>
+
+              {{ "{% if rows.size == 0 %}" }}
+                <p class="empty">No SQL Server instance samples in range.</p>
+              {{ "{% else %}" }}
+              <div class="board">
+              {{ "{% for row in rows %}" }}
+                <div class="card {{ '{% if row["conns"].value >= 80 %}' }}bad{{ '{% elsif row["conns"].value >= 40 %}' }}warn{{ "{% endif %}" }}">
+                  <div class="name">{{ "{{ row[\"inst\"].value }}" }}</div>
+                  <div class="pct">{{ "{{ row[\"conns\"].value }}" }}</div>
+                  <div class="meta">hit {{ "{{ row[\"hit\"].value }}" }} · {{ "{{ row[\"samples\"].value }}" }} samples</div>
+                  <span class="badge {{ '{% if row["conns"].value >= 80 %}' }}bad{{ '{% elsif row["conns"].value >= 40 %}' }}warn{{ "{% endif %}" }}">
+                    {{ '{% if row["conns"].value >= 80 %}' }}HOT{{ '{% elsif row["conns"].value >= 40 %}' }}WATCH{{ "{% else %}" }}OK{{ "{% endif %}" }}
+                  </span>
+                </div>
+              {{ "{% endfor %}" }}
+              </div>
+              {{ "{% endif %}" }}
+            esql_query:
+            - |
+              FROM metrics-*
+              | WHERE @timestamp >= ?_tstart AND @timestamp <= ?_tend
+                  AND (data_stream.dataset LIKE "*sqlserver*" OR data_stream.dataset LIKE "*mssql*")
+              | STATS conns = MAX(`mssql.metrics.user_connections`),
+                      hit = ROUND(MAX(`mssql.metrics.buffer_cache_hit_ratio_pct`), 3),
+                      samples = COUNT(*)
+                  BY inst = COALESCE(`mssql.metrics.instance_name`, `mssql.metrics.server_name`, `service.instance.id`, service.name, "unknown")
+              | WHERE samples > 0
+              | SORT conns DESC
+              | LIMIT 12
+        - type: vis
+          id: mssqlov-m-batch
+          grid:
+            x: 0
+            y: 28
+            w: 12
+            h: 5
+          config:
+            type: metric
+            title: Batch Requests
+            data_source:
+              type: esql
+              query: |-
+                FROM metrics-*
+                | WHERE (data_stream.dataset LIKE "*sqlserver*" OR data_stream.dataset LIKE "*mssql*")
+                | WHERE `mssql.metrics.batch_requests_per_sec` IS NOT NULL
+                | STATS `Batch Requests` = MAX(`mssql.metrics.batch_requests_per_sec`)
+            metrics:
+            - type: primary
+              column: Batch Requests
+              label: Batch Requests
+        - type: vis
+          id: mssqlov-m-conn
+          grid:
+            x: 12
+            y: 28
+            w: 12
+            h: 5
+          config:
+            type: metric
+            title: User Connections
+            data_source:
+              type: esql
+              query: |-
+                FROM metrics-*
+                | WHERE (data_stream.dataset LIKE "*sqlserver*" OR data_stream.dataset LIKE "*mssql*")
+                | WHERE `mssql.metrics.user_connections` IS NOT NULL
+                | STATS `User Connections` = MAX(`mssql.metrics.user_connections`)
+            metrics:
+            - type: primary
+              column: User Connections
+              label: User Connections
+        - type: vis
+          id: mssqlov-m-buf
+          grid:
+            x: 24
+            y: 28
+            w: 12
+            h: 5
+          config:
+            type: metric
+            title: Buffer Cache Hit
+            data_source:
+              type: esql
+              query: |-
+                FROM metrics-*
+                | WHERE (data_stream.dataset LIKE "*sqlserver*" OR data_stream.dataset LIKE "*mssql*")
+                | WHERE `mssql.metrics.buffer_cache_hit_ratio_pct` IS NOT NULL
+                | STATS `Buffer Cache Hit` = MAX(`mssql.metrics.buffer_cache_hit_ratio_pct`)
+            metrics:
+            - type: primary
+              column: Buffer Cache Hit
+              label: Buffer Cache Hit
+        - type: vis
+          id: mssqlov-m-lock
+          grid:
+            x: 36
+            y: 28
+            w: 12
+            h: 5
+          config:
+            type: metric
+            title: Lock Waits
+            data_source:
+              type: esql
+              query: |-
+                FROM metrics-*
+                | WHERE (data_stream.dataset LIKE "*sqlserver*" OR data_stream.dataset LIKE "*mssql*")
+                | WHERE `mssql.metrics.lock_waits_per_sec` IS NOT NULL
+                | STATS `Lock Waits` = MAX(`mssql.metrics.lock_waits_per_sec`)
+            metrics:
+            - type: primary
+              column: Lock Waits
+              label: Lock Waits
+        - type: vis
+          id: mssqlov-xy-conn
+          grid:
+            x: 0
+            y: 33
+            w: 24
+            h: 12
+          config:
+            type: xy
+            title: User Connections Over Time
+            legend:
+              visibility: visible
+              placement: outside
+              position: bottom
+            styling:
+              points:
+                visibility: hidden
+              interpolation: linear
+              areas:
+                fill_opacity: 0.55
+                fill: gradient
+            axis:
+              x:
+                title:
+                  visible: false
+                grid:
+                  visible: false
+              y:
+                title:
+                  visible: true
+                grid:
+                  visible: true
+            layers:
+            - type: area
+              data_source:
+                type: esql
+                query: |-
+                  FROM metrics-*
+                  | WHERE (data_stream.dataset LIKE "*sqlserver*" OR data_stream.dataset LIKE "*mssql*")
+                  | WHERE `mssql.metrics.user_connections` IS NOT NULL
+                  | STATS `conns` = MAX(`mssql.metrics.user_connections`) BY time_bucket = BUCKET(@timestamp, 75, ?_tstart, ?_tend), `service.name`
+                  | WHERE `service.name` IS NOT NULL
+                  | SORT time_bucket ASC
+              x:
+                column: time_bucket
+              y:
+              - column: conns
+              breakdown_by:
+                column: service.name
+        - type: vis
+          id: mssqlov-xy-batch
+          grid:
+            x: 24
+            y: 33
+            w: 24
+            h: 12
+          config:
+            type: xy
+            title: Batch Requests Over Time
+            legend:
+              visibility: visible
+              placement: outside
+              position: bottom
+            styling:
+              points:
+                visibility: hidden
+              interpolation: linear
+            axis:
+              x:
+                title:
+                  visible: false
+                grid:
+                  visible: false
+              y:
+                title:
+                  visible: true
+                grid:
+                  visible: true
+            layers:
+            - type: line
+              data_source:
+                type: esql
+                query: |-
+                  FROM metrics-*
+                  | WHERE (data_stream.dataset LIKE "*sqlserver*" OR data_stream.dataset LIKE "*mssql*")
+                  | WHERE `mssql.metrics.batch_requests_per_sec` IS NOT NULL
+                  | STATS `batch` = MAX(`mssql.metrics.batch_requests_per_sec`) BY time_bucket = BUCKET(@timestamp, 75, ?_tstart, ?_tend), `service.name`
+                  | WHERE `service.name` IS NOT NULL
+                  | SORT time_bucket ASC
+              x:
+                column: time_bucket
+              y:
+              - column: batch
+              breakdown_by:
+                column: service.name
+        - type: vis
+          id: mssqlov-xy-lock
+          grid:
+            x: 0
+            y: 45
+            w: 24
+            h: 12
+          config:
+            type: xy
+            title: Lock Waits Over Time
+            legend:
+              visibility: visible
+              placement: outside
+              position: bottom
+            styling:
+              points:
+                visibility: hidden
+              interpolation: linear
+            axis:
+              x:
+                title:
+                  visible: false
+                grid:
+                  visible: false
+              y:
+                title:
+                  visible: true
+                grid:
+                  visible: true
+            layers:
+            - type: line
+              data_source:
+                type: esql
+                query: |-
+                  FROM metrics-*
+                  | WHERE (data_stream.dataset LIKE "*sqlserver*" OR data_stream.dataset LIKE "*mssql*")
+                  | WHERE `mssql.metrics.lock_waits_per_sec` IS NOT NULL
+                  | STATS `lock_ms` = MAX(`mssql.metrics.lock_waits_per_sec`) BY time_bucket = BUCKET(@timestamp, 75, ?_tstart, ?_tend), `service.name`
+                  | WHERE `service.name` IS NOT NULL
+                  | SORT time_bucket ASC
+              x:
+                column: time_bucket
+              y:
+              - column: lock_ms
+              breakdown_by:
+                column: service.name
+        - type: vis
+          id: mssqlov-xy-ple
+          grid:
+            x: 24
+            y: 45
+            w: 24
+            h: 12
+          config:
+            type: xy
+            title: Buffer page life expectancy (integration)
+            legend:
+              visibility: hidden
+            styling:
+              points:
+                visibility: hidden
+              interpolation: linear
+            axis:
+              x:
+                title:
+                  visible: false
+                grid:
+                  visible: false
+              y:
+                title:
+                  visible: true
+                grid:
+                  visible: true
+            layers:
+            - type: line
+              data_source:
+                type: esql
+                query: |-
+                  FROM metrics-*
+                  | WHERE (data_stream.dataset LIKE "*sqlserver*" OR data_stream.dataset LIKE "*mssql*")
+                  | WHERE `mssql.metrics.buffer_page_life_expectancy` IS NOT NULL
+                  | STATS ple = MAX(`mssql.metrics.buffer_page_life_expectancy`) BY time_bucket = BUCKET(@timestamp, 75, ?_tstart, ?_tend)
+                  | SORT time_bucket ASC
+              x:
+                column: time_bucket
+              y:
+              - column: ple
+        - type: vis
+          id: mssqlov-xy-topconn
+          grid:
+            x: 0
+            y: 57
+            w: 24
+            h: 11
+          config:
+            type: xy
+            title: Top instances — user connections (max)
+            legend:
+              visibility: hidden
+            styling:
+              points:
+                visibility: hidden
+            axis:
+              x:
+                title:
+                  visible: false
+                grid:
+                  visible: false
+              y:
+                title:
+                  visible: true
+                grid:
+                  visible: true
+            layers:
+            - type: bar_horizontal
+              data_source:
+                type: esql
+                query: |-
+                  FROM metrics-*
+                  | WHERE (data_stream.dataset LIKE "*sqlserver*" OR data_stream.dataset LIKE "*mssql*")
+                  | STATS `Max Connections` = MAX(`mssql.metrics.user_connections`) BY `Instance` = COALESCE(`mssql.metrics.server_name`, service.name, host.name)
+                  | WHERE `Instance` IS NOT NULL | SORT `Max Connections` DESC | LIMIT 20
+              x:
+                column: Instance
+              y:
+              - column: Max Connections
+        - type: vis
+          id: mssqlov-xy-topbuf
+          grid:
+            x: 24
+            y: 57
+            w: 24
+            h: 11
+          config:
+            type: xy
+            title: Buffer cache hit by instance
+            legend:
+              visibility: hidden
+            styling:
+              points:
+                visibility: hidden
+            axis:
+              x:
+                title:
+                  visible: false
+                grid:
+                  visible: false
+              y:
+                title:
+                  visible: true
+                grid:
+                  visible: true
+            layers:
+            - type: bar_horizontal
+              data_source:
+                type: esql
+                query: |-
+                  FROM metrics-*
+                  | WHERE (data_stream.dataset LIKE "*sqlserver*" OR data_stream.dataset LIKE "*mssql*")
+                  | STATS `Buffer Cache Hit` = MAX(`mssql.metrics.buffer_cache_hit_ratio_pct`) BY `Instance` = COALESCE(`mssql.metrics.server_name`, service.name, host.name)
+                  | WHERE `Instance` IS NOT NULL | SORT `Instance`
+              x:
+                column: Instance
+              y:
+              - column: Buffer Cache Hit
+
+  - name: detect_mongodb
+    type: elasticsearch.esql.query
+    on-failure:
+      continue: true
+    with:
+      format: json
+      query: |
+        FROM metrics-*
+        | WHERE @timestamp > NOW() - 7 days AND (data_stream.dataset LIKE "*mongo*")
+        | STATS docs = COUNT(*)
+
+  - name: get_mongodb
+    type: kibana.request
+    if: "steps.detect_mongodb.output.values.0.0 > 0"
+    on-failure:
+      continue: true
+    with:
+      method: GET
+      path: /api/dashboards/auto-dbmon-mongodb
+      headers:
+        Elastic-Api-Version: "2023-10-31"
+
+  - name: upsert_mongodb
+    type: kibana.request
+    if: "steps.detect_mongodb.output.values.0.0 > 0 and steps.get_mongodb.error.message: HTTP*404*"
+    on-failure:
+      continue: true
+    with:
+      method: PUT
+      path: /api/dashboards/auto-dbmon-mongodb
+      headers:
+        Elastic-Api-Version: "2023-10-31"
+      body:
+        title: 'Auto: DB MongoDB — Operations & Health'
+        description: Auto-ops DB — MongoDB briefing, lag scorecards, TS charts (Elastic Integration + Streams).
+        time_range:
+          from: now-2h
+          to: now
+        options:
+          auto_apply_filters: true
+          hide_panel_titles: false
+          hide_panel_borders: false
+          use_margins: true
+          sync_colors: true
+          sync_tooltips: true
+          sync_cursor: true
+        filters: []
+        tags:
+        - auto
+        - auto-ops
+        - db-monitoring
+        pinned_panels: []
+        panels:
+        - id: mongo-briefing
+          type: markdown
+          grid:
+            x: 0
+            y: 0
+            w: 48
+            h: 11
+          config:
+            title: SRE day-one briefing
+            content: |
+              ## Purpose
+              Answer: **is MongoDB healthy?** Elastic **MongoDB** integration `mongodb.status` + `mongodb.replstatus` (also Atlas/OTel Streams).
+
+              ## How to read it
+              1. **Service scorecards** — replication lag (ms) by service (HOT ≥ 5000, WATCH ≥ 1000).
+              2. **Data path** — Mongo → Fleet MongoDB integration → metrics-mongodb.* / Streams.
+              3. **KPI strip** — connections, resident memory MB, query ops, lag.
+              4. **Trend** — connections by service.
+
+              ## What healthy looks like
+              Lag near zero. Connections stable. Ops track traffic without memory cliffs.
+
+              ## Day-one next steps
+              1. HOT lag → secondary / network / write pressure (`mongodb.replstatus.lag.max`).
+              2. Empty board → seed or confirm MongoDB integration Stream.
+              3. Owned by **`db-monitoring-auto-dashboards`**.
+
+              ## Related alerts & workflows
+              - Workflow **`db-monitoring-auto-dashboards`** (hourly) keeps this board present when data is live.
+              - Empty boards → install the matching Elastic database integration (or EDOT receiver).
+              - Works with Fleet Integrations, EDOT OTel receivers, or any Stream carrying these datasets.
+              - Broken panels → **`broken-widget-hunter`** Case + auto-fix.
+
+              _Managed by db-monitoring-auto-dashboards_
+        - id: mongo-flow
+          type: custom_content
+          grid:
+            x: 0
+            y: 11
+            w: 48
+            h: 6
+          config:
+            title: MongoDB → Elastic Integration / Stream → Elastic
+            template: |2
+
+              <style>
+                .flow {
+                  display: flex; align-items: center; justify-content: space-between;
+                  gap: var(--cc-space-m); padding: var(--cc-space-m);
+                  background: var(--cc-color-surface); border-radius: var(--cc-radius);
+                  border: 1px solid var(--cc-color-border);
+                }
+                .col { flex: 1; text-align: center; }
+                .label {
+                  font-size: 0.7rem; letter-spacing: 0.08em; text-transform: uppercase;
+                  opacity: 0.65; margin-bottom: var(--cc-space-s);
+                }
+                .node {
+                  display: inline-block; padding: var(--cc-space-s) var(--cc-space-m);
+                  background: var(--cc-color-background); border: 1px solid var(--cc-color-border);
+                  border-radius: var(--cc-radius-s); font-weight: 600; font-size: 0.9rem;
+                }
+                .node.accent { border-color: var(--cc-vis-0); box-shadow: 0 0 0 1px var(--cc-vis-0); }
+                .arrow { opacity: 0.45; font-size: 1.4rem; }
+                .sub { margin-top: var(--cc-space-xs); font-size: 0.75rem; opacity: 0.65; }
+              </style>
+              <div class="flow">
+                <div class="col">
+                  <div class="label">DB signals</div>
+                  <div class="node">MongoDB</div>
+                  <div class="sub">status · replstatus · metrics · dbstats</div>
+                </div>
+                <div class="arrow">→</div>
+                <div class="col">
+                  <div class="label">Edge</div>
+                  <div class="node accent">EDOT / OTLP</div>
+                  <div class="sub">Fleet / EDOT / Stream</div>
+                </div>
+                <div class="arrow">→</div>
+                <div class="col">
+                  <div class="label">Observability</div>
+                  <div class="node">Elastic Observability</div>
+                  <div class="sub">metrics-mongodb.* · Auto: DB</div>
+                </div>
+              </div>
+        - id: mongo-cards
+          type: custom_content
+          grid:
+            x: 0
+            y: 17
+            w: 48
+            h: 9
+          config:
+            title: Replication lag scorecards
+            template: |2
+
+              <style>
+                .board { display: flex; gap: var(--cc-space-m); flex-wrap: wrap; }
+                .card {
+                  flex: 1; min-width: 160px;
+                  background: var(--cc-color-surface);
+                  border: 1px solid var(--cc-color-border);
+                  border-left: 4px solid var(--cc-vis-0);
+                  border-radius: var(--cc-radius);
+                  padding: var(--cc-space-m);
+                }
+                .card.bad { border-left-color: var(--cc-color-danger); }
+                .card.warn { border-left-color: var(--cc-color-warning); }
+                .name { font-weight: 600; font-size: 0.95rem; margin-bottom: var(--cc-space-xs); word-break: break-all; }
+                .pct { font-size: 2.1rem; line-height: 1.1; font-weight: 700; letter-spacing: -0.02em; }
+                .meta { opacity: 0.7; font-size: 0.85rem; margin-top: var(--cc-space-xs); }
+                .badge {
+                  display: inline-block; margin-top: var(--cc-space-s);
+                  padding: 2px 10px; border-radius: var(--cc-radius-s);
+                  background: var(--cc-vis-0); color: var(--cc-color-background);
+                  font-size: 0.72rem; font-weight: 700; letter-spacing: 0.04em;
+                }
+                .badge.bad { background: var(--cc-color-danger); }
+                .badge.warn { background: var(--cc-color-warning); color: var(--cc-color-background); }
+                .empty { opacity: 0.65; padding: var(--cc-space-l); }
+              </style>
+
+              {{ "{% if rows.size == 0 %}" }}
+                <p class="empty">No MongoDB samples in range.</p>
+              {{ "{% else %}" }}
+              <div class="board">
+              {{ "{% for row in rows %}" }}
+                <div class="card {{ '{% if row["lag"].value >= 5000 %}' }}bad{{ '{% elsif row["lag"].value >= 1000 %}' }}warn{{ "{% endif %}" }}">
+                  <div class="name">{{ "{{ row[\"svc\"].value }}" }}</div>
+                  <div class="pct">{{ "{{ row[\"lag\"].value }}" }} ms</div>
+                  <div class="meta">{{ "{{ row[\"conns\"].value }}" }} conns · {{ "{{ row[\"samples\"].value }}" }} samples</div>
+                  <span class="badge {{ '{% if row["lag"].value >= 5000 %}' }}bad{{ '{% elsif row["lag"].value >= 1000 %}' }}warn{{ "{% endif %}" }}">
+                    {{ '{% if row["lag"].value >= 5000 %}' }}HOT{{ '{% elsif row["lag"].value >= 1000 %}' }}WATCH{{ "{% else %}" }}OK{{ "{% endif %}" }}
+                  </span>
+                </div>
+              {{ "{% endfor %}" }}
+              </div>
+              {{ "{% endif %}" }}
+            esql_query:
+            - |
+              FROM metrics-*
+              | WHERE @timestamp >= ?_tstart AND @timestamp <= ?_tend
+                  AND data_stream.dataset LIKE "*mongo*"
+              | STATS lag = ROUND(MAX(`mongodb.replstatus.lag.max`), 2),
+                      conns = MAX(`mongodb.status.connections.current`),
+                      samples = COUNT(*)
+                  BY svc = COALESCE(service.name, host.name, "unknown")
+              | WHERE samples > 0
+              | SORT lag DESC
+              | LIMIT 12
+        - type: vis
+          id: mongo-m-conn
+          grid:
+            x: 0
+            y: 26
+            w: 12
+            h: 5
+          config:
+            type: metric
+            title: Active Connections
+            data_source:
+              type: esql
+              query: |-
+                FROM metrics-*
+                | WHERE data_stream.dataset LIKE "*mongo*"
+                | WHERE `mongodb.status.connections.current` IS NOT NULL
+                | STATS `Active Connections` = MAX(`mongodb.status.connections.current`)
+            metrics:
+            - type: primary
+              column: Active Connections
+              label: Active Connections
+        - type: vis
+          id: mongo-m-mem
+          grid:
+            x: 12
+            y: 26
+            w: 12
+            h: 5
+          config:
+            type: metric
+            title: Memory (MB)
+            data_source:
+              type: esql
+              query: |-
+                FROM metrics-*
+                | WHERE data_stream.dataset LIKE "*mongo*"
+                | WHERE `mongodb.status.memory.resident.mb` IS NOT NULL
+                | STATS `Memory (MB)` = MAX(`mongodb.status.memory.resident.mb`)
+            metrics:
+            - type: primary
+              column: Memory (MB)
+              label: Memory (MB)
+        - type: vis
+          id: mongo-m-ops
+          grid:
+            x: 24
+            y: 26
+            w: 12
+            h: 5
+          config:
+            type: metric
+            title: Query Ops
+            data_source:
+              type: esql
+              query: |-
+                FROM metrics-*
+                | WHERE data_stream.dataset LIKE "*mongo*"
+                | WHERE `mongodb.status.opcounters.query` IS NOT NULL
+                | STATS `Query Ops` = MAX(`mongodb.status.opcounters.query`)
+            metrics:
+            - type: primary
+              column: Query Ops
+              label: Query Ops
+        - type: vis
+          id: mongo-m-lag
+          grid:
+            x: 36
+            y: 26
+            w: 12
+            h: 5
+          config:
+            type: metric
+            title: Replication Lag
+            data_source:
+              type: esql
+              query: |-
+                FROM metrics-*
+                | WHERE data_stream.dataset LIKE "*mongo*"
+                | WHERE `mongodb.replstatus.lag.max` IS NOT NULL
+                | STATS `Replication Lag` = MAX(`mongodb.replstatus.lag.max`)
+            metrics:
+            - type: primary
+              column: Replication Lag
+              label: Replication Lag
+        - type: vis
+          id: mongo-xy-conn
+          grid:
+            x: 0
+            y: 31
+            w: 48
+            h: 12
+          config:
+            type: xy
+            title: Connections by service
+            legend:
+              visibility: visible
+              placement: outside
+              position: bottom
+            styling:
+              points:
+                visibility: hidden
+              interpolation: linear
+            axis:
+              x:
+                title:
+                  visible: false
+                grid:
+                  visible: false
+              y:
+                title:
+                  visible: true
+                grid:
+                  visible: true
+            layers:
+            - type: line
+              data_source:
+                type: esql
+                query: |-
+                  FROM metrics-*
+                  | WHERE data_stream.dataset LIKE "*mongo*"
+                  | WHERE `mongodb.status.connections.current` IS NOT NULL
+                  | STATS `conns` = MAX(`mongodb.status.connections.current`) BY time_bucket = BUCKET(@timestamp, 75, ?_tstart, ?_tend), `service.name`
+                  | WHERE `service.name` IS NOT NULL
+                  | SORT time_bucket ASC
+              x:
+                column: time_bucket
+              y:
+              - column: conns
+              breakdown_by:
+                column: service.name
+
+  - name: detect_oracle
+    type: elasticsearch.esql.query
+    on-failure:
+      continue: true
+    with:
+      format: json
+      query: |
+        FROM metrics-*
+        | WHERE @timestamp > NOW() - 7 days AND (data_stream.dataset LIKE "*oracle*")
+        | STATS docs = COUNT(*)
+
+  - name: get_oracle
+    type: kibana.request
+    if: "steps.detect_oracle.output.values.0.0 > 0"
+    on-failure:
+      continue: true
+    with:
+      method: GET
+      path: /api/dashboards/auto-dbmon-oracle
+      headers:
+        Elastic-Api-Version: "2023-10-31"
+
+  - name: upsert_oracle
+    type: kibana.request
+    if: "steps.detect_oracle.output.values.0.0 > 0 and steps.get_oracle.error.message: HTTP*404*"
+    on-failure:
+      continue: true
+    with:
+      method: PUT
+      path: /api/dashboards/auto-dbmon-oracle
+      headers:
+        Elastic-Api-Version: "2023-10-31"
+      body:
+        title: 'Auto: DB Oracle — Performance & Health'
+        description: Auto-ops DB — Oracle briefing, session scorecards, TS charts (Elastic Integration + Streams).
+        time_range:
+          from: now-2h
+          to: now
+        options:
+          auto_apply_filters: true
+          hide_panel_titles: false
+          hide_panel_borders: false
+          use_margins: true
+          sync_colors: true
+          sync_tooltips: true
+          sync_cursor: true
+        filters: []
+        tags:
+        - auto
+        - auto-ops
+        - db-monitoring
+        pinned_panels: []
+        panels:
+        - id: oracle-briefing
+          type: markdown
+          grid:
+            x: 0
+            y: 0
+            w: 48
+            h: 11
+          config:
+            title: SRE day-one briefing
+            content: |
+              ## Purpose
+              Answer: **is Oracle healthy?** Elastic **Oracle** integration `oracle.performance` (also OTel `oracledbreceiver` Streams).
+
+              ## How to read it
+              1. **Service scorecards** — active sessions (HOT ≥ 80, WATCH ≥ 40).
+              2. **Data path** — Oracle → Fleet Oracle integration → metrics-oracle.performance-* / Streams.
+              3. **KPI strip** — sessions, open cursors, physical reads, buffer hit %.
+              4. **Trend** — sessions by service.
+
+              ## What healthy looks like
+              Sessions well under limits. Buffer hit high. Reads track load without cliffs.
+
+              ## Day-one next steps
+              1. HOT sessions → connection storms / idle session cleanup.
+              2. Owned by **`db-monitoring-auto-dashboards`**.
+
+              ## Related alerts & workflows
+              - Workflow **`db-monitoring-auto-dashboards`** (hourly) keeps this board present when data is live.
+              - Empty boards → install the matching Elastic database integration (or EDOT receiver).
+              - Works with Fleet Integrations, EDOT OTel receivers, or any Stream carrying these datasets.
+              - Broken panels → **`broken-widget-hunter`** Case + auto-fix.
+
+              _Managed by db-monitoring-auto-dashboards_
+        - id: oracle-flow
+          type: custom_content
+          grid:
+            x: 0
+            y: 11
+            w: 48
+            h: 6
+          config:
+            title: Oracle → Elastic Integration / Stream → Elastic
+            template: |2
+
+              <style>
+                .flow {
+                  display: flex; align-items: center; justify-content: space-between;
+                  gap: var(--cc-space-m); padding: var(--cc-space-m);
+                  background: var(--cc-color-surface); border-radius: var(--cc-radius);
+                  border: 1px solid var(--cc-color-border);
+                }
+                .col { flex: 1; text-align: center; }
+                .label {
+                  font-size: 0.7rem; letter-spacing: 0.08em; text-transform: uppercase;
+                  opacity: 0.65; margin-bottom: var(--cc-space-s);
+                }
+                .node {
+                  display: inline-block; padding: var(--cc-space-s) var(--cc-space-m);
+                  background: var(--cc-color-background); border: 1px solid var(--cc-color-border);
+                  border-radius: var(--cc-radius-s); font-weight: 600; font-size: 0.9rem;
+                }
+                .node.accent { border-color: var(--cc-vis-0); box-shadow: 0 0 0 1px var(--cc-vis-0); }
+                .arrow { opacity: 0.45; font-size: 1.4rem; }
+                .sub { margin-top: var(--cc-space-xs); font-size: 0.75rem; opacity: 0.65; }
+              </style>
+              <div class="flow">
+                <div class="col">
+                  <div class="label">DB signals</div>
+                  <div class="node">Oracle</div>
+                  <div class="sub">performance · tablespace · memory</div>
+                </div>
+                <div class="arrow">→</div>
+                <div class="col">
+                  <div class="label">Edge</div>
+                  <div class="node accent">EDOT / OTLP</div>
+                  <div class="sub">Fleet / EDOT / Stream</div>
+                </div>
+                <div class="arrow">→</div>
+                <div class="col">
+                  <div class="label">Observability</div>
+                  <div class="node">Elastic Observability</div>
+                  <div class="sub">metrics-oracle.* · Auto: DB</div>
+                </div>
+              </div>
+        - id: oracle-cards
+          type: custom_content
+          grid:
+            x: 0
+            y: 17
+            w: 48
+            h: 9
+          config:
+            title: Session scorecards
+            template: |2
+
+              <style>
+                .board { display: flex; gap: var(--cc-space-m); flex-wrap: wrap; }
+                .card {
+                  flex: 1; min-width: 160px;
+                  background: var(--cc-color-surface);
+                  border: 1px solid var(--cc-color-border);
+                  border-left: 4px solid var(--cc-vis-0);
+                  border-radius: var(--cc-radius);
+                  padding: var(--cc-space-m);
+                }
+                .card.bad { border-left-color: var(--cc-color-danger); }
+                .card.warn { border-left-color: var(--cc-color-warning); }
+                .name { font-weight: 600; font-size: 0.95rem; margin-bottom: var(--cc-space-xs); word-break: break-all; }
+                .pct { font-size: 2.1rem; line-height: 1.1; font-weight: 700; letter-spacing: -0.02em; }
+                .meta { opacity: 0.7; font-size: 0.85rem; margin-top: var(--cc-space-xs); }
+                .badge {
+                  display: inline-block; margin-top: var(--cc-space-s);
+                  padding: 2px 10px; border-radius: var(--cc-radius-s);
+                  background: var(--cc-vis-0); color: var(--cc-color-background);
+                  font-size: 0.72rem; font-weight: 700; letter-spacing: 0.04em;
+                }
+                .badge.bad { background: var(--cc-color-danger); }
+                .badge.warn { background: var(--cc-color-warning); color: var(--cc-color-background); }
+                .empty { opacity: 0.65; padding: var(--cc-space-l); }
+              </style>
+
+              {{ "{% if rows.size == 0 %}" }}
+                <p class="empty">No Oracle samples in range.</p>
+              {{ "{% else %}" }}
+              <div class="board">
+              {{ "{% for row in rows %}" }}
+                <div class="card {{ '{% if row["sessions"].value >= 80 %}' }}bad{{ '{% elsif row["sessions"].value >= 40 %}' }}warn{{ "{% endif %}" }}">
+                  <div class="name">{{ "{{ row[\"svc\"].value }}" }}</div>
+                  <div class="pct">{{ "{{ row[\"sessions\"].value }}" }}</div>
+                  <div class="meta">{{ "{{ row[\"procs\"].value }}" }} cursors · {{ "{{ row[\"samples\"].value }}" }} samples</div>
+                  <span class="badge {{ '{% if row["sessions"].value >= 80 %}' }}bad{{ '{% elsif row["sessions"].value >= 40 %}' }}warn{{ "{% endif %}" }}">
+                    {{ '{% if row["sessions"].value >= 80 %}' }}HOT{{ '{% elsif row["sessions"].value >= 40 %}' }}WATCH{{ "{% else %}" }}OK{{ "{% endif %}" }}
+                  </span>
+                </div>
+              {{ "{% endfor %}" }}
+              </div>
+              {{ "{% endif %}" }}
+            esql_query:
+            - |
+              FROM metrics-*
+              | WHERE @timestamp >= ?_tstart AND @timestamp <= ?_tend
+                  AND data_stream.dataset LIKE "*oracle*"
+              | STATS sessions = MAX(`oracle.performance.session_count.active`),
+                      procs = MAX(`oracle.performance.cursors.opened.current`),
+                      samples = COUNT(*)
+                  BY svc = COALESCE(service.name, host.name, "unknown")
+              | WHERE samples > 0
+              | SORT sessions DESC
+              | LIMIT 12
+        - type: vis
+          id: ora-m-sess
+          grid:
+            x: 0
+            y: 26
+            w: 12
+            h: 5
+          config:
+            type: metric
+            title: Sessions
+            data_source:
+              type: esql
+              query: |-
+                FROM metrics-*
+                | WHERE data_stream.dataset LIKE "*oracle*"
+                | WHERE `oracle.performance.session_count.active` IS NOT NULL
+                | STATS `Sessions` = MAX(`oracle.performance.session_count.active`)
+            metrics:
+            - type: primary
+              column: Sessions
+              label: Sessions
+        - type: vis
+          id: ora-m-proc
+          grid:
+            x: 12
+            y: 26
+            w: 12
+            h: 5
+          config:
+            type: metric
+            title: Open Cursors
+            data_source:
+              type: esql
+              query: |-
+                FROM metrics-*
+                | WHERE data_stream.dataset LIKE "*oracle*"
+                | WHERE `oracle.performance.cursors.opened.current` IS NOT NULL
+                | STATS `Open Cursors` = MAX(`oracle.performance.cursors.opened.current`)
+            metrics:
+            - type: primary
+              column: Open Cursors
+              label: Open Cursors
+        - type: vis
+          id: ora-m-read
+          grid:
+            x: 24
+            y: 26
+            w: 12
+            h: 5
+          config:
+            type: metric
+            title: Physical Reads
+            data_source:
+              type: esql
+              query: |-
+                FROM metrics-*
+                | WHERE data_stream.dataset LIKE "*oracle*"
+                | WHERE `oracle.performance.cache.physical_reads` IS NOT NULL
+                | STATS `Physical Reads` = MAX(`oracle.performance.cache.physical_reads`)
+            metrics:
+            - type: primary
+              column: Physical Reads
+              label: Physical Reads
+        - type: vis
+          id: ora-m-hit
+          grid:
+            x: 36
+            y: 26
+            w: 12
+            h: 5
+          config:
+            type: metric
+            title: Buffer Hit %
+            data_source:
+              type: esql
+              query: |-
+                FROM metrics-*
+                | WHERE data_stream.dataset LIKE "*oracle*"
+                | WHERE `oracle.performance.cache.buffer.hit.pct` IS NOT NULL
+                | STATS `Buffer Hit %` = MAX(`oracle.performance.cache.buffer.hit.pct`)
+            metrics:
+            - type: primary
+              column: Buffer Hit %
+              label: Buffer Hit %
+        - type: vis
+          id: ora-xy-sess
+          grid:
+            x: 0
+            y: 31
+            w: 48
+            h: 12
+          config:
+            type: xy
+            title: Sessions over time
+            legend:
+              visibility: visible
+              placement: outside
+              position: bottom
+            styling:
+              points:
+                visibility: hidden
+              interpolation: linear
+              areas:
+                fill_opacity: 0.55
+                fill: gradient
+            axis:
+              x:
+                title:
+                  visible: false
+                grid:
+                  visible: false
+              y:
+                title:
+                  visible: true
+                grid:
+                  visible: true
+            layers:
+            - type: area
+              data_source:
+                type: esql
+                query: |-
+                  FROM metrics-*
+                  | WHERE data_stream.dataset LIKE "*oracle*"
+                  | WHERE `oracle.performance.session_count.active` IS NOT NULL
+                  | STATS `sessions` = MAX(`oracle.performance.session_count.active`) BY time_bucket = BUCKET(@timestamp, 75, ?_tstart, ?_tend), `service.name`
+                  | WHERE `service.name` IS NOT NULL
+                  | SORT time_bucket ASC
+              x:
+                column: time_bucket
+              y:
+              - column: sessions
+              breakdown_by:
+                column: service.name
+
+  - name: detect_db2
+    type: elasticsearch.esql.query
+    on-failure:
+      continue: true
+    with:
+      format: json
+      query: |
+        FROM metrics-*
+        | WHERE @timestamp > NOW() - 7 days AND (data_stream.dataset LIKE "*db2*")
+        | STATS docs = COUNT(*)
+
+  - name: get_db2
+    type: kibana.request
+    if: "steps.detect_db2.output.values.0.0 > 0"
+    on-failure:
+      continue: true
+    with:
+      method: GET
+      path: /api/dashboards/auto-dbmon-db2
+      headers:
+        Elastic-Api-Version: "2023-10-31"
+
+  - name: upsert_db2
+    type: kibana.request
+    if: "steps.detect_db2.output.values.0.0 > 0 and steps.get_db2.error.message: HTTP*404*"
+    on-failure:
+      continue: true
+    with:
+      method: PUT
+      path: /api/dashboards/auto-dbmon-db2
+      headers:
+        Elastic-Api-Version: "2023-10-31"
+      body:
+        title: 'Auto: DB IBM Db2 — Performance & Health'
+        description: Auto-ops DB — Db2 briefing, hit-ratio scorecards, TS charts (Streams).
+        time_range:
+          from: now-2h
+          to: now
+        options:
+          auto_apply_filters: true
+          hide_panel_titles: false
+          hide_panel_borders: false
+          use_margins: true
+          sync_colors: true
+          sync_tooltips: true
+          sync_cursor: true
+        filters: []
+        tags:
+        - auto
+        - auto-ops
+        - db-monitoring
+        pinned_panels: []
+        panels:
+        - id: db2-briefing
+          type: markdown
+          grid:
+            x: 0
+            y: 0
+            w: 48
+            h: 11
+          config:
+            title: SRE day-one briefing
+            content: |
+              ## Purpose
+              Answer: **is IBM Db2 healthy?** Active connections, buffer pool hit ratio, log utilization, and lock waits from `db2.*` metrics Streams (demo seed: `db2.metrics`).
+
+              ## How to read it
+              1. **Service scorecards** — buffer pool hit ratio (HOT < 0.90, WATCH < 0.95).
+              2. **Data path** — Db2 → metrics Stream (`db2.metrics` / `*db2*`) → Elastic.
+              3. **KPI strip** — connections, hit ratio, log util %, lock wait.
+              4. **Trend** — connections by service.
+
+              ## What healthy looks like
+              Hit ratio ≥ 0.95. Log util moderate. Lock waits low.
+
+              ## Day-one next steps
+              1. HOT hit ratio → buffer pool sizing / scan-heavy workload.
+              2. Empty → install the Elastic Db2 integration (dataset `metrics-db2.metrics-default`).
+              3. Owned by **`db-monitoring-auto-dashboards`**.
+
+              ## Related alerts & workflows
+              - Workflow **`db-monitoring-auto-dashboards`** (hourly) keeps this board present when data is live.
+              - Empty boards → install the matching Elastic database integration (or EDOT receiver).
+              - Works with Fleet Integrations, EDOT OTel receivers, or any Stream carrying these datasets.
+              - Broken panels → **`broken-widget-hunter`** Case + auto-fix.
+
+              _Managed by db-monitoring-auto-dashboards_
+        - id: db2-flow
+          type: custom_content
+          grid:
+            x: 0
+            y: 11
+            w: 48
+            h: 6
+          config:
+            title: IBM Db2 → metrics Stream → Elastic
+            template: |2
+
+              <style>
+                .flow {
+                  display: flex; align-items: center; justify-content: space-between;
+                  gap: var(--cc-space-m); padding: var(--cc-space-m);
+                  background: var(--cc-color-surface); border-radius: var(--cc-radius);
+                  border: 1px solid var(--cc-color-border);
+                }
+                .col { flex: 1; text-align: center; }
+                .label {
+                  font-size: 0.7rem; letter-spacing: 0.08em; text-transform: uppercase;
+                  opacity: 0.65; margin-bottom: var(--cc-space-s);
+                }
+                .node {
+                  display: inline-block; padding: var(--cc-space-s) var(--cc-space-m);
+                  background: var(--cc-color-background); border: 1px solid var(--cc-color-border);
+                  border-radius: var(--cc-radius-s); font-weight: 600; font-size: 0.9rem;
+                }
+                .node.accent { border-color: var(--cc-vis-0); box-shadow: 0 0 0 1px var(--cc-vis-0); }
+                .arrow { opacity: 0.45; font-size: 1.4rem; }
+                .sub { margin-top: var(--cc-space-xs); font-size: 0.75rem; opacity: 0.65; }
+              </style>
+              <div class="flow">
+                <div class="col">
+                  <div class="label">DB signals</div>
+                  <div class="node">IBM Db2</div>
+                  <div class="sub">connections · bufferpool · log · locks</div>
+                </div>
+                <div class="arrow">→</div>
+                <div class="col">
+                  <div class="label">Edge</div>
+                  <div class="node accent">EDOT / OTLP</div>
+                  <div class="sub">Stream / seed</div>
+                </div>
+                <div class="arrow">→</div>
+                <div class="col">
+                  <div class="label">Observability</div>
+                  <div class="node">Elastic Observability</div>
+                  <div class="sub">metrics-db2.metrics-* · Auto: DB</div>
+                </div>
+              </div>
+        - id: db2-cards
+          type: custom_content
+          grid:
+            x: 0
+            y: 17
+            w: 48
+            h: 9
+          config:
+            title: Buffer pool hit-ratio scorecards
+            template: |2
+
+              <style>
+                .board { display: flex; gap: var(--cc-space-m); flex-wrap: wrap; }
+                .card {
+                  flex: 1; min-width: 160px;
+                  background: var(--cc-color-surface);
+                  border: 1px solid var(--cc-color-border);
+                  border-left: 4px solid var(--cc-vis-0);
+                  border-radius: var(--cc-radius);
+                  padding: var(--cc-space-m);
+                }
+                .card.bad { border-left-color: var(--cc-color-danger); }
+                .card.warn { border-left-color: var(--cc-color-warning); }
+                .name { font-weight: 600; font-size: 0.95rem; margin-bottom: var(--cc-space-xs); word-break: break-all; }
+                .pct { font-size: 2.1rem; line-height: 1.1; font-weight: 700; letter-spacing: -0.02em; }
+                .meta { opacity: 0.7; font-size: 0.85rem; margin-top: var(--cc-space-xs); }
+                .badge {
+                  display: inline-block; margin-top: var(--cc-space-s);
+                  padding: 2px 10px; border-radius: var(--cc-radius-s);
+                  background: var(--cc-vis-0); color: var(--cc-color-background);
+                  font-size: 0.72rem; font-weight: 700; letter-spacing: 0.04em;
+                }
+                .badge.bad { background: var(--cc-color-danger); }
+                .badge.warn { background: var(--cc-color-warning); color: var(--cc-color-background); }
+                .empty { opacity: 0.65; padding: var(--cc-space-l); }
+              </style>
+
+              {{ "{% if rows.size == 0 %}" }}
+                <p class="empty">No Db2 samples in range — install the Elastic Db2 integration.</p>
+              {{ "{% else %}" }}
+              <div class="board">
+              {{ "{% for row in rows %}" }}
+                <div class="card {{ '{% if row["hit"].value < 0.9 %}' }}bad{{ '{% elsif row["hit"].value < 0.95 %}' }}warn{{ "{% endif %}" }}">
+                  <div class="name">{{ "{{ row[\"svc\"].value }}" }}</div>
+                  <div class="pct">{{ "{{ row[\"hit\"].value }}" }}</div>
+                  <div class="meta">{{ "{{ row[\"conns\"].value }}" }} conns · log {{ "{{ row[\"log_pct\"].value }}" }}% · {{ "{{ row[\"samples\"].value }}" }} samples</div>
+                  <span class="badge {{ '{% if row["hit"].value < 0.9 %}' }}bad{{ '{% elsif row["hit"].value < 0.95 %}' }}warn{{ "{% endif %}" }}">
+                    {{ '{% if row["hit"].value < 0.9 %}' }}HOT{{ '{% elsif row["hit"].value < 0.95 %}' }}WATCH{{ "{% else %}" }}OK{{ "{% endif %}" }}
+                  </span>
+                </div>
+              {{ "{% endfor %}" }}
+              </div>
+              {{ "{% endif %}" }}
+            esql_query:
+            - |
+              FROM metrics-*
+              | WHERE @timestamp >= ?_tstart AND @timestamp <= ?_tend
+                  AND data_stream.dataset LIKE "*db2*"
+              | STATS hit = ROUND(MAX(`db2.bufferpool.hit_ratio`), 3),
+                      conns = MAX(`db2.connection.active`),
+                      log_pct = ROUND(MAX(`db2.log.utilization`), 1),
+                      samples = COUNT(*)
+                  BY svc = COALESCE(service.name, host.name, "unknown")
+              | WHERE samples > 0
+              | SORT hit ASC
+              | LIMIT 12
+        - type: vis
+          id: db2-m-conn
+          grid:
+            x: 0
+            y: 26
+            w: 12
+            h: 5
+          config:
+            type: metric
+            title: Active connections
+            data_source:
+              type: esql
+              query: |-
+                FROM metrics-*
+                | WHERE data_stream.dataset LIKE "*db2*"
+                | WHERE `db2.connection.active` IS NOT NULL
+                | STATS `Active connections` = MAX(`db2.connection.active`)
+            metrics:
+            - type: primary
+              column: Active connections
+              label: Active connections
+        - type: vis
+          id: db2-m-hit
+          grid:
+            x: 12
+            y: 26
+            w: 12
+            h: 5
+          config:
+            type: metric
+            title: Hit ratio
+            data_source:
+              type: esql
+              query: |-
+                FROM metrics-*
+                | WHERE data_stream.dataset LIKE "*db2*"
+                | WHERE `db2.bufferpool.hit_ratio` IS NOT NULL
+                | STATS `Hit ratio` = MAX(`db2.bufferpool.hit_ratio`)
+            metrics:
+            - type: primary
+              column: Hit ratio
+              label: Hit ratio
+        - type: vis
+          id: db2-m-log
+          grid:
+            x: 24
+            y: 26
+            w: 12
+            h: 5
+          config:
+            type: metric
+            title: Log util %
+            data_source:
+              type: esql
+              query: |-
+                FROM metrics-*
+                | WHERE data_stream.dataset LIKE "*db2*"
+                | WHERE `db2.log.utilization` IS NOT NULL
+                | STATS `Log util %` = MAX(`db2.log.utilization`)
+            metrics:
+            - type: primary
+              column: Log util %
+              label: Log util %
+        - type: vis
+          id: db2-m-lock
+          grid:
+            x: 36
+            y: 26
+            w: 12
+            h: 5
+          config:
+            type: metric
+            title: Lock wait ms
+            data_source:
+              type: esql
+              query: |-
+                FROM metrics-*
+                | WHERE data_stream.dataset LIKE "*db2*"
+                | WHERE `db2.lock.wait_time.avg` IS NOT NULL
+                | STATS `Lock wait ms` = MAX(`db2.lock.wait_time.avg`)
+            metrics:
+            - type: primary
+              column: Lock wait ms
+              label: Lock wait ms
+        - type: vis
+          id: db2-xy-conn
+          grid:
+            x: 0
+            y: 31
+            w: 48
+            h: 12
+          config:
+            type: xy
+            title: Active connections by service
+            legend:
+              visibility: visible
+              placement: outside
+              position: bottom
+            styling:
+              points:
+                visibility: hidden
+              interpolation: linear
+              areas:
+                fill_opacity: 0.55
+                fill: gradient
+            axis:
+              x:
+                title:
+                  visible: false
+                grid:
+                  visible: false
+              y:
+                title:
+                  visible: true
+                grid:
+                  visible: true
+            layers:
+            - type: area
+              data_source:
+                type: esql
+                query: |-
+                  FROM metrics-*
+                  | WHERE data_stream.dataset LIKE "*db2*"
+                  | WHERE `db2.connection.active` IS NOT NULL
+                  | STATS `conns` = MAX(`db2.connection.active`) BY time_bucket = BUCKET(@timestamp, 75, ?_tstart, ?_tend), `service.name`
+                  | WHERE `service.name` IS NOT NULL
+                  | SORT time_bucket ASC
+              x:
+                column: time_bucket
+              y:
+              - column: conns
+              breakdown_by:
+                column: service.name
+
+  - name: log_summary
+    type: console
+    with:
+      message: |
+        DB Monitoring Auto-ops complete (telemetry-gated upserts).
+        Inventory (7d): {{ steps.detect_db_inventory.output.values | json }}
+        Fixed ids: auto-dbmon-{postgresql,redis,mysql,sqlserver,sqlserver-overview,mongodb,oracle,db2}
