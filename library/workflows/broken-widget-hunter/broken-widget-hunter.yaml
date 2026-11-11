@@ -1,12 +1,14 @@
 template-metadata:
   slug: broken-widget-hunter
-  version: "1.2.0"
+  version: "1.3.0"
   availability: ">=9.6.0"
   name: "Broken widget hunter"
   description: >-
-    Scan dashboards for broken ES|QL widgets (unknown columns / indexes) and keep
-    a single Observability Case honest with findings. Read-only — does not rewrite
-    or delete dashboards the workflow does not own.
+    Scan dashboards for broken ES|QL widgets (unknown columns / indexes), including
+    Managed Audit / Windows packs, and keep a single Observability Case honest.
+    Read-only — does not rewrite or delete dashboards (product Template Library
+    does not own user saved objects). For prune of fully-broken Managed packs
+    ([Audit] @timestamp, etc.) use the Nightshift / next-gen-o11y hunter.
   solutions: [observability]
   categories: [monitoring, case-management, ai-agent]
   install:
@@ -36,9 +38,10 @@ template-metadata:
 
 name: Broken widget hunter
 description: >
-  Hourly (and on demand): scan dashboards for broken ES|QL widgets and keep an
-  Observability Case honest with findings. Read-only — no panel rewrites or
-  dashboard deletes.
+  Hourly (and on demand): scan dashboards for broken ES|QL widgets (including
+  Managed Audit / Windows packs) and keep an Observability Case honest.
+  Read-only — no panel rewrites or dashboard deletes. Prune belongs in the
+  Nightshift / next-gen-o11y broken-widget-hunter pack.
 enabled: true
 tags:
   - auto-ops
@@ -59,7 +62,7 @@ consts:
   agent_id: __install__.agent-id
   metrics_index: __install__.metrics-index
   logs_index: __install__.logs-index
-  dashboard_pages: "3"
+  dashboard_pages: "5"
   case_tags: "broken-widget,auto-ops,dashboard,gap"
 
 steps:
@@ -95,9 +98,13 @@ steps:
         You are the **Broken Widget Hunter** for Elastic Observability.
 
         Broken widgets are a poor UX when content packs ship ES|QL that drifts
-        (`Unknown column [x], did you mean [y]?`). Your job this run: **detect and
-        ticket only**. Do **not** rewrite panels, do **not** DELETE dashboards,
-        and do **not** overwrite user edits — even when a did-you-mean is obvious.
+        (`Unknown column [x], did you mean [y]?`) or target datasets this project
+        will never have (Elastic Cloud `[Audit] *` → `Unknown column [@timestamp]`).
+        Your job this run: **detect and ticket only**. Do **not** rewrite panels,
+        do **not** DELETE dashboards, and do **not** overwrite user edits — even
+        when a did-you-mean is obvious. (Product Template Library is Case-only;
+        prune of fully-broken Managed packs is the Nightshift / next-gen-o11y
+        hunter: `broken-widget-hunter.py --fix --prune`.)
 
         ## Open broken-widget Cases
         ```
@@ -108,9 +115,15 @@ steps:
         ```
         {{ steps.list_dashboards_page1.output | json }}
         ```
-        You may also call `GET /api/dashboards?page=2` if needed
-        (header `Elastic-Api-Version: 2023-10-31`). Prefer titles with `Auto:`,
-        `OTel`, or `Prometheus`. Cap at **{{ consts.dashboard_pages }}** pages.
+        Also call:
+        1. `GET /api/dashboards?page=2` … through page **{{ consts.dashboard_pages }}**
+           (header `Elastic-Api-Version: 2023-10-31`)
+        2. Classic SO finds so Managed content packs are in scope:
+           `…/_find?type=dashboard&search_fields=title&search=Audit&per_page=50`
+           `…&search=Windows`, `…&search=Logs%20System`, `…&search=Vercel`,
+           `…&search=OTel%20OR%20Auto:%20OR%20Prometheus`
+        Prefer Managed `[Audit]` / Windows / Logs System first, then Auto:/OTel.
+        Cap at **25** dashboards this run.
 
         ## Live data (context for the Case)
         Run quick ES|QL (7d) for distinct `data_stream.dataset` on
@@ -118,12 +131,13 @@ steps:
         can note whether backing data exists.
 
         ## Procedure (read-only, cost-aware)
-        1. Pick up to **15** dashboards to validate. Dedupe by id.
+        1. Pick up to **25** dashboards to validate. Dedupe by id. Prioritize Managed Audit/Windows.
         2. For each id:
            - `GET /api/dashboards/{id}` — extract ES|QL from `panels[].config`
              (`esql_query`, `layers[].data_source.query` where type=esql).
            - Also `GET /api/saved_objects/dashboard/{id}` when useful — extract
-             ES|QL strings containing `FROM` / `TS` from `attributes.panelsJSON`.
+             ES|QL strings containing `FROM` / `TS` from `attributes.panelsJSON`;
+             note `managed`.
         3. Run each distinct ES|QL via Elasticsearch `_query` / ES|QL tools. Replace
            `?_tstart`/`?_tend` with `NOW() - 24 hours` / `NOW()` when needed.
         4. Collect failures with `verification_exception`, `Unknown column`, `Unknown index`.
@@ -135,12 +149,15 @@ steps:
         - owner: observability
         - description markdown table:
           dashboard | panel | kind | error | suggested fix (advisory only) | data present?
+        - For fully-broken Managed (`[Audit] Geo & Network` etc.): suggested =
+          `PRUNE via Nightshift hunter --fix --prune` (this template cannot DELETE).
+        - For empty-but-valid Managed: suggested = `optional --prune-managed-empty`.
         - If Case exists: UPDATE description / one short comment; if zero broken: CLOSE.
 
         ## Hard rules
         - **READ-ONLY on dashboards**: no PUT/DELETE on dashboards or saved objects.
         - Do not create Universal alerts here.
-        - Skip healthy panels. Cap work at 15 dashboards this run.
+        - Skip healthy panels. Cap work at 25 dashboards; prioritize Managed Audit/Windows.
 
         ## End report
         | dashboard | panel | kind | error | suggested |
