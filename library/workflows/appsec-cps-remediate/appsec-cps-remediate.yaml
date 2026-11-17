@@ -1,12 +1,13 @@
 template-metadata:
   slug: appsec-cps-remediate
-  version: "1.0.0"
+  version: "1.1.0"
   availability: ">=9.6.0"
-  name: "AppSec CPS remediate (case housekeeping)"
+  name: "AppSec CPS remediate (Security via CPS)"
   description: >-
-    Re-check AppSec risk on open Observability Cases, attach AI remediation plans
-    via CPS Search when still elevated, and close Cases only when Critical/CVSS≥9
-    findings and exploited attacks have cleared. Pairs with appsec-cps-auto-ops.
+    Re-check open Observability AppSec Cases against Elastic Security findings
+    and alerts via CPS, attach AI remediation plans via CPS Search when still
+    elevated, and close Cases only when Critical/High risk has cleared. No seed
+    data. Pairs with appsec-cps-auto-ops.
   solutions: [observability]
   categories: [case-management, ai-agent, response]
   install:
@@ -17,16 +18,6 @@ template-metadata:
         inputType: text
         required: true
         default: "elastic-ai-agent"
-      - name: vulns-index
-        label: "AppSec vulnerabilities index"
-        inputType: esIndex
-        required: true
-        default: "appsec-vulns"
-      - name: attacks-index
-        label: "AppSec runtime attacks index"
-        inputType: esIndex
-        required: true
-        default: "appsec-attacks"
       - name: security-project-alias
         label: "CPS Security project alias"
         inputType: text
@@ -42,13 +33,19 @@ template-metadata:
         inputType: esIndex
         required: true
         default: ".alerts-security.alerts-default"
+      - name: security-vuln-index
+        label: "Security vulnerability findings index (CPS)"
+        inputType: esIndex
+        required: true
+        default: "logs-cloud_security_posture.vulnerabilities-*"
 
 name: AppSec CPS Remediate
 description: >
   Every 6 hours (and on demand): re-check AppSec risk on open Observability
-  Cases, attach AI remediation plans via CPS Search when still elevated, and
-  close Cases only when Critical/CVSS≥9 findings and exploited attacks clear.
-  Prefer CPS; no Security or Search MCP. Pairs with appsec-cps-auto-ops.
+  Cases using Elastic Security via CPS, attach AI remediation plans via CPS
+  Search when still elevated, and close Cases only when Critical/High findings
+  and critical/high alerts clear. Never seed. Prefer CPS; no Security or Search
+  MCP. Pairs with appsec-cps-auto-ops.
 enabled: true
 triggers:
   - type: manual
@@ -64,11 +61,10 @@ settings:
     max: 1
 
 consts:
-  appsec_index: __install__.vulns-index
-  attacks_index: __install__.attacks-index
   security_project_alias: __install__.security-project-alias
   search_project_alias: __install__.search-project-alias
   security_alerts_index: __install__.security-alerts-index
+  security_vuln_index: __install__.security-vuln-index
 
 steps:
   - name: list_open_appsec_cases
@@ -87,59 +83,68 @@ steps:
       headers:
         Elastic-Api-Version: "2023-10-31"
 
-  - name: critical_vuln_signals
+  - name: security_critical_vulns
     type: elasticsearch.esql.query
     on-failure:
       continue: true
     with:
       format: json
       query: |
+        SET project_routing = "_alias:{{ consts.security_project_alias }}";
         SET unmapped_fields="nullify";
-        FROM {{ consts.appsec_index }}
+        FROM {{ consts.security_vuln_index }}
         | WHERE @timestamp > NOW() - 7 days
-            AND (`vulnerability.severity` == "Critical" OR `vulnerability.score.base` >= 9.0)
+            AND (
+              `vulnerability.severity` == "CRITICAL" OR `vulnerability.severity` == "Critical"
+              OR `vulnerability.severity` == "HIGH" OR `vulnerability.severity` == "High"
+              OR `vulnerability.score.base` >= 9.0
+            )
         | STATS
             critical_findings = COUNT(*),
             packages = VALUES(`package.name`),
-            cves = VALUES(`vulnerability.id`),
-            services = VALUES(`service.name`)
+            cves = VALUES(`vulnerability.id`)
         | LIMIT 1
 
-  - name: composition_remediation_targets
+  - name: security_remediation_targets
     type: elasticsearch.esql.query
     on-failure:
       continue: true
     with:
       format: json
       query: |
+        SET project_routing = "_alias:{{ consts.security_project_alias }}";
         SET unmapped_fields="nullify";
-        FROM {{ consts.appsec_index }}
+        FROM {{ consts.security_vuln_index }}
         | WHERE @timestamp > NOW() - 7 days
-            AND `package.fixed_version` IS NOT NULL
-            AND (`vulnerability.severity` == "Critical" OR `vulnerability.severity` == "High"
-                 OR `vulnerability.score.base` >= 8.0)
+            AND `package.name` IS NOT NULL
+            AND (
+              `vulnerability.severity` == "CRITICAL" OR `vulnerability.severity` == "Critical"
+              OR `vulnerability.severity` == "HIGH" OR `vulnerability.severity` == "High"
+              OR `vulnerability.score.base` >= 8.0
+            )
         | STATS
             vuln_count = COUNT(*),
             max_cvss = MAX(`vulnerability.score.base`)
-            BY `package.name`, `package.version`, `package.fixed_version`, `service.name`
+            BY `package.name`, `package.version`, `package.fixed_version`, `vulnerability.id`
         | SORT max_cvss DESC
         | LIMIT 15
 
-  - name: exploited_attack_signals
+  - name: security_active_alerts
     type: elasticsearch.esql.query
     on-failure:
       continue: true
     with:
       format: json
       query: |
+        SET project_routing = "_alias:{{ consts.security_project_alias }}";
         SET unmapped_fields="nullify";
-        FROM {{ consts.attacks_index }}
-        | WHERE @timestamp > NOW() - 7 days
-            AND `attack.outcome` == "exploited"
+        FROM {{ consts.security_alerts_index }}
+        | WHERE @timestamp > NOW() - 24 hours
+            AND (`kibana.alert.severity` == "critical" OR `kibana.alert.severity` == "high")
         | STATS
-            exploited = COUNT(*)
-            BY `threat.technique.name`, `service.name`
-        | SORT exploited DESC
+            alerts = COUNT(*)
+            BY `kibana.alert.rule.name`, `kibana.alert.severity`, `threat.technique.name`
+        | SORT alerts DESC
         | LIMIT 20
 
   - name: remediate_or_close
@@ -149,18 +154,19 @@ steps:
     with:
       message: |
         You are housekeeping + remediating Auto-ops AppSec Observability Cases.
+        **Primary evidence is Elastic Security via CPS** — never invent findings, never seed data, never use Security or Search MCP.
 
         Open Cases (tag auto-ops — filter to security + appsec only):
         {{ steps.list_open_appsec_cases.output }}
 
-        Critical / CVSS≥9 findings still present (7d):
-        {{ steps.critical_vuln_signals.output }}
+        Critical/High / CVSS≥9 Security findings still present (7d):
+        {{ steps.security_critical_vulns.output }}
 
-        Package upgrade targets (fixed_version):
-        {{ steps.composition_remediation_targets.output }}
+        Package upgrade targets from Security findings:
+        {{ steps.security_remediation_targets.output }}
 
-        Exploited runtime attacks still present (7d):
-        {{ steps.exploited_attack_signals.output }}
+        Critical/high Security alerts still present (24h):
+        {{ steps.security_active_alerts.output }}
 
         ## Rules
         - Only touch Cases tagged **security** + **auto-ops** + **appsec**.
@@ -169,11 +175,11 @@ steps:
         ### When risk is STILL elevated
         - Leave the Case open.
         - If the Case does **not** already have a recent remediation plan comment
-          (or material package/technique changed), add **ONE** comment with a
+          (or material package/rule changed), add **ONE** comment with a
           concrete remediation plan:
           - Upgrade `package.name` from `package.version` → `package.fixed_version`
-          - Services to patch first
-          - Runtime controls for exploited `threat.technique.name`
+          - Hosts/resources to patch first
+          - Response for high/critical `kibana.alert.rule.name` / `threat.technique.name`
           - Reference dashboards: Auto: AppSec Vulnerabilities / Software Composition / Runtime Attacks
         - Do **not** spam comments every run — if a remediation plan already exists
           and nothing material changed, leave silent (`NOOP` for that Case).
@@ -185,28 +191,26 @@ steps:
         FROM *
         | WHERE _id IS NOT NULL
         | LIMIT 5
-        
         ```
         Prefer searches for CVE ids / package names from the upgrade targets.
         Fold any useful hits into the remediation comment. If empty/unavailable, continue.
 
         ### CPS Security (preferred — no Security MCP)
+        Re-check when needed:
         ```
         SET project_routing = "_alias:{{ consts.security_project_alias }}";
         FROM {{ consts.security_alerts_index }}
         | WHERE @timestamp > NOW() - 6 hours
         | STATS c = COUNT(*) BY `kibana.alert.rule.name`
         | LIMIT 10
-        
         ```
         If CPS shows fresh related alerts, prefer keep-open.
 
         ### When risk has CLEARED
         - **CLOSE** only when:
           - critical_findings ≈ 0 / absent, AND
-          - no exploited attacks in the 7d snapshot, AND
-          - no fresh correlated Security alerts for the theme (when CPS works).
-        - Close with one short resolution comment citing cleared AppSec signals (+ CPS if used).
+          - no critical/high Security alerts in the 24h snapshot.
+        - Close with one short resolution comment citing cleared Security signals (+ CPS if used).
 
         End with EXACTLY:
 
@@ -223,7 +227,7 @@ steps:
         One line: remediation hits (or `unavailable` / `empty`)
 
         ## CPS Security
-        One line: alerts seen (or `unavailable` / `empty`)
+        One line: alerts/findings seen (or `unavailable` / `empty`)
 
         ## Summary
         2–4 bullets.

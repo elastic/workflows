@@ -1,13 +1,13 @@
 template-metadata:
   slug: appsec-cps-auto-ops
-  version: "1.0.0"
+  version: "1.1.0"
   availability: ">=9.6.0"
-  name: "AppSec CPS auto-ops (dashboards, alerts, cases)"
+  name: "AppSec CPS auto-ops (Security via CPS)"
   description: >-
-    Refresh ECS AppSec findings from OTel/Prometheus telemetry, upsert Auto AppSec
-    dashboards (vulnerabilities, software composition, runtime attacks), ensure
-    Universal alerts, and run AI Case lifecycle enriched via Cross Project Search
-    (CPS) to linked Security and Search projects — never MCP.
+    Evaluate Elastic Security vulnerability findings and detection alerts via
+    Cross Project Search (CPS), upsert Auto AppSec dashboards that read those
+    Security indices, and run AI Observability Case lifecycle with CPS Search
+    remediation enrichment — never seed data, never MCP.
   solutions: [observability]
   categories: [detection, monitoring, ai-agent, case-management]
   install:
@@ -20,38 +20,6 @@ template-metadata:
         inputType: text
         required: true
         default: "elastic-ai-agent"
-      - name: vulns-index
-        label: "AppSec vulnerabilities index"
-        description: >-
-          Origin index for ECS vulnerability findings (Serverless Universal alerts
-          are origin-only). Default appsec-vulns.
-        inputType: esIndex
-        required: true
-        default: "appsec-vulns"
-      - name: libraries-index
-        label: "AppSec libraries index"
-        description: SCA-style package inventory index (default appsec-libraries).
-        inputType: esIndex
-        required: true
-        default: "appsec-libraries"
-      - name: attacks-index
-        label: "AppSec runtime attacks index"
-        description: Runtime attack events index (default appsec-attacks).
-        inputType: esIndex
-        required: true
-        default: "appsec-attacks"
-      - name: traces-index
-        label: "OTel traces index"
-        description: Traces used for service/language discovery and HTTP 5xx signals.
-        inputType: esIndex
-        required: true
-        default: "traces-generic.otel-default"
-      - name: metrics-index
-        label: "Prometheus metrics index"
-        description: Metrics used for login-failure pressure and service discovery.
-        inputType: esIndex
-        required: true
-        default: "metrics-generic.prometheus-default"
       - name: security-project-alias
         label: "CPS Security project alias"
         description: >-
@@ -70,23 +38,26 @@ template-metadata:
         default: "my-search-project*"
       - name: security-alerts-index
         label: "Security alerts index (CPS)"
-        description: Alerts index queried via CPS in the linked Security project.
+        description: Detection alerts index in the linked Security project.
         inputType: esIndex
         required: true
         default: ".alerts-security.alerts-default"
       - name: security-vuln-index
         label: "Security vulnerability findings index (CPS)"
-        description: CNVM / posture vulnerability index queried via CPS when available.
+        description: >-
+          CNVM / cloud security posture vulnerability findings index in the
+          linked Security project.
         inputType: esIndex
         required: true
         default: "logs-cloud_security_posture.vulnerabilities-*"
 
 name: AppSec CPS Auto-ops
 description: >
-  Hourly (and on demand): refresh AppSec findings from OTel + Prometheus
-  telemetry, upsert Auto AppSec dashboards, ensure Universal alerts, and run
-  AI Case lifecycle with CPS → Security + Search (never MCP).
+  Hourly (and on demand): query Elastic Security vulnerability findings and
+  detection alerts via CPS, upsert Auto AppSec dashboards against those indices,
+  and run AI Case lifecycle with CPS → Security + Search (never seed, never MCP).
 enabled: true
+
 triggers:
   - type: manual
   - type: scheduled
@@ -101,12 +72,6 @@ settings:
     max: 1
 
 consts:
-  # Install-time values (snake_case for Liquid). Edit consts after install if needed.
-  appsec_index: __install__.vulns-index
-  attacks_index: __install__.attacks-index
-  appsec_libraries_index: __install__.libraries-index
-  traces_index: __install__.traces-index
-  metrics_index: __install__.metrics-index
   security_project_alias: __install__.security-project-alias
   search_project_alias: __install__.search-project-alias
   security_alerts_index: __install__.security-alerts-index
@@ -138,224 +103,83 @@ steps:
         Elastic-Api-Version: "2023-10-31"
       body:
         name: appsec
-        description: AppSec CPS Auto-ops (vulnerabilities, composition, attacks)
+        description: AppSec CPS Auto-ops (Security findings + alerts via CPS)
         color: "#F04E98"
 
-
-  - name: seed_clock
-    type: elasticsearch.esql.query
-    with:
-      format: json
-      query: |
-        ROW x = 1
-        | EVAL ts_now = NOW()
-        | EVAL ts_1h = ts_now - 1 hour
-        | EVAL ts_1d = ts_now - 1 day
-        | EVAL ts_3d = ts_now - 3 days
-        | EVAL ts_10d = ts_now - 10 days
-        | EVAL ts_20d = ts_now - 20 days
-        | EVAL ts_2h = ts_now - 2 hours
-        | EVAL ts_6h = ts_now - 6 hours
-        | EVAL ts_12h = ts_now - 12 hours
-        | KEEP ts_now, ts_1h, ts_1d, ts_3d, ts_10d, ts_20d, ts_2h, ts_6h, ts_12h
-
-  - name: discover_otel_services
+  # --- Elastic Security evidence via CPS (no seeding) ---
+  - name: security_vuln_severity
     type: elasticsearch.esql.query
     on-failure:
       continue: true
     with:
       format: json
       query: |
-        FROM {{ consts.traces_index }}
-        | WHERE @timestamp > NOW() - 30 days
-            AND `service.name` IS NOT NULL
-            AND `service.name` != "probe"
-        | STATS spans = COUNT(*),
-                fails = COUNT(*) WHERE event.outcome == "failure"
-                    OR `http.response.status_code` >= 500
-            BY `service.name`, `telemetry.sdk.language`
-        | SORT spans DESC
-        | LIMIT 30
-
-  - name: discover_prom_login_pressure
-    type: elasticsearch.esql.query
-    on-failure:
-      continue: true
-    with:
-      format: json
-      query: |
-        FROM {{ consts.metrics_index }}
-        | WHERE @timestamp > NOW() - 6 hours
-            AND user_login_failures_total IS NOT NULL
-            AND service IS NOT NULL
-        | EVAL v = TO_DOUBLE(user_login_failures_total)
-        | STATS delta = MAX(v) - MIN(v) BY service, env
-        | WHERE delta > 0
-        | SORT delta DESC
-        | LIMIT 20
-
-  - name: discover_http5xx
-    type: elasticsearch.esql.query
-    on-failure:
-      continue: true
-    with:
-      format: json
-      query: |
-        FROM {{ consts.traces_index }}
-        | WHERE @timestamp > NOW() - 30 days
-            AND `http.response.status_code` >= 500
-        | STATS fails = COUNT(*) BY `service.name`
-        | SORT fails DESC
-        | LIMIT 20
-
-  - name: purge_old_appsec_seed
-    type: elasticsearch.request
-    on-failure:
-      continue: true
-    with:
-      method: POST
-      path: /{{ consts.appsec_index }},{{ consts.attacks_index }},{{ consts.appsec_libraries_index }}/_delete_by_query?refresh=true&conflicts=proceed
-      headers:
-        Content-Type: application/json
-      body: |
-        {"query":{"match":{"demo":"appsec-cps"}}}
-
-  - name: seed_vulnerabilities
-    type: elasticsearch.request
-    with:
-      method: POST
-      path: /{{ consts.appsec_index }}/_bulk?refresh=wait_for
-      headers:
-        Content-Type: application/x-ndjson
-      body: |
-        {"index":{"_id":"vuln-CVE-2021-44228-ad"}}
-        {"@timestamp":"{{ steps.seed_clock.output.values.0.0 }}","event":{"kind":"enrichment","category":["vulnerability"],"type":["info"],"dataset":"appsec.vuln"},"vulnerability":{"id":"CVE-2021-44228","severity":"Critical","score":{"base":10.0},"description":"Remote Code Execution","status":"Detected","first_found":"{{ steps.seed_clock.output.values.0.5 }}"},"package":{"name":"org.apache.logging.log4j:log4j-core","version":"2.14.1","fixed_version":"2.25.3","type":"jar"},"service":{"name":"otel-shop","node":{"name":"ad"}},"risk":{"score":100},"labels":{"demo":"appsec-cps","env":"prod","application":"otel-shop","telemetry_lang":"java","source_signal":"otel+prom"},"ecs":{"version":"8.11.0"},"message":"Remote Code Execution","demo":"appsec-cps","source":"kibana-workflow"}
-        {"index":{"_id":"vuln-CVE-2021-45046-ad"}}
-        {"@timestamp":"{{ steps.seed_clock.output.values.0.0 }}","event":{"kind":"enrichment","category":["vulnerability"],"type":["info"],"dataset":"appsec.vuln"},"vulnerability":{"id":"CVE-2021-45046","severity":"Critical","score":{"base":9.0},"description":"Log4j follow-on RCE","status":"Detected","first_found":"{{ steps.seed_clock.output.values.0.5 }}"},"package":{"name":"org.apache.logging.log4j:log4j-core","version":"2.14.1","fixed_version":"2.25.3","type":"jar"},"service":{"name":"otel-shop","node":{"name":"ad"}},"risk":{"score":100},"labels":{"demo":"appsec-cps","env":"prod","application":"otel-shop","telemetry_lang":"java","source_signal":"otel+prom"},"ecs":{"version":"8.11.0"},"message":"Log4j follow-on RCE","demo":"appsec-cps","source":"kibana-workflow"}
-        {"index":{"_id":"vuln-CVE-2022-22965-ad"}}
-        {"@timestamp":"{{ steps.seed_clock.output.values.0.0 }}","event":{"kind":"enrichment","category":["vulnerability"],"type":["info"],"dataset":"appsec.vuln"},"vulnerability":{"id":"CVE-2022-22965","severity":"Critical","score":{"base":9.8},"description":"Spring Framework RCE","status":"Detected","first_found":"{{ steps.seed_clock.output.values.0.5 }}"},"package":{"name":"org.springframework:spring-beans","version":"5.2.9.RELEASE","fixed_version":"5.3.18","type":"jar"},"service":{"name":"otel-shop","node":{"name":"ad"}},"risk":{"score":100},"labels":{"demo":"appsec-cps","env":"prod","application":"otel-shop","telemetry_lang":"java","source_signal":"otel+prom"},"ecs":{"version":"8.11.0"},"message":"Spring Framework RCE","demo":"appsec-cps","source":"kibana-workflow"}
-        {"index":{"_id":"vuln-CVE-2020-1938-ad"}}
-        {"@timestamp":"{{ steps.seed_clock.output.values.0.0 }}","event":{"kind":"enrichment","category":["vulnerability"],"type":["info"],"dataset":"appsec.vuln"},"vulnerability":{"id":"CVE-2020-1938","severity":"Critical","score":{"base":9.8},"description":"Arbitrary File Read","status":"Detected","first_found":"{{ steps.seed_clock.output.values.0.5 }}"},"package":{"name":"org.apache.tomcat.embed:tomcat-embed-core","version":"9.0.37","fixed_version":"9.0.122","type":"jar"},"service":{"name":"otel-shop","node":{"name":"ad"}},"risk":{"score":100},"labels":{"demo":"appsec-cps","env":"prod","application":"otel-shop","telemetry_lang":"java","source_signal":"otel+prom"},"ecs":{"version":"8.11.0"},"message":"Arbitrary File Read","demo":"appsec-cps","source":"kibana-workflow"}
-        {"index":{"_id":"vuln-CVE-2017-12617-ad"}}
-        {"@timestamp":"{{ steps.seed_clock.output.values.0.0 }}","event":{"kind":"enrichment","category":["vulnerability"],"type":["info"],"dataset":"appsec.vuln"},"vulnerability":{"id":"CVE-2017-12617","severity":"High","score":{"base":8.1},"description":"HTTP PUT JSP upload","status":"Detected","first_found":"{{ steps.seed_clock.output.values.0.5 }}"},"package":{"name":"org.apache.tomcat.embed:tomcat-embed-core","version":"9.0.37","fixed_version":"9.0.122","type":"jar"},"service":{"name":"otel-shop","node":{"name":"ad"}},"risk":{"score":100},"labels":{"demo":"appsec-cps","env":"prod","application":"otel-shop","telemetry_lang":"java","source_signal":"otel+prom"},"ecs":{"version":"8.11.0"},"message":"HTTP PUT JSP upload","demo":"appsec-cps","source":"kibana-workflow"}
-        {"index":{"_id":"vuln-CVE-2015-4852-ad"}}
-        {"@timestamp":"{{ steps.seed_clock.output.values.0.0 }}","event":{"kind":"enrichment","category":["vulnerability"],"type":["info"],"dataset":"appsec.vuln"},"vulnerability":{"id":"CVE-2015-4852","severity":"Critical","score":{"base":9.8},"description":"Deserialization RCE","status":"Detected","first_found":"{{ steps.seed_clock.output.values.0.5 }}"},"package":{"name":"commons-collections:commons-collections","version":"3.2.1","fixed_version":"3.2.2","type":"jar"},"service":{"name":"otel-shop","node":{"name":"ad"}},"risk":{"score":100},"labels":{"demo":"appsec-cps","env":"prod","application":"otel-shop","telemetry_lang":"java","source_signal":"otel+prom"},"ecs":{"version":"8.11.0"},"message":"Deserialization RCE","demo":"appsec-cps","source":"kibana-workflow"}
-        {"index":{"_id":"vuln-CVE-2021-3749-auth-gateway"}}
-        {"@timestamp":"{{ steps.seed_clock.output.values.0.0 }}","event":{"kind":"enrichment","category":["vulnerability"],"type":["info"],"dataset":"appsec.vuln"},"vulnerability":{"id":"CVE-2021-3749","severity":"High","score":{"base":7.5},"description":"Axios SSRF via follow-redirects","status":"Detected","first_found":"{{ steps.seed_clock.output.values.0.5 }}"},"package":{"name":"axios","version":"0.21.1","fixed_version":"1.7.9","type":"npm"},"service":{"name":"example-commerce","node":{"name":"auth-gateway"}},"risk":{"score":82},"labels":{"demo":"appsec-cps","env":"prod","application":"example-commerce","telemetry_lang":"nodejs","source_signal":"otel+prom"},"ecs":{"version":"8.11.0"},"message":"Axios SSRF via follow-redirects","demo":"appsec-cps","source":"kibana-workflow"}
-        {"index":{"_id":"vuln-CVE-2021-23337-auth-gateway"}}
-        {"@timestamp":"{{ steps.seed_clock.output.values.0.0 }}","event":{"kind":"enrichment","category":["vulnerability"],"type":["info"],"dataset":"appsec.vuln"},"vulnerability":{"id":"CVE-2021-23337","severity":"High","score":{"base":7.2},"description":"Lodash command injection","status":"Detected","first_found":"{{ steps.seed_clock.output.values.0.5 }}"},"package":{"name":"lodash","version":"4.17.19","fixed_version":"4.17.21","type":"npm"},"service":{"name":"example-commerce","node":{"name":"auth-gateway"}},"risk":{"score":78},"labels":{"demo":"appsec-cps","env":"prod","application":"example-commerce","telemetry_lang":"nodejs","source_signal":"otel+prom"},"ecs":{"version":"8.11.0"},"message":"Lodash command injection","demo":"appsec-cps","source":"kibana-workflow"}
-        {"index":{"_id":"vuln-CVE-2021-3749-payment"}}
-        {"@timestamp":"{{ steps.seed_clock.output.values.0.0 }}","event":{"kind":"enrichment","category":["vulnerability"],"type":["info"],"dataset":"appsec.vuln"},"vulnerability":{"id":"CVE-2021-3749","severity":"High","score":{"base":7.5},"description":"Axios SSRF via follow-redirects","status":"Detected","first_found":"{{ steps.seed_clock.output.values.0.5 }}"},"package":{"name":"axios","version":"0.21.1","fixed_version":"1.7.9","type":"npm"},"service":{"name":"otel-shop","node":{"name":"payment"}},"risk":{"score":82},"labels":{"demo":"appsec-cps","env":"prod","application":"otel-shop","telemetry_lang":"nodejs","source_signal":"otel+prom"},"ecs":{"version":"8.11.0"},"message":"Axios SSRF via follow-redirects","demo":"appsec-cps","source":"kibana-workflow"}
-        {"index":{"_id":"vuln-CVE-2021-23337-payment"}}
-        {"@timestamp":"{{ steps.seed_clock.output.values.0.0 }}","event":{"kind":"enrichment","category":["vulnerability"],"type":["info"],"dataset":"appsec.vuln"},"vulnerability":{"id":"CVE-2021-23337","severity":"High","score":{"base":7.2},"description":"Lodash command injection","status":"Detected","first_found":"{{ steps.seed_clock.output.values.0.5 }}"},"package":{"name":"lodash","version":"4.17.19","fixed_version":"4.17.21","type":"npm"},"service":{"name":"otel-shop","node":{"name":"payment"}},"risk":{"score":78},"labels":{"demo":"appsec-cps","env":"prod","application":"otel-shop","telemetry_lang":"nodejs","source_signal":"otel+prom"},"ecs":{"version":"8.11.0"},"message":"Lodash command injection","demo":"appsec-cps","source":"kibana-workflow"}
-        {"index":{"_id":"vuln-CVE-2021-33503-recommendation"}}
-        {"@timestamp":"{{ steps.seed_clock.output.values.0.0 }}","event":{"kind":"enrichment","category":["vulnerability"],"type":["info"],"dataset":"appsec.vuln"},"vulnerability":{"id":"CVE-2021-33503","severity":"High","score":{"base":7.5},"description":"urllib3 catastrophic backtracking","status":"Detected","first_found":"{{ steps.seed_clock.output.values.0.5 }}"},"package":{"name":"urllib3","version":"1.26.4","fixed_version":"2.2.3","type":"pypi"},"service":{"name":"otel-shop","node":{"name":"recommendation"}},"risk":{"score":70},"labels":{"demo":"appsec-cps","env":"prod","application":"otel-shop","telemetry_lang":"python","source_signal":"otel+prom"},"ecs":{"version":"8.11.0"},"message":"urllib3 catastrophic backtracking","demo":"appsec-cps","source":"kibana-workflow"}
-        {"index":{"_id":"vuln-CVE-2023-32681-recommendation"}}
-        {"@timestamp":"{{ steps.seed_clock.output.values.0.0 }}","event":{"kind":"enrichment","category":["vulnerability"],"type":["info"],"dataset":"appsec.vuln"},"vulnerability":{"id":"CVE-2023-32681","severity":"Medium","score":{"base":6.1},"description":"Proxy-Authorization leak","status":"Detected","first_found":"{{ steps.seed_clock.output.values.0.5 }}"},"package":{"name":"requests","version":"2.25.1","fixed_version":"2.32.3","type":"pypi"},"service":{"name":"otel-shop","node":{"name":"recommendation"}},"risk":{"score":55},"labels":{"demo":"appsec-cps","env":"prod","application":"otel-shop","telemetry_lang":"python","source_signal":"otel+prom"},"ecs":{"version":"8.11.0"},"message":"Proxy-Authorization leak","demo":"appsec-cps","source":"kibana-workflow"}
-
-  - name: seed_libraries
-    type: elasticsearch.request
-    with:
-      method: POST
-      path: /{{ consts.appsec_libraries_index }}/_bulk?refresh=wait_for
-      headers:
-        Content-Type: application/x-ndjson
-      body: |
-        {"index":{"_id":"lib-ad-log4j-core"}}
-        {"@timestamp":"{{ steps.seed_clock.output.values.0.0 }}","event":{"kind":"enrichment","category":["package"],"type":["info"],"dataset":"appsec.library"},"package":{"name":"org.apache.logging.log4j:log4j-core","version":"2.14.1","fixed_version":"2.25.3","type":"jar"},"service":{"name":"otel-shop","node":{"name":"ad"}},"vulnerability":{"severity":"Critical","score":{"base":10.0},"status":"Detected","count":8},"risk":{"score":100},"labels":{"demo":"appsec-cps","env":"prod","application":"otel-shop","nodes":"1","telemetry_lang":"java","source_signal":"otel+prom"},"ecs":{"version":"8.11.0"},"message":"org.apache.logging.log4j:log4j-core:2.14.1","demo":"appsec-cps","source":"kibana-workflow"}
-        {"index":{"_id":"lib-ad-spring-beans"}}
-        {"@timestamp":"{{ steps.seed_clock.output.values.0.0 }}","event":{"kind":"enrichment","category":["package"],"type":["info"],"dataset":"appsec.library"},"package":{"name":"org.springframework:spring-beans","version":"5.2.9.RELEASE","fixed_version":"5.3.18","type":"jar"},"service":{"name":"otel-shop","node":{"name":"ad"}},"vulnerability":{"severity":"Critical","score":{"base":9.8},"status":"Detected","count":12},"risk":{"score":100},"labels":{"demo":"appsec-cps","env":"prod","application":"otel-shop","nodes":"1","telemetry_lang":"java","source_signal":"otel+prom"},"ecs":{"version":"8.11.0"},"message":"org.springframework:spring-beans:5.2.9.RELEASE","demo":"appsec-cps","source":"kibana-workflow"}
-        {"index":{"_id":"lib-ad-tomcat-embed-core"}}
-        {"@timestamp":"{{ steps.seed_clock.output.values.0.0 }}","event":{"kind":"enrichment","category":["package"],"type":["info"],"dataset":"appsec.library"},"package":{"name":"org.apache.tomcat.embed:tomcat-embed-core","version":"9.0.37","fixed_version":"9.0.122","type":"jar"},"service":{"name":"otel-shop","node":{"name":"ad"}},"vulnerability":{"severity":"Critical","score":{"base":9.8},"status":"Detected","count":65},"risk":{"score":100},"labels":{"demo":"appsec-cps","env":"prod","application":"otel-shop","nodes":"1","telemetry_lang":"java","source_signal":"otel+prom"},"ecs":{"version":"8.11.0"},"message":"org.apache.tomcat.embed:tomcat-embed-core:9.0.37","demo":"appsec-cps","source":"kibana-workflow"}
-        {"index":{"_id":"lib-ad-commons-collections"}}
-        {"@timestamp":"{{ steps.seed_clock.output.values.0.0 }}","event":{"kind":"enrichment","category":["package"],"type":["info"],"dataset":"appsec.library"},"package":{"name":"commons-collections:commons-collections","version":"3.2.1","fixed_version":"3.2.2","type":"jar"},"service":{"name":"otel-shop","node":{"name":"ad"}},"vulnerability":{"severity":"Critical","score":{"base":9.8},"status":"Detected","count":3},"risk":{"score":100},"labels":{"demo":"appsec-cps","env":"prod","application":"otel-shop","nodes":"1","telemetry_lang":"java","source_signal":"otel+prom"},"ecs":{"version":"8.11.0"},"message":"commons-collections:commons-collections:3.2.1","demo":"appsec-cps","source":"kibana-workflow"}
-        {"index":{"_id":"lib-auth-gateway-axios"}}
-        {"@timestamp":"{{ steps.seed_clock.output.values.0.0 }}","event":{"kind":"enrichment","category":["package"],"type":["info"],"dataset":"appsec.library"},"package":{"name":"axios","version":"0.21.1","fixed_version":"1.7.9","type":"npm"},"service":{"name":"example-commerce","node":{"name":"auth-gateway"}},"vulnerability":{"severity":"High","score":{"base":7.5},"status":"Detected","count":4},"risk":{"score":82},"labels":{"demo":"appsec-cps","env":"prod","application":"example-commerce","nodes":"1","telemetry_lang":"nodejs","source_signal":"otel+prom"},"ecs":{"version":"8.11.0"},"message":"axios:0.21.1","demo":"appsec-cps","source":"kibana-workflow"}
-        {"index":{"_id":"lib-auth-gateway-lodash"}}
-        {"@timestamp":"{{ steps.seed_clock.output.values.0.0 }}","event":{"kind":"enrichment","category":["package"],"type":["info"],"dataset":"appsec.library"},"package":{"name":"lodash","version":"4.17.19","fixed_version":"4.17.21","type":"npm"},"service":{"name":"example-commerce","node":{"name":"auth-gateway"}},"vulnerability":{"severity":"High","score":{"base":7.2},"status":"Detected","count":6},"risk":{"score":78},"labels":{"demo":"appsec-cps","env":"prod","application":"example-commerce","nodes":"1","telemetry_lang":"nodejs","source_signal":"otel+prom"},"ecs":{"version":"8.11.0"},"message":"lodash:4.17.19","demo":"appsec-cps","source":"kibana-workflow"}
-        {"index":{"_id":"lib-payment-axios"}}
-        {"@timestamp":"{{ steps.seed_clock.output.values.0.0 }}","event":{"kind":"enrichment","category":["package"],"type":["info"],"dataset":"appsec.library"},"package":{"name":"axios","version":"0.21.1","fixed_version":"1.7.9","type":"npm"},"service":{"name":"otel-shop","node":{"name":"payment"}},"vulnerability":{"severity":"High","score":{"base":7.5},"status":"Detected","count":4},"risk":{"score":82},"labels":{"demo":"appsec-cps","env":"prod","application":"otel-shop","nodes":"1","telemetry_lang":"nodejs","source_signal":"otel+prom"},"ecs":{"version":"8.11.0"},"message":"axios:0.21.1","demo":"appsec-cps","source":"kibana-workflow"}
-        {"index":{"_id":"lib-payment-lodash"}}
-        {"@timestamp":"{{ steps.seed_clock.output.values.0.0 }}","event":{"kind":"enrichment","category":["package"],"type":["info"],"dataset":"appsec.library"},"package":{"name":"lodash","version":"4.17.19","fixed_version":"4.17.21","type":"npm"},"service":{"name":"otel-shop","node":{"name":"payment"}},"vulnerability":{"severity":"High","score":{"base":7.2},"status":"Detected","count":6},"risk":{"score":78},"labels":{"demo":"appsec-cps","env":"prod","application":"otel-shop","nodes":"1","telemetry_lang":"nodejs","source_signal":"otel+prom"},"ecs":{"version":"8.11.0"},"message":"lodash:4.17.19","demo":"appsec-cps","source":"kibana-workflow"}
-        {"index":{"_id":"lib-recommendation-urllib3"}}
-        {"@timestamp":"{{ steps.seed_clock.output.values.0.0 }}","event":{"kind":"enrichment","category":["package"],"type":["info"],"dataset":"appsec.library"},"package":{"name":"urllib3","version":"1.26.4","fixed_version":"2.2.3","type":"pypi"},"service":{"name":"otel-shop","node":{"name":"recommendation"}},"vulnerability":{"severity":"High","score":{"base":7.5},"status":"Detected","count":3},"risk":{"score":70},"labels":{"demo":"appsec-cps","env":"prod","application":"otel-shop","nodes":"1","telemetry_lang":"python","source_signal":"otel+prom"},"ecs":{"version":"8.11.0"},"message":"urllib3:1.26.4","demo":"appsec-cps","source":"kibana-workflow"}
-        {"index":{"_id":"lib-recommendation-requests"}}
-        {"@timestamp":"{{ steps.seed_clock.output.values.0.0 }}","event":{"kind":"enrichment","category":["package"],"type":["info"],"dataset":"appsec.library"},"package":{"name":"requests","version":"2.25.1","fixed_version":"2.32.3","type":"pypi"},"service":{"name":"otel-shop","node":{"name":"recommendation"}},"vulnerability":{"severity":"Medium","score":{"base":6.1},"status":"Detected","count":2},"risk":{"score":55},"labels":{"demo":"appsec-cps","env":"prod","application":"otel-shop","nodes":"1","telemetry_lang":"python","source_signal":"otel+prom"},"ecs":{"version":"8.11.0"},"message":"requests:2.25.1","demo":"appsec-cps","source":"kibana-workflow"}
-
-  - name: seed_attacks
-    type: elasticsearch.request
-    with:
-      method: POST
-      path: /{{ consts.attacks_index }}/_bulk?refresh=wait_for
-      headers:
-        Content-Type: application/x-ndjson
-      body: |
-        {"index":{"_id":"atk-00057801"}}
-        {"@timestamp":"{{ steps.seed_clock.output.values.0.6 }}","event":{"kind":"alert","category":["intrusion_detection"],"type":["denied"],"action":"runtime-attack","dataset":"appsec.attacks","outcome":"success","id":"00057801"},"attack":{"outcome":"exploited","id":"00057801"},"threat":{"technique":{"name":"credential-stuffing","id":"T1110"}},"message":"login failure delta=213.1 on auth-gateway (prod)","service":{"name":"example-commerce","node":{"name":"auth-gateway"}},"labels":{"demo":"appsec-cps","env":"prod","application":"example-commerce","status":"Open","source_signal":"user_login_failures_total"},"ecs":{"version":"8.11.0"},"demo":"appsec-cps","source":"kibana-workflow"}
-        {"index":{"_id":"atk-00057802"}}
-        {"@timestamp":"{{ steps.seed_clock.output.values.0.7 }}","event":{"kind":"alert","category":["intrusion_detection"],"type":["denied"],"action":"runtime-attack","dataset":"appsec.attacks","outcome":"success","id":"00057802"},"attack":{"outcome":"exploited","id":"00057802"},"threat":{"technique":{"name":"api-abuse","id":"T1190"}},"message":"36 HTTP 5xx spans observed on frontend","service":{"name":"otel-shop","node":{"name":"frontend"}},"labels":{"demo":"appsec-cps","env":"prod","application":"otel-shop","status":"Open","source_signal":"http.response.status_code"},"ecs":{"version":"8.11.0"},"demo":"appsec-cps","source":"kibana-workflow"}
-        {"index":{"_id":"atk-00057803"}}
-        {"@timestamp":"{{ steps.seed_clock.output.values.0.8 }}","event":{"kind":"alert","category":["intrusion_detection"],"type":["denied"],"action":"runtime-attack","dataset":"appsec.attacks","outcome":"success","id":"00057803"},"attack":{"outcome":"exploited","id":"00057803"},"threat":{"technique":{"name":"api-abuse","id":"T1190"}},"message":"25 HTTP 5xx spans observed on checkout","service":{"name":"otel-shop","node":{"name":"checkout"}},"labels":{"demo":"appsec-cps","env":"prod","application":"otel-shop","status":"Open","source_signal":"http.response.status_code"},"ecs":{"version":"8.11.0"},"demo":"appsec-cps","source":"kibana-workflow"}
-        {"index":{"_id":"atk-00057804"}}
-        {"@timestamp":"{{ steps.seed_clock.output.values.0.2 }}","event":{"kind":"alert","category":["intrusion_detection"],"type":["denied"],"action":"runtime-attack","dataset":"appsec.attacks","outcome":"success","id":"00057804"},"attack":{"outcome":"exploited","id":"00057804"},"threat":{"technique":{"name":"api-abuse","id":"T1190"}},"message":"5 HTTP 5xx spans observed on currency","service":{"name":"otel-shop","node":{"name":"currency"}},"labels":{"demo":"appsec-cps","env":"prod","application":"otel-shop","status":"Open","source_signal":"http.response.status_code"},"ecs":{"version":"8.11.0"},"demo":"appsec-cps","source":"kibana-workflow"}
-        {"index":{"_id":"atk-00057805"}}
-        {"@timestamp":"{{ steps.seed_clock.output.values.0.0 }}","event":{"kind":"alert","category":["intrusion_detection"],"type":["denied"],"action":"runtime-attack","dataset":"appsec.attacks","outcome":"failure","id":"00057805"},"attack":{"outcome":"blocked","id":"00057805"},"threat":{"technique":{"name":"api-abuse","id":"T1190"}},"message":"4 HTTP 5xx spans observed on recommendation","service":{"name":"otel-shop","node":{"name":"recommendation"}},"labels":{"demo":"appsec-cps","env":"prod","application":"otel-shop","status":"Open","source_signal":"http.response.status_code"},"ecs":{"version":"8.11.0"},"demo":"appsec-cps","source":"kibana-workflow"}
-        {"index":{"_id":"atk-00057806"}}
-        {"@timestamp":"{{ steps.seed_clock.output.values.0.6 }}","event":{"kind":"alert","category":["intrusion_detection"],"type":["denied"],"action":"runtime-attack","dataset":"appsec.attacks","outcome":"failure","id":"00057806"},"attack":{"outcome":"blocked","id":"00057806"},"threat":{"technique":{"name":"api-abuse","id":"T1190"}},"message":"4 HTTP 5xx spans observed on cart","service":{"name":"otel-shop","node":{"name":"cart"}},"labels":{"demo":"appsec-cps","env":"prod","application":"otel-shop","status":"Open","source_signal":"http.response.status_code"},"ecs":{"version":"8.11.0"},"demo":"appsec-cps","source":"kibana-workflow"}
-        {"index":{"_id":"atk-00057807"}}
-        {"@timestamp":"{{ steps.seed_clock.output.values.0.7 }}","event":{"kind":"alert","category":["intrusion_detection"],"type":["denied"],"action":"runtime-attack","dataset":"appsec.attacks","outcome":"failure","id":"00057807"},"attack":{"outcome":"blocked","id":"00057807"},"threat":{"technique":{"name":"api-abuse","id":"T1190"}},"message":"3 HTTP 5xx spans observed on accounting","service":{"name":"otel-shop","node":{"name":"accounting"}},"labels":{"demo":"appsec-cps","env":"prod","application":"otel-shop","status":"Open","source_signal":"http.response.status_code"},"ecs":{"version":"8.11.0"},"demo":"appsec-cps","source":"kibana-workflow"}
-
-  - name: critical_vuln_signals
-    type: elasticsearch.esql.query
-    on-failure:
-      continue: true
-    with:
-      format: json
-      query: |
+        SET project_routing = "_alias:{{ consts.security_project_alias }}";
         SET unmapped_fields="nullify";
-        FROM {{ consts.appsec_index }}
+        FROM {{ consts.security_vuln_index }}
         | WHERE @timestamp > NOW() - 7 days
             AND `vulnerability.severity` IS NOT NULL
         | STATS
             findings = COUNT(*),
-            critical = COUNT(*) WHERE `vulnerability.severity` == "Critical",
-            high = COUNT(*) WHERE `vulnerability.severity` == "High",
-            medium = COUNT(*) WHERE `vulnerability.severity` == "Medium",
-            low = COUNT(*) WHERE `vulnerability.severity` == "Low"
+            critical = COUNT(*) WHERE `vulnerability.severity` == "CRITICAL" OR `vulnerability.severity` == "Critical",
+            high = COUNT(*) WHERE `vulnerability.severity` == "HIGH" OR `vulnerability.severity` == "High",
+            medium = COUNT(*) WHERE `vulnerability.severity` == "MEDIUM" OR `vulnerability.severity` == "Medium",
+            low = COUNT(*) WHERE `vulnerability.severity` == "LOW" OR `vulnerability.severity` == "Low"
         | LIMIT 1
 
-  - name: composition_hotspots
+  - name: security_vuln_hotspots
     type: elasticsearch.esql.query
     on-failure:
       continue: true
     with:
       format: json
       query: |
+        SET project_routing = "_alias:{{ consts.security_project_alias }}";
         SET unmapped_fields="nullify";
-        FROM {{ consts.appsec_index }}
+        FROM {{ consts.security_vuln_index }}
         | WHERE @timestamp > NOW() - 7 days
             AND `package.name` IS NOT NULL
         | STATS
             vuln_count = COUNT(*),
             max_cvss = MAX(`vulnerability.score.base`)
-            BY `package.name`, `package.version`, `package.fixed_version`, `service.name`
+            BY `package.name`, `package.version`, `package.fixed_version`, `vulnerability.id`, `vulnerability.severity`
         | SORT max_cvss DESC, vuln_count DESC
-        | LIMIT 20
+        | LIMIT 25
 
-  - name: attack_outcome_signals
+  - name: security_alert_signals
     type: elasticsearch.esql.query
     on-failure:
       continue: true
     with:
       format: json
       query: |
+        SET project_routing = "_alias:{{ consts.security_project_alias }}";
         SET unmapped_fields="nullify";
-        FROM {{ consts.attacks_index }}
+        FROM {{ consts.security_alerts_index }}
         | WHERE @timestamp > NOW() - 7 days
-            AND `attack.outcome` IS NOT NULL
-        | STATS attacks = COUNT(*) BY `attack.outcome`, `threat.technique.name`, `service.name`
-        | SORT attacks DESC
+        | STATS
+            alerts = COUNT(*)
+            BY `kibana.alert.severity`, `kibana.alert.rule.name`, `threat.technique.name`
+        | SORT alerts DESC
         | LIMIT 30
+
+  - name: security_critical_alerts
+    type: elasticsearch.esql.query
+    on-failure:
+      continue: true
+    with:
+      format: json
+      query: |
+        SET project_routing = "_alias:{{ consts.security_project_alias }}";
+        SET unmapped_fields="nullify";
+        FROM {{ consts.security_alerts_index }}
+        | WHERE @timestamp > NOW() - 24 hours
+            AND (`kibana.alert.severity` == "critical" OR `kibana.alert.severity` == "high")
+        | STATS
+            alerts = COUNT(*)
+            BY `kibana.alert.rule.name`, `kibana.alert.severity`, `host.name`
+        | SORT alerts DESC
+        | LIMIT 20
 
   - name: upsert_vulnerabilities_dashboard
     type: kibana.request
@@ -367,8 +191,8 @@ steps:
       body:
         title: "Auto: AppSec Vulnerabilities"
         description: >
-          Screenshot-aligned vulnerabilities board: severity bars, severity trend,
-          days-since-first-detected, and findings table. Upserted by appsec-cps-auto-ops.
+          Elastic Security vulnerability findings via CPS. Upserted by
+          appsec-cps-auto-ops — no seeded indices.
         time_range:
           from: now-7d
           to: now
@@ -408,16 +232,17 @@ steps:
               - type: bar
                 data_source:
                   type: esql
-                  query: 'FROM {{ consts.appsec_index }}
-
+                  query: |
+                    SET project_routing = "_alias:{{ consts.security_project_alias }}";
+                    FROM {{ consts.security_vuln_index }}
                     | WHERE @timestamp >= ?_tstart AND @timestamp <= ?_tend AND `vulnerability.severity` IS NOT NULL
-
                     | STATS findings = COUNT(*) BY `vulnerability.severity`
-
-                    | EVAL severity_order = CASE(`vulnerability.severity` == "Critical", 1, `vulnerability.severity` == "High", 2, `vulnerability.severity`
-                    == "Medium", 3, 4)
-
-                    | SORT severity_order ASC'
+                    | EVAL severity_order = CASE(
+                        `vulnerability.severity` == "CRITICAL" OR `vulnerability.severity` == "Critical", 1,
+                        `vulnerability.severity` == "HIGH" OR `vulnerability.severity` == "High", 2,
+                        `vulnerability.severity` == "MEDIUM" OR `vulnerability.severity` == "Medium", 3,
+                        4)
+                    | SORT severity_order ASC
                 x:
                   column: vulnerability.severity
                 y:
@@ -456,10 +281,11 @@ steps:
                 data_source:
                   type: esql
                   query: |
-                      FROM {{ consts.appsec_index }}
-                      | WHERE @timestamp <= ?_tend AND @timestamp > ?_tstart
-                          AND `vulnerability.severity` IS NOT NULL
-                      | STATS findings = COUNT(*) BY `vulnerability.severity`, BUCKET(@timestamp, 75, ?_tstart, ?_tend)
+                    SET project_routing = "_alias:{{ consts.security_project_alias }}";
+                    FROM {{ consts.security_vuln_index }}
+                    | WHERE @timestamp <= ?_tend AND @timestamp > ?_tstart
+                        AND `vulnerability.severity` IS NOT NULL
+                    | STATS findings = COUNT(*) BY `vulnerability.severity`, BUCKET(@timestamp, 75, ?_tstart, ?_tend)
                 x:
                   column: BUCKET(@timestamp, 75, ?_tstart, ?_tend)
                   label: '@timestamp'
@@ -493,18 +319,15 @@ steps:
               - type: bar_horizontal_stacked
                 data_source:
                   type: esql
-                  query: 'FROM {{ consts.appsec_index }}
-
-                    | WHERE @timestamp >= ?_tstart AND @timestamp <= ?_tend AND `vulnerability.first_found` IS NOT NULL
-
-                    | EVAL age_days = DATE_DIFF("days", `vulnerability.first_found`, NOW())
-
-                    | EVAL age_bucket = CASE(age_days < 1, "<1 Day Ago", age_days <= 7, "1-7 Days Ago", age_days <= 14, "8-14 Days Ago",
-                    "14+ Days Ago")
-
+                  query: |
+                    SET project_routing = "_alias:{{ consts.security_project_alias }}";
+                    FROM {{ consts.security_vuln_index }}
+                    | WHERE @timestamp >= ?_tstart AND @timestamp <= ?_tend
+                    | EVAL first_seen = COALESCE(`vulnerability.first_found`, @timestamp)
+                    | EVAL age_days = DATE_DIFF("days", first_seen, NOW())
+                    | EVAL age_bucket = CASE(age_days < 1, "<1 Day Ago", age_days <= 7, "1-7 Days Ago", age_days <= 14, "8-14 Days Ago", "14+ Days Ago")
                     | EVAL Age = "Age"
-
-                    | STATS findings = COUNT(*) BY Age, age_bucket'
+                    | STATS findings = COUNT(*) BY Age, age_bucket
                 x:
                   column: Age
                 y:
@@ -519,40 +342,26 @@ steps:
               title: Vulnerabilities
               data_source:
                 type: esql
-                query: 'FROM {{ consts.appsec_index }}
-
+                query: |
+                  SET project_routing = "_alias:{{ consts.security_project_alias }}";
+                  FROM {{ consts.security_vuln_index }}
                   | WHERE @timestamp >= ?_tstart AND @timestamp <= ?_tend
-
-                  | EVAL Title = COALESCE(message, `vulnerability.description`)
-
+                  | EVAL Title = COALESCE(message, `vulnerability.description`, `vulnerability.id`)
                   | EVAL ID = `vulnerability.id`
-
                   | EVAL Reached = CASE(`vulnerability.score.base` >= 9.0, "Yes", "No")
-
                   | EVAL `CVSS Score` = `vulnerability.score.base`
-
-                  | EVAL `Risk score` = `risk.score`
-
-                  | EVAL Application = `service.name`
-
-                  | EVAL Tier = `service.node.name`
-
-                  | EVAL Library = CONCAT(`package.name`, ":", COALESCE(`package.version`, ""))
-
-                  | EVAL Status = COALESCE(`vulnerability.status`, "Detected")
-
-                  | STATS `CVSS Score` = MAX(`CVSS Score`), `Risk score` = MAX(`Risk score`) BY Title, ID, Reached, Application, Tier,
-                  Library, Status
-
+                  | EVAL `Risk score` = COALESCE(`risk.score`, `vulnerability.score.base`)
+                  | EVAL Application = COALESCE(`resource.name`, `host.name`, `cloud.instance.name`, "n/a")
+                  | EVAL Library = CONCAT(COALESCE(`package.name`, ""), ":", COALESCE(`package.version`, ""))
+                  | EVAL Status = COALESCE(`vulnerability.status`, "open")
+                  | STATS `CVSS Score` = MAX(`CVSS Score`), `Risk score` = MAX(`Risk score`) BY Title, ID, Reached, Application, Library, Status
                   | SORT `CVSS Score` DESC
-
-                  | LIMIT 50'
+                  | LIMIT 50
               rows:
               - column: Title
               - column: ID
               - column: Reached
               - column: Application
-              - column: Tier
               - column: Library
               - column: Status
               metrics:
@@ -569,8 +378,8 @@ steps:
       body:
         title: "Auto: AppSec Software Composition"
         description: >
-          Screenshot-aligned Libraries inventory table (CVSS, risk score, remediation).
-          Upserted by appsec-cps-auto-ops.
+          Package inventory derived from Elastic Security vulnerability findings
+          via CPS. Upserted by appsec-cps-auto-ops.
         time_range:
           from: now-7d
           to: now
@@ -594,36 +403,23 @@ steps:
               title: Libraries
               data_source:
                 type: esql
-                query: 'FROM {{ consts.appsec_libraries_index }}
-
+                query: |
+                  SET project_routing = "_alias:{{ consts.security_project_alias }}";
+                  FROM {{ consts.security_vuln_index }}
                   | WHERE @timestamp >= ?_tstart AND @timestamp <= ?_tend
-
+                      AND `package.name` IS NOT NULL
                   | EVAL Library = CONCAT(`package.name`, ":", COALESCE(`package.version`, ""))
-
-                  | EVAL Application = `service.name`
-
-                  | EVAL Tier = CONCAT(`service.node.name`, " (", COALESCE(labels.nodes, "1"), ")")
-
+                  | EVAL Application = COALESCE(`resource.name`, `host.name`, "n/a")
                   | EVAL `Highest CVSS Score` = `vulnerability.score.base`
-
-                  | EVAL `Risk score` = `risk.score`
-
-                  | EVAL `Total Vulnerabilities` = `vulnerability.count`
-
-                  | EVAL Remediation = `package.fixed_version`
-
-                  | EVAL Status = COALESCE(`vulnerability.status`, "Detected")
-
-                  | STATS `Highest CVSS Score` = MAX(`Highest CVSS Score`), `Risk score` = MAX(`Risk score`), `Total Vulnerabilities`
-                  = MAX(`Total Vulnerabilities`) BY Library, Application, Tier, Remediation, Status
-
+                  | EVAL `Risk score` = COALESCE(`risk.score`, `vulnerability.score.base`)
+                  | EVAL Remediation = COALESCE(`package.fixed_version`, "see advisory")
+                  | EVAL Status = COALESCE(`vulnerability.status`, "open")
+                  | STATS `Highest CVSS Score` = MAX(`Highest CVSS Score`), `Risk score` = MAX(`Risk score`), `Total Vulnerabilities` = COUNT(*) BY Library, Application, Remediation, Status
                   | SORT `Highest CVSS Score` DESC, `Risk score` DESC
-
-                  | LIMIT 50'
+                  | LIMIT 50
               rows:
               - column: Library
               - column: Application
-              - column: Tier
               - column: Remediation
               - column: Status
               metrics:
@@ -641,8 +437,8 @@ steps:
       body:
         title: "Auto: AppSec Runtime Attacks"
         description: >
-          Screenshot-aligned attacks board: by outcome, top apps, top types, events table.
-          Upserted by appsec-cps-auto-ops.
+          Elastic Security detection alerts via CPS (severity, rule, MITRE).
+          Upserted by appsec-cps-auto-ops — no seeded attack indices.
         time_range:
           from: now-7d
           to: now
@@ -658,12 +454,12 @@ steps:
         tags: [auto, auto-ops, appsec, security]
         pinned_panels: []
         panels:
-          - id: attacks-by-outcome
+          - id: alerts-by-severity
             type: vis
             grid: {x: 0, y: 0, w: 12, h: 14}
             config:
               type: xy
-              title: Attacks By Outcome
+              title: Alerts By Severity
               legend:
                 visibility: hidden
               styling:
@@ -682,31 +478,29 @@ steps:
               - type: bar
                 data_source:
                   type: esql
-                  query: 'FROM {{ consts.attacks_index }}
-
-                    | WHERE @timestamp >= ?_tstart AND @timestamp <= ?_tend AND `attack.outcome` IS NOT NULL
-
-                    | EVAL Outcome = CASE(`attack.outcome` == "exploited", "Exploited", `attack.outcome` == "blocked", "Blocked", "Attempted")
-
-                    | STATS attacks = COUNT(*) BY Outcome
-
-                    | EVAL outcome_order = CASE(Outcome == "Exploited", 1, Outcome == "Blocked", 2, 3)
-
-                    | SORT outcome_order ASC'
+                  query: |
+                    SET project_routing = "_alias:{{ consts.security_project_alias }}";
+                    FROM {{ consts.security_alerts_index }}
+                    | WHERE @timestamp >= ?_tstart AND @timestamp <= ?_tend AND `kibana.alert.severity` IS NOT NULL
+                    | STATS alerts = COUNT(*) BY `kibana.alert.severity`
+                    | EVAL severity_order = CASE(
+                        `kibana.alert.severity` == "critical", 1,
+                        `kibana.alert.severity` == "high", 2,
+                        `kibana.alert.severity` == "medium", 3,
+                        4)
+                    | SORT severity_order ASC
                 x:
-                  column: Outcome
+                  column: kibana.alert.severity
                 y:
-                - column: attacks
-          - id: top-applications
+                - column: alerts
+          - id: top-rules
             type: vis
             grid: {x: 12, y: 0, w: 18, h: 14}
             config:
               type: xy
-              title: Top Applications
+              title: Top Detection Rules
               legend:
-                visibility: visible
-                placement: outside
-                position: bottom
+                visibility: hidden
               styling:
                 points:
                   visibility: hidden
@@ -723,30 +517,25 @@ steps:
               - type: bar_horizontal_stacked
                 data_source:
                   type: esql
-                  query: 'FROM {{ consts.attacks_index }}
-
-                    | WHERE @timestamp >= ?_tstart AND @timestamp <= ?_tend AND `service.name` IS NOT NULL AND `attack.outcome` IS NOT
-                    NULL
-
-                    | EVAL Outcome = CASE(`attack.outcome` == "exploited", "Exploited", `attack.outcome` == "blocked", "Blocked", "Attempted")
-
-                    | STATS attacks = COUNT(*) BY `service.name`, Outcome
-
-                    | SORT attacks DESC
-
-                    | LIMIT 20'
+                  query: |
+                    SET project_routing = "_alias:{{ consts.security_project_alias }}";
+                    FROM {{ consts.security_alerts_index }}
+                    | WHERE @timestamp >= ?_tstart AND @timestamp <= ?_tend AND `kibana.alert.rule.name` IS NOT NULL
+                    | STATS alerts = COUNT(*) BY `kibana.alert.rule.name`, `kibana.alert.severity`
+                    | SORT alerts DESC
+                    | LIMIT 20
                 x:
-                  column: service.name
+                  column: kibana.alert.rule.name
                 y:
-                - column: attacks
+                - column: alerts
                 breakdown_by:
-                  column: Outcome
-          - id: top-attack-types
+                  column: kibana.alert.severity
+          - id: top-techniques
             type: vis
             grid: {x: 30, y: 0, w: 18, h: 14}
             config:
               type: xy
-              title: Top Attack Types
+              title: Top MITRE Techniques
               legend:
                 visibility: visible
                 placement: outside
@@ -767,171 +556,51 @@ steps:
               - type: bar_horizontal_stacked
                 data_source:
                   type: esql
-                  query: 'FROM {{ consts.attacks_index }}
-
-                    | WHERE @timestamp >= ?_tstart AND @timestamp <= ?_tend AND `threat.technique.name` IS NOT NULL AND `attack.outcome`
-                    IS NOT NULL
-
+                  query: |
+                    SET project_routing = "_alias:{{ consts.security_project_alias }}";
+                    FROM {{ consts.security_alerts_index }}
+                    | WHERE @timestamp >= ?_tstart AND @timestamp <= ?_tend AND `threat.technique.name` IS NOT NULL
                     | EVAL `Attack Type` = TO_UPPER(`threat.technique.name`)
-
-                    | EVAL Outcome = CASE(`attack.outcome` == "exploited", "Exploited", `attack.outcome` == "blocked", "Blocked", "Attempted")
-
-                    | STATS attacks = COUNT(*) BY `Attack Type`, Outcome
-
-                    | SORT attacks DESC
-
-                    | LIMIT 20'
+                    | STATS alerts = COUNT(*) BY `Attack Type`, `kibana.alert.severity`
+                    | SORT alerts DESC
+                    | LIMIT 20
                 x:
                   column: Attack Type
                 y:
-                - column: attacks
+                - column: alerts
                 breakdown_by:
-                  column: Outcome
-          - id: attacks-table
+                  column: kibana.alert.severity
+          - id: alerts-table
             type: vis
             grid: {x: 0, y: 14, w: 48, h: 20}
             config:
               type: data_table
-              title: Attacks
+              title: Security Alerts
               data_source:
                 type: esql
-                query: 'FROM {{ consts.attacks_index }}
-
+                query: |
+                  SET project_routing = "_alias:{{ consts.security_project_alias }}";
+                  FROM {{ consts.security_alerts_index }}
                   | WHERE @timestamp >= ?_tstart AND @timestamp <= ?_tend
-
-                  | EVAL ID = COALESCE(`attack.id`, `event.id`)
-
-                  | EVAL Outcome = CASE(`attack.outcome` == "exploited", "Exploited", `attack.outcome` == "blocked", "Blocked", "Attempted")
-
-                  | EVAL `Attack Type` = TO_UPPER(`threat.technique.name`)
-
-                  | EVAL `Event Trigger` = message
-
-                  | EVAL Application = `service.name`
-
-                  | EVAL Tier = `service.node.name`
-
-                  | EVAL Status = COALESCE(labels.status, "Open")
-
+                  | EVAL Rule = `kibana.alert.rule.name`
+                  | EVAL Severity = `kibana.alert.severity`
+                  | EVAL `Attack Type` = COALESCE(TO_UPPER(`threat.technique.name`), "n/a")
+                  | EVAL Reason = COALESCE(`kibana.alert.reason`, message)
+                  | EVAL Host = COALESCE(`host.name`, "n/a")
+                  | EVAL Status = COALESCE(`kibana.alert.workflow_status`, "open")
                   | EVAL events = 1
-
-                  | STATS events = SUM(events) BY ID, Outcome, `Attack Type`, `Event Trigger`, Application, Tier, Status
-
+                  | STATS events = SUM(events) BY Rule, Severity, `Attack Type`, Reason, Host, Status
                   | SORT events DESC
-
-                  | LIMIT 50'
+                  | LIMIT 50
               rows:
-              - column: ID
-              - column: Outcome
+              - column: Rule
+              - column: Severity
               - column: Attack Type
-              - column: Event Trigger
-              - column: Application
-              - column: Tier
+              - column: Reason
+              - column: Host
               - column: Status
               metrics:
               - column: events
-
-  - name: get_rule_critical_vulns
-    type: kibana.request
-    on-failure:
-      continue: true
-    with:
-      method: GET
-      path: /api/alerting/v2/rules/auto-appsec-critical-vulnerabilities
-      headers:
-        Elastic-Api-Version: "2023-10-31"
-
-  - name: create_rule_critical_vulns
-    type: kibana.request
-    if: "steps.get_rule_critical_vulns.error.message: HTTP*404*"
-    on-failure:
-      continue: true
-    with:
-      method: PUT
-      path: /api/alerting/v2/rules/auto-appsec-critical-vulnerabilities
-      headers:
-        Elastic-Api-Version: "2023-10-31"
-      body:
-        kind: alert
-        metadata:
-          name: "Auto: AppSec Critical Vulnerabilities"
-          description: "Universal ES|QL — Critical / CVSS≥9 vulnerability findings on observed services."
-          tags: [appsec, auto-ops, universal, security]
-          routing_tags: [appsec]
-        schedule:
-          every: 5m
-          lookback: 1h
-        time_field: "@timestamp"
-        query:
-          base: |
-            SET unmapped_fields="nullify";
-            FROM {{ consts.appsec_index }}
-            | WHERE @timestamp >= ?_tstart AND @timestamp <= ?_tend
-            | EVAL sev = `vulnerability.severity`
-            | EVAL cvss = `vulnerability.score.base`
-            | EVAL svc = COALESCE(`service.name`, "unknown")
-            | WHERE sev == "Critical" OR cvss >= 9.0
-            | STATS critical_findings = COUNT(*) BY svc
-            | KEEP svc, critical_findings
-          breach:
-            segment: "| WHERE critical_findings > 0"
-        grouping:
-          fields: [svc]
-        recovery:
-          strategy: no_breach
-        no_data:
-          strategy: ignore
-
-  - name: get_rule_exploited_attacks
-    type: kibana.request
-    on-failure:
-      continue: true
-    with:
-      method: GET
-      path: /api/alerting/v2/rules/auto-appsec-exploited-attacks
-      headers:
-        Elastic-Api-Version: "2023-10-31"
-
-  - name: create_rule_exploited_attacks
-    type: kibana.request
-    if: "steps.get_rule_exploited_attacks.error.message: HTTP*404*"
-    on-failure:
-      continue: true
-    with:
-      method: PUT
-      path: /api/alerting/v2/rules/auto-appsec-exploited-attacks
-      headers:
-        Elastic-Api-Version: "2023-10-31"
-      body:
-        kind: alert
-        metadata:
-          name: "Auto: AppSec Exploited Attacks"
-          description: "Universal ES|QL — runtime attacks with `attack.outcome` = exploited."
-          tags: [appsec, auto-ops, universal, security]
-          routing_tags: [appsec]
-        schedule:
-          every: 5m
-          lookback: 1h
-        time_field: "@timestamp"
-        query:
-          base: |
-            SET unmapped_fields="nullify";
-            FROM {{ consts.attacks_index }}
-            | WHERE @timestamp >= ?_tstart AND @timestamp <= ?_tend
-            | EVAL outcome = `attack.outcome`
-            | EVAL tech = COALESCE(`threat.technique.name`, "unknown")
-            | EVAL svc = COALESCE(`service.name`, "unknown")
-            | WHERE outcome == "exploited"
-            | STATS exploited = COUNT(*) BY svc, tech
-            | KEEP svc, tech, exploited
-          breach:
-            segment: "| WHERE exploited > 0"
-        grouping:
-          fields: [svc, tech]
-        recovery:
-          strategy: no_breach
-        no_data:
-          strategy: ignore
 
   - name: list_open_auto_ops_cases
     type: kibana.request
@@ -958,42 +627,32 @@ steps:
     with:
       message: |
         You are an AppSec-aware SRE on Observability.
-        You own vulnerability / composition / runtime-attack Case lifecycle with AI remediation outlines.
-        Findings are mapped to **live** services discovered from OTel traces + Prometheus metrics.
+        You own vulnerability / composition / detection-alert Case lifecycle with AI remediation outlines.
+        **Primary evidence is Elastic Security via CPS** — never invent findings, never seed data, never use Security or Search MCP.
 
-        ## Live telemetry discovery
-        OTel services / languages:
-        {{ steps.discover_otel_services.output }}
-
-        Prom login-failure pressure:
-        {{ steps.discover_prom_login_pressure.output }}
-
-        HTTP 5xx hotspots:
-        {{ steps.discover_http5xx.output }}
-
-        ## Observability evidence (telemetry-derived AppSec indices)
+        ## Elastic Security evidence (CPS)
         Vulnerability severity snapshot (7d):
-        {{ steps.critical_vuln_signals.output }}
+        {{ steps.security_vuln_severity.output }}
 
-        Software composition hotspots:
-        {{ steps.composition_hotspots.output }}
+        Package / CVE hotspots (7d):
+        {{ steps.security_vuln_hotspots.output }}
 
-        Runtime attack outcomes:
-        {{ steps.attack_outcome_signals.output }}
+        Detection alert rollup (7d):
+        {{ steps.security_alert_signals.output }}
+
+        Critical/high alerts (24h):
+        {{ steps.security_critical_alerts.output }}
 
         Already-open Observability Cases (tag auto-ops):
         {{ steps.list_open_auto_ops_cases.output }}
 
-        Dashboards already upserted (do NOT recreate):
+        Dashboards already upserted (do NOT recreate — they query Security via CPS):
         - Auto: AppSec Vulnerabilities (`auto-appsec-vulnerabilities`)
         - Auto: AppSec Software Composition (`auto-appsec-software-composition`)
         - Auto: AppSec Runtime Attacks (`auto-appsec-runtime-attacks`)
 
-        Universal alerts ensured:
-        - Auto: AppSec Critical Vulnerabilities
-        - Auto: AppSec Exploited Attacks
-
         ## CPS enrichment — Security (preferred — do NOT use Security MCP)
+        Re-query when you need fresher detail:
         ```
         SET project_routing = "_alias:{{ consts.security_project_alias }}";
         FROM {{ consts.security_alerts_index }}
@@ -1001,55 +660,50 @@ steps:
         | STATS alerts = COUNT(*) BY `kibana.alert.rule.name`, `kibana.alert.severity`
         | SORT alerts DESC
         | LIMIT 20
-        
         ```
-        Also try findings when available:
         ```
         SET project_routing = "_alias:{{ consts.security_project_alias }}";
         FROM {{ consts.security_vuln_index }}
         | WHERE @timestamp > NOW() - 7 days
         | STATS c = COUNT(*) BY `vulnerability.severity`
         | LIMIT 20
-        
         ```
 
         ## CPS enrichment — Search (preferred — do NOT use Search MCP)
-        Query the linked Search project for remediation knowledge (upgrade notes, runbooks, indexed docs):
+        Query the linked Search project for remediation knowledge (upgrade notes, runbooks):
         ```
         SET project_routing = "_alias:{{ consts.search_project_alias }}";
         FROM *
         | WHERE @timestamp > NOW() - 90 days OR _id IS NOT NULL
         | LIMIT 5
-        
         ```
         Prefer targeted searches for package names / CVE ids from the hotspots above.
-        If CPS returns empty / unavailable, note once and continue with origin AppSec evidence — never ask to configure MCP.
+        If CPS returns empty / unavailable, note once and continue with Security evidence — never ask to configure MCP.
 
         ## Lifecycle rules (critical — stop comment spam)
-        Theme = AppSec posture (critical CVEs, high-CVSS packages, exploited runtime attacks).
+        Theme = AppSec posture from Elastic Security (critical/high vulns, CVSS≥9 packages, critical/high detection alerts).
         Tags on Cases: **security**, **auto-ops**, **appsec**.
 
         1) **OPEN_CASE** — No open theme Case AND risk warrants one
-           (any Critical findings, CVSS≥9 packages still Detected, or exploited attacks > 0).
+           (Critical/High Security findings, CVSS≥9 packages, or critical/high alerts > 0).
            Create ONE Observability Case (owner: observability; tags: security, auto-ops, appsec;
-           severity from evidence). Include Summary + Evidence (o11y + CPS) + **Remediation outline**
-           (upgrade `package.fixed_version`, block technique, Search hit if any).
+           severity from evidence). Include Summary + Evidence (Security CPS) + **Remediation outline**
+           (upgrade `package.fixed_version`, respond to rule/technique, Search hit if any).
            Reference the three Auto: AppSec dashboards. Mention CPS (not MCP).
 
         2) **KEEP_OPEN_SILENT** — Open theme Case exists AND risk still elevated AND
            nothing material changed. Do **NOT** comment. Do **NOT** create another Case.
 
         3) **UPDATE_CASE** — Open theme Case exists AND material change
-           (new Critical CVE, new exploited technique, severity shift, first CPS Security/Search hit).
+           (new Critical CVE, new high-severity rule, severity shift, first CPS Search hit).
            Add ONE short comment with what changed + refreshed remediation outline.
 
         4) **CLOSE_CASE** — Open theme Case exists AND AppSec risk has **cleared**:
-           - no Critical findings and no CVSS≥9 Detected rows in the 7d snapshot, AND
-           - no exploited attacks in the 7d attack snapshot, AND
-           - no fresh correlated Security alerts for the same theme (when CPS works).
+           - no Critical/High findings and no CVSS≥9 rows in the 7d Security snapshot, AND
+           - no critical/high Security alerts in the 24h snapshot.
            Close with one resolution comment.
 
-        5) **NO_CASE** — No actionable AppSec risk and no open theme Case to close.
+        5) **NO_CASE** — No actionable Security AppSec risk and no open theme Case to close.
 
         End your reply with EXACTLY this Markdown (after any tool use):
 
@@ -1069,8 +723,5 @@ steps:
         One line: Search remediation hits (or `unavailable` / `empty`)
 
         ## Remediation
-        2–4 concrete next steps (upgrade / config / detect)
-
-        ## Summary
-        3–6 bullets.
-    timeout: 12m
+        2–5 bullets (or `n/a`)
+    timeout: 15m
