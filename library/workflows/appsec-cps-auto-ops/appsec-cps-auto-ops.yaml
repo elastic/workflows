@@ -1,6 +1,6 @@
 template-metadata:
   slug: appsec-cps-auto-ops
-  version: "1.1.0"
+  version: "1.1.1"
   availability: ">=9.6.0"
   name: "AppSec CPS auto-ops (Security via CPS)"
   description: >-
@@ -114,9 +114,8 @@ steps:
     with:
       format: json
       query: |
-        SET project_routing = "_alias:{{ consts.security_project_alias }}";
         SET unmapped_fields="nullify";
-        FROM {{ consts.security_vuln_index }}
+        FROM {{ consts.security_project_alias }}:{{ consts.security_vuln_index }}
         | WHERE @timestamp > NOW() - 7 days
             AND `vulnerability.severity` IS NOT NULL
         | STATS
@@ -134,9 +133,8 @@ steps:
     with:
       format: json
       query: |
-        SET project_routing = "_alias:{{ consts.security_project_alias }}";
         SET unmapped_fields="nullify";
-        FROM {{ consts.security_vuln_index }}
+        FROM {{ consts.security_project_alias }}:{{ consts.security_vuln_index }}
         | WHERE @timestamp > NOW() - 7 days
             AND `package.name` IS NOT NULL
         | STATS
@@ -153,9 +151,8 @@ steps:
     with:
       format: json
       query: |
-        SET project_routing = "_alias:{{ consts.security_project_alias }}";
         SET unmapped_fields="nullify";
-        FROM {{ consts.security_alerts_index }}
+        FROM {{ consts.security_project_alias }}:{{ consts.security_alerts_index }}
         | WHERE @timestamp > NOW() - 7 days
         | STATS
             alerts = COUNT(*)
@@ -170,9 +167,8 @@ steps:
     with:
       format: json
       query: |
-        SET project_routing = "_alias:{{ consts.security_project_alias }}";
         SET unmapped_fields="nullify";
-        FROM {{ consts.security_alerts_index }}
+        FROM {{ consts.security_project_alias }}:{{ consts.security_alerts_index }}
         | WHERE @timestamp > NOW() - 24 hours
             AND (`kibana.alert.severity` == "critical" OR `kibana.alert.severity` == "high")
         | STATS
@@ -233,8 +229,7 @@ steps:
                 data_source:
                   type: esql
                   query: |
-                    SET project_routing = "_alias:{{ consts.security_project_alias }}";
-                    FROM {{ consts.security_vuln_index }}
+                    FROM {{ consts.security_project_alias }}:{{ consts.security_vuln_index }}
                     | WHERE @timestamp >= ?_tstart AND @timestamp <= ?_tend AND `vulnerability.severity` IS NOT NULL
                     | STATS findings = COUNT(*) BY `vulnerability.severity`
                     | EVAL severity_order = CASE(
@@ -281,8 +276,7 @@ steps:
                 data_source:
                   type: esql
                   query: |
-                    SET project_routing = "_alias:{{ consts.security_project_alias }}";
-                    FROM {{ consts.security_vuln_index }}
+                    FROM {{ consts.security_project_alias }}:{{ consts.security_vuln_index }}
                     | WHERE @timestamp <= ?_tend AND @timestamp > ?_tstart
                         AND `vulnerability.severity` IS NOT NULL
                     | STATS findings = COUNT(*) BY `vulnerability.severity`, BUCKET(@timestamp, 75, ?_tstart, ?_tend)
@@ -320,8 +314,7 @@ steps:
                 data_source:
                   type: esql
                   query: |
-                    SET project_routing = "_alias:{{ consts.security_project_alias }}";
-                    FROM {{ consts.security_vuln_index }}
+                    FROM {{ consts.security_project_alias }}:{{ consts.security_vuln_index }}
                     | WHERE @timestamp >= ?_tstart AND @timestamp <= ?_tend
                     | EVAL first_seen = COALESCE(`vulnerability.first_found`, @timestamp)
                     | EVAL age_days = DATE_DIFF("days", first_seen, NOW())
@@ -343,8 +336,7 @@ steps:
               data_source:
                 type: esql
                 query: |
-                  SET project_routing = "_alias:{{ consts.security_project_alias }}";
-                  FROM {{ consts.security_vuln_index }}
+                  FROM {{ consts.security_project_alias }}:{{ consts.security_vuln_index }}
                   | WHERE @timestamp >= ?_tstart AND @timestamp <= ?_tend
                   | EVAL Title = COALESCE(message, `vulnerability.description`, `vulnerability.id`)
                   | EVAL ID = `vulnerability.id`
@@ -404,8 +396,7 @@ steps:
               data_source:
                 type: esql
                 query: |
-                  SET project_routing = "_alias:{{ consts.security_project_alias }}";
-                  FROM {{ consts.security_vuln_index }}
+                  FROM {{ consts.security_project_alias }}:{{ consts.security_vuln_index }}
                   | WHERE @timestamp >= ?_tstart AND @timestamp <= ?_tend
                       AND `package.name` IS NOT NULL
                   | EVAL Library = CONCAT(`package.name`, ":", COALESCE(`package.version`, ""))
@@ -479,8 +470,7 @@ steps:
                 data_source:
                   type: esql
                   query: |
-                    SET project_routing = "_alias:{{ consts.security_project_alias }}";
-                    FROM {{ consts.security_alerts_index }}
+                    FROM {{ consts.security_project_alias }}:{{ consts.security_alerts_index }}
                     | WHERE @timestamp >= ?_tstart AND @timestamp <= ?_tend AND `kibana.alert.severity` IS NOT NULL
                     | STATS alerts = COUNT(*) BY `kibana.alert.severity`
                     | EVAL severity_order = CASE(
@@ -518,8 +508,7 @@ steps:
                 data_source:
                   type: esql
                   query: |
-                    SET project_routing = "_alias:{{ consts.security_project_alias }}";
-                    FROM {{ consts.security_alerts_index }}
+                    FROM {{ consts.security_project_alias }}:{{ consts.security_alerts_index }}
                     | WHERE @timestamp >= ?_tstart AND @timestamp <= ?_tend AND `kibana.alert.rule.name` IS NOT NULL
                     | STATS alerts = COUNT(*) BY `kibana.alert.rule.name`, `kibana.alert.severity`
                     | SORT alerts DESC
@@ -557,8 +546,7 @@ steps:
                 data_source:
                   type: esql
                   query: |
-                    SET project_routing = "_alias:{{ consts.security_project_alias }}";
-                    FROM {{ consts.security_alerts_index }}
+                    FROM {{ consts.security_project_alias }}:{{ consts.security_alerts_index }}
                     | WHERE @timestamp >= ?_tstart AND @timestamp <= ?_tend AND `threat.technique.name` IS NOT NULL
                     | EVAL `Attack Type` = TO_UPPER(`threat.technique.name`)
                     | STATS alerts = COUNT(*) BY `Attack Type`, `kibana.alert.severity`
@@ -579,8 +567,7 @@ steps:
               data_source:
                 type: esql
                 query: |
-                  SET project_routing = "_alias:{{ consts.security_project_alias }}";
-                  FROM {{ consts.security_alerts_index }}
+                  FROM {{ consts.security_project_alias }}:{{ consts.security_alerts_index }}
                   | WHERE @timestamp >= ?_tstart AND @timestamp <= ?_tend
                   | EVAL Rule = `kibana.alert.rule.name`
                   | EVAL Severity = `kibana.alert.severity`
@@ -654,16 +641,14 @@ steps:
         ## CPS enrichment — Security (preferred — do NOT use Security MCP)
         Re-query when you need fresher detail:
         ```
-        SET project_routing = "_alias:{{ consts.security_project_alias }}";
-        FROM {{ consts.security_alerts_index }}
+        FROM {{ consts.security_project_alias }}:{{ consts.security_alerts_index }}
         | WHERE @timestamp > NOW() - 24 hours
         | STATS alerts = COUNT(*) BY `kibana.alert.rule.name`, `kibana.alert.severity`
         | SORT alerts DESC
         | LIMIT 20
         ```
         ```
-        SET project_routing = "_alias:{{ consts.security_project_alias }}";
-        FROM {{ consts.security_vuln_index }}
+        FROM {{ consts.security_project_alias }}:{{ consts.security_vuln_index }}
         | WHERE @timestamp > NOW() - 7 days
         | STATS c = COUNT(*) BY `vulnerability.severity`
         | LIMIT 20

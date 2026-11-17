@@ -1,6 +1,6 @@
 template-metadata:
   slug: appsec-cps-remediate
-  version: "1.1.0"
+  version: "1.1.1"
   availability: ">=9.6.0"
   name: "AppSec CPS remediate (Security via CPS)"
   description: >-
@@ -90,9 +90,8 @@ steps:
     with:
       format: json
       query: |
-        SET project_routing = "_alias:{{ consts.security_project_alias }}";
         SET unmapped_fields="nullify";
-        FROM {{ consts.security_vuln_index }}
+        FROM {{ consts.security_project_alias }}:{{ consts.security_vuln_index }}
         | WHERE @timestamp > NOW() - 7 days
             AND (
               `vulnerability.severity` == "CRITICAL" OR `vulnerability.severity` == "Critical"
@@ -112,9 +111,8 @@ steps:
     with:
       format: json
       query: |
-        SET project_routing = "_alias:{{ consts.security_project_alias }}";
         SET unmapped_fields="nullify";
-        FROM {{ consts.security_vuln_index }}
+        FROM {{ consts.security_project_alias }}:{{ consts.security_vuln_index }}
         | WHERE @timestamp > NOW() - 7 days
             AND `package.name` IS NOT NULL
             AND (
@@ -136,9 +134,8 @@ steps:
     with:
       format: json
       query: |
-        SET project_routing = "_alias:{{ consts.security_project_alias }}";
         SET unmapped_fields="nullify";
-        FROM {{ consts.security_alerts_index }}
+        FROM {{ consts.security_project_alias }}:{{ consts.security_alerts_index }}
         | WHERE @timestamp > NOW() - 24 hours
             AND (`kibana.alert.severity` == "critical" OR `kibana.alert.severity` == "high")
         | STATS
@@ -198,8 +195,7 @@ steps:
         ### CPS Security (preferred — no Security MCP)
         Re-check when needed:
         ```
-        SET project_routing = "_alias:{{ consts.security_project_alias }}";
-        FROM {{ consts.security_alerts_index }}
+        FROM {{ consts.security_project_alias }}:{{ consts.security_alerts_index }}
         | WHERE @timestamp > NOW() - 6 hours
         | STATS c = COUNT(*) BY `kibana.alert.rule.name`
         | LIMIT 10
