@@ -1,6 +1,6 @@
 template-metadata:
   slug: appsec-cps-auto-ops
-  version: "1.1.1"
+  version: "1.1.2"
   availability: ">=9.6.0"
   name: "AppSec CPS auto-ops (Security via CPS)"
   description: >-
@@ -49,7 +49,7 @@ template-metadata:
           linked Security project.
         inputType: esIndex
         required: true
-        default: "logs-cloud_security_posture.vulnerabilities-*"
+        default: "logs-cloud_security_posture.vulnerabilities*"
 
 name: AppSec CPS Auto-ops
 description: >
@@ -115,7 +115,7 @@ steps:
       format: json
       query: |
         SET unmapped_fields="nullify";
-        FROM {{ consts.security_project_alias }}:{{ consts.security_vuln_index }}
+        FROM {{ consts.security_project_alias }}:logs-cloud_security_posture.vulnerabilities*
         | WHERE @timestamp > NOW() - 7 days
             AND `vulnerability.severity` IS NOT NULL
         | STATS
@@ -134,7 +134,7 @@ steps:
       format: json
       query: |
         SET unmapped_fields="nullify";
-        FROM {{ consts.security_project_alias }}:{{ consts.security_vuln_index }}
+        FROM {{ consts.security_project_alias }}:logs-cloud_security_posture.vulnerabilities*
         | WHERE @timestamp > NOW() - 7 days
             AND `package.name` IS NOT NULL
         | STATS
@@ -229,8 +229,9 @@ steps:
                 data_source:
                   type: esql
                   query: |
-                    FROM {{ consts.security_project_alias }}:{{ consts.security_vuln_index }}
-                    | WHERE @timestamp >= ?_tstart AND @timestamp <= ?_tend AND `vulnerability.severity` IS NOT NULL
+                    SET unmapped_fields="nullify";
+                    FROM {{ consts.security_project_alias }}:logs-cloud_security_posture.vulnerabilities*
+                    | WHERE COALESCE(@timestamp, event.ingested) >= ?_tstart AND COALESCE(@timestamp, event.ingested) <= ?_tend AND `vulnerability.severity` IS NOT NULL
                     | STATS findings = COUNT(*) BY `vulnerability.severity`
                     | EVAL severity_order = CASE(
                         `vulnerability.severity` == "CRITICAL" OR `vulnerability.severity` == "Critical", 1,
@@ -276,7 +277,8 @@ steps:
                 data_source:
                   type: esql
                   query: |
-                    FROM {{ consts.security_project_alias }}:{{ consts.security_vuln_index }}
+                    SET unmapped_fields="nullify";
+                    FROM {{ consts.security_project_alias }}:logs-cloud_security_posture.vulnerabilities*
                     | WHERE @timestamp <= ?_tend AND @timestamp > ?_tstart
                         AND `vulnerability.severity` IS NOT NULL
                     | STATS findings = COUNT(*) BY `vulnerability.severity`, BUCKET(@timestamp, 75, ?_tstart, ?_tend)
@@ -314,8 +316,9 @@ steps:
                 data_source:
                   type: esql
                   query: |
-                    FROM {{ consts.security_project_alias }}:{{ consts.security_vuln_index }}
-                    | WHERE @timestamp >= ?_tstart AND @timestamp <= ?_tend
+                    SET unmapped_fields="nullify";
+                    FROM {{ consts.security_project_alias }}:logs-cloud_security_posture.vulnerabilities*
+                    | WHERE COALESCE(@timestamp, event.ingested) >= ?_tstart AND COALESCE(@timestamp, event.ingested) <= ?_tend
                     | EVAL first_seen = COALESCE(`vulnerability.first_found`, @timestamp)
                     | EVAL age_days = DATE_DIFF("days", first_seen, NOW())
                     | EVAL age_bucket = CASE(age_days < 1, "<1 Day Ago", age_days <= 7, "1-7 Days Ago", age_days <= 14, "8-14 Days Ago", "14+ Days Ago")
@@ -336,8 +339,9 @@ steps:
               data_source:
                 type: esql
                 query: |
-                  FROM {{ consts.security_project_alias }}:{{ consts.security_vuln_index }}
-                  | WHERE @timestamp >= ?_tstart AND @timestamp <= ?_tend
+                  SET unmapped_fields="nullify";
+                  FROM {{ consts.security_project_alias }}:logs-cloud_security_posture.vulnerabilities*
+                  | WHERE COALESCE(@timestamp, event.ingested) >= ?_tstart AND COALESCE(@timestamp, event.ingested) <= ?_tend
                   | EVAL Title = COALESCE(message, `vulnerability.description`, `vulnerability.id`)
                   | EVAL ID = `vulnerability.id`
                   | EVAL Reached = CASE(`vulnerability.score.base` >= 9.0, "Yes", "No")
@@ -396,8 +400,9 @@ steps:
               data_source:
                 type: esql
                 query: |
-                  FROM {{ consts.security_project_alias }}:{{ consts.security_vuln_index }}
-                  | WHERE @timestamp >= ?_tstart AND @timestamp <= ?_tend
+                  SET unmapped_fields="nullify";
+                  FROM {{ consts.security_project_alias }}:logs-cloud_security_posture.vulnerabilities*
+                  | WHERE COALESCE(@timestamp, event.ingested) >= ?_tstart AND COALESCE(@timestamp, event.ingested) <= ?_tend
                       AND `package.name` IS NOT NULL
                   | EVAL Library = CONCAT(`package.name`, ":", COALESCE(`package.version`, ""))
                   | EVAL Application = COALESCE(`resource.name`, `host.name`, "n/a")
@@ -470,8 +475,9 @@ steps:
                 data_source:
                   type: esql
                   query: |
+                    SET unmapped_fields="nullify";
                     FROM {{ consts.security_project_alias }}:{{ consts.security_alerts_index }}
-                    | WHERE @timestamp >= ?_tstart AND @timestamp <= ?_tend AND `kibana.alert.severity` IS NOT NULL
+                    | WHERE COALESCE(@timestamp, event.ingested) >= ?_tstart AND COALESCE(@timestamp, event.ingested) <= ?_tend AND `kibana.alert.severity` IS NOT NULL
                     | STATS alerts = COUNT(*) BY `kibana.alert.severity`
                     | EVAL severity_order = CASE(
                         `kibana.alert.severity` == "critical", 1,
@@ -508,8 +514,9 @@ steps:
                 data_source:
                   type: esql
                   query: |
+                    SET unmapped_fields="nullify";
                     FROM {{ consts.security_project_alias }}:{{ consts.security_alerts_index }}
-                    | WHERE @timestamp >= ?_tstart AND @timestamp <= ?_tend AND `kibana.alert.rule.name` IS NOT NULL
+                    | WHERE COALESCE(@timestamp, event.ingested) >= ?_tstart AND COALESCE(@timestamp, event.ingested) <= ?_tend AND `kibana.alert.rule.name` IS NOT NULL
                     | STATS alerts = COUNT(*) BY `kibana.alert.rule.name`, `kibana.alert.severity`
                     | SORT alerts DESC
                     | LIMIT 20
@@ -546,8 +553,9 @@ steps:
                 data_source:
                   type: esql
                   query: |
+                    SET unmapped_fields="nullify";
                     FROM {{ consts.security_project_alias }}:{{ consts.security_alerts_index }}
-                    | WHERE @timestamp >= ?_tstart AND @timestamp <= ?_tend AND `threat.technique.name` IS NOT NULL
+                    | WHERE COALESCE(@timestamp, event.ingested) >= ?_tstart AND COALESCE(@timestamp, event.ingested) <= ?_tend AND `threat.technique.name` IS NOT NULL
                     | EVAL `Attack Type` = TO_UPPER(`threat.technique.name`)
                     | STATS alerts = COUNT(*) BY `Attack Type`, `kibana.alert.severity`
                     | SORT alerts DESC
@@ -567,8 +575,9 @@ steps:
               data_source:
                 type: esql
                 query: |
+                  SET unmapped_fields="nullify";
                   FROM {{ consts.security_project_alias }}:{{ consts.security_alerts_index }}
-                  | WHERE @timestamp >= ?_tstart AND @timestamp <= ?_tend
+                  | WHERE COALESCE(@timestamp, event.ingested) >= ?_tstart AND COALESCE(@timestamp, event.ingested) <= ?_tend
                   | EVAL Rule = `kibana.alert.rule.name`
                   | EVAL Severity = `kibana.alert.severity`
                   | EVAL `Attack Type` = COALESCE(TO_UPPER(`threat.technique.name`), "n/a")
@@ -641,6 +650,7 @@ steps:
         ## CPS enrichment — Security (preferred — do NOT use Security MCP)
         Re-query when you need fresher detail:
         ```
+        SET unmapped_fields="nullify";
         FROM {{ consts.security_project_alias }}:{{ consts.security_alerts_index }}
         | WHERE @timestamp > NOW() - 24 hours
         | STATS alerts = COUNT(*) BY `kibana.alert.rule.name`, `kibana.alert.severity`
@@ -648,7 +658,8 @@ steps:
         | LIMIT 20
         ```
         ```
-        FROM {{ consts.security_project_alias }}:{{ consts.security_vuln_index }}
+        SET unmapped_fields="nullify";
+        FROM {{ consts.security_project_alias }}:logs-cloud_security_posture.vulnerabilities*
         | WHERE @timestamp > NOW() - 7 days
         | STATS c = COUNT(*) BY `vulnerability.severity`
         | LIMIT 20

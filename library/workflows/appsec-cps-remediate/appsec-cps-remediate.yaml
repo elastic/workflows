@@ -1,6 +1,6 @@
 template-metadata:
   slug: appsec-cps-remediate
-  version: "1.1.1"
+  version: "1.1.2"
   availability: ">=9.6.0"
   name: "AppSec CPS remediate (Security via CPS)"
   description: >-
@@ -37,7 +37,7 @@ template-metadata:
         label: "Security vulnerability findings index (CPS)"
         inputType: esIndex
         required: true
-        default: "logs-cloud_security_posture.vulnerabilities-*"
+        default: "logs-cloud_security_posture.vulnerabilities*"
 
 name: AppSec CPS Remediate
 description: >
