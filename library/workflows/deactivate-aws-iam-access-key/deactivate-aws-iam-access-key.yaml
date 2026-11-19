@@ -1,0 +1,137 @@
+template-metadata:
+  slug: deactivate-aws-iam-access-key
+  version: "1.0.0"
+  availability: ">=9.7.0"
+  name: "Deactivate AWS IAM Access Key"
+  description: >-
+    Deactivate an AWS IAM access key from a security alert or manual input.
+    Reads the user's access keys, requires explicit analyst approval, changes
+    the selected key to Inactive, and reads the keys again for verification.
+    The AWS connector requires only iam:ListAccessKeys and iam:UpdateAccessKey.
+  solutions: [security]
+  categories: [response]
+  install:
+    form:
+      - name: aws-connector
+        label: "AWS connector"
+        description: >-
+          AWS connector with permission to list and deactivate access keys for
+          the IAM users this workflow may remediate.
+        inputType: connector
+        connectorType: .aws
+        required: true
+
+name: Deactivate AWS IAM Access Key
+description: |
+  Resolve an IAM user and access key from an alert or manual input, inspect the
+  current keys, request analyst approval, deactivate the selected key, and
+  verify the resulting state.
+
+triggers:
+  - type: alert
+  - type: manual
+    inputs:
+      - name: user_name
+        type: string
+        description: AWS IAM user name whose access key should be deactivated.
+        required: true
+        default: ""
+      - name: access_key_id
+        type: string
+        description: AWS IAM access key ID to deactivate.
+        required: true
+        default: ""
+
+steps:
+  # Alert fields take precedence; manual inputs support direct runs.
+  - name: resolve_target
+    type: data.set
+    with:
+      user_name: "{{ event.alerts[0].user.name | default: inputs.user_name }}"
+      access_key_id: "{{ event.alerts[0].aws.cloudtrail.user_identity.access_key_id | default: inputs.access_key_id }}"
+      alert_id: "{{ event.alerts[0].kibana.alert.uuid | default: event.alerts[0]._id | default: 'manual' }}"
+
+  # Fail closed when either target identifier is missing.
+  - name: validate_target
+    type: if
+    condition: "${{ variables.user_name != blank and variables.access_key_id != blank }}"
+    steps:
+      - name: list_access_keys_before
+        type: aws.request
+        connector-id: __install__.aws-connector
+        with:
+          service: iam
+          query:
+            Action: ListAccessKeys
+            Version: "2010-05-08"
+            UserName: "{{ variables.user_name }}"
+
+      - name: request_approval
+        type: waitForInput
+        with:
+          message: |-
+            Approve deactivation of AWS IAM access key {{ variables.access_key_id }}
+            for user {{ variables.user_name }}?
+
+            Alert: {{ variables.alert_id }}
+            The current ListAccessKeys response was:
+            {{ steps.list_access_keys_before.output.data | json }}
+          schema:
+            type: object
+            properties:
+              approved:
+                type: boolean
+                title: Deactivate this access key
+                default: false
+              notes:
+                type: string
+                title: Analyst notes
+            required:
+              - approved
+
+      # The only mutation is gated on an explicit boolean approval.
+      - name: deactivate_when_approved
+        type: if
+        condition: "${{ steps.request_approval.output.response.approved == true }}"
+        steps:
+          - name: deactivate_access_key
+            type: aws.request
+            connector-id: __install__.aws-connector
+            with:
+              service: iam
+              query:
+                Action: UpdateAccessKey
+                Version: "2010-05-08"
+                UserName: "{{ variables.user_name }}"
+                AccessKeyId: "{{ variables.access_key_id }}"
+                Status: Inactive
+
+      # Read after the approval branch so an approved mutation is always verified.
+      - name: list_access_keys_after
+        type: aws.request
+        connector-id: __install__.aws-connector
+        with:
+          service: iam
+          query:
+            Action: ListAccessKeys
+            Version: "2010-05-08"
+            UserName: "{{ variables.user_name }}"
+
+      - name: log_audit_result
+        type: console
+        with:
+          message: |-
+            Outcome: {% if steps.request_approval.output.response.approved == true %}AWS IAM access key {{ variables.access_key_id }} was deactivated for user {{ variables.user_name }}.{% else %}No change was made to AWS IAM access key {{ variables.access_key_id }} for user {{ variables.user_name }} because deactivation was rejected.{% endif %}
+            Alert: {{ variables.alert_id }}.
+            Approved: {{ steps.request_approval.output.response.approved }}.
+            Responder: {{ steps.request_approval.output.respondedBy }}.
+            Notes: {{ steps.request_approval.output.response.notes | default: '(none)' }}.
+            Verification ListAccessKeys response:
+            {{ steps.list_access_keys_after.output.data | json }}
+    else:
+      - name: log_missing_target
+        type: console
+        with:
+          message: >-
+            AWS IAM access-key remediation skipped because user.name/user_name
+            or aws.cloudtrail.user_identity.access_key_id/access_key_id was missing.
