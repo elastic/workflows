@@ -55,16 +55,6 @@ jobs:
             const { owner, repo } = context.repo;
             const { number, user } = context.payload.pull_request;
 
-            const { data: requested } = await github.rest.pulls.listRequestedReviewers({
-              owner,
-              repo,
-              pull_number: number,
-            });
-            if (requested.users.length > 0) {
-              core.info(`#${number} already has an individual reviewer; skipping.`);
-              return;
-            }
-
             // Oldest first, so PRs opened while paginating land on the last page
             // instead of shifting earlier pages and double-counting a PR.
             const pulls = await github.paginate(github.rest.pulls.list, {
@@ -79,6 +69,18 @@ jobs:
             let reviewer = rotation[position % rotation.length];
             if (reviewer.github === user.login) {
               reviewer = rotation[(position + 1) % rotation.length];
+            }
+
+            // Read right before the write, not before paginating, to keep the
+            // window for a reviewer requested by hand as short as possible.
+            const { data: requested } = await github.rest.pulls.listRequestedReviewers({
+              owner,
+              repo,
+              pull_number: number,
+            });
+            if (requested.users.length > 0) {
+              core.info(`#${number} already has an individual reviewer; skipping.`);
+              return;
             }
 
             await github.rest.pulls.requestReviewers({
