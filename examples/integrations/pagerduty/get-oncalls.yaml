@@ -41,17 +41,19 @@ triggers:
         description: 'If true, return only the earliest on-call for each user+escalation policy combination (default true)'
 steps:
   - name: list-oncalls
-    type: pagerduty_mcp.listOncalls
+    type: pagerduty_mcp.browseSchedules
     connector-id: <%= pagerduty_mcp-stack-connector-id %>
     with:
-      limit: ${{inputs.limit}}
-      schedule_ids: ${{inputs.schedule_ids}}
-      user_ids: ${{inputs.user_ids}}
-      escalation_policy_ids: ${{inputs.escalation_policy_ids}}
-      since: "${{inputs.since}}"
-      until: "${{inputs.until}}"
-      time_zone: "${{inputs.time_zone}}"
-      earliest: ${{inputs.earliest}}
+      request:
+        action: list_oncalls
+        limit: ${{inputs.limit}}
+        schedule_ids: ${{inputs.schedule_ids}}
+        user_ids: ${{inputs.user_ids}}
+        escalation_policy_ids: ${{inputs.escalation_policy_ids}}
+        since: "${{inputs.since}}"
+        until: "${{inputs.until}}"
+        time_zone: "${{inputs.time_zone}}"
+        earliest: ${{inputs.earliest}}
   - name: get-oncalls
     type: data.map
     items: ${{steps['list-oncalls'].output}}
