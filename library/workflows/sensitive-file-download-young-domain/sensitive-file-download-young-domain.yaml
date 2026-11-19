@@ -127,7 +127,7 @@ steps:
             FROM {{ consts.file_events_index }}
             | WHERE @timestamp > NOW() - {{ consts.lookback }}
               AND process.name IN ("chrome.exe", "msedge.exe", "firefox.exe")
-              AND file.extension IN ("msi", "js", "vbs", "vbe", "jse", "lnk", "url", "iso", "zip", "rar", "exe")
+              AND file.extension IN ("msi", "js", "vbs", "vbe", "jse", "lnk", "url", "iso", "zip", "rar", "exe", "ps1")
               AND file.origin_url IS NOT NULL
             | GROK file.origin_url """^https?:\/\/(?<domain>(?:\[[^\]]+\]|[^\/\?:#]+))"""
             | WHERE domain IS NOT NULL
