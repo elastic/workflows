@@ -48,15 +48,32 @@ jobs:
             const report = fs.existsSync('report.md') ? fs.readFileSync('report.md', 'utf8') : '';
             const body = report ? `${marker}\n\n${report.trim()}` : '';
 
-            // `workflow_run.pull_requests` is empty for fork PRs, so look the PR up
-            // by commit. Only a PR still at this commit gets the comment, so a
-            // slow run for an old commit cannot overwrite a newer report.
-            const { head_sha } = context.payload.workflow_run;
-            const { data: candidates } = await github.rest.repos.listPullRequestsAssociatedWithCommit({
+            // `workflow_run.pull_requests` is empty for fork PRs, and looking the PR
+            // up by commit only searches this repo, which misses fork commits. Look
+            // it up by head `owner:branch` instead. Only a PR still at this commit
+            // gets the comment, so a slow run for an old commit cannot overwrite a
+            // newer report.
+            const { head_sha, head_branch, head_repository } = context.payload.workflow_run;
+            // The source fork may have been deleted before this event was delivered.
+            if (!head_repository) {
+              core.warning('The head repository is gone; skipping the pull request comment.');
+              return;
+            }
+            const { data: candidates } = await github.rest.pulls.list({
               ...context.repo,
-              commit_sha: head_sha,
+              state: 'open',
+              head: `${head_repository.owner.login}:${head_branch}`,
             });
-            const prs = candidates.filter((pr) => pr.state === 'open' && pr.head.sha === head_sha);
+            const prs = candidates.filter((pr) => pr.head.sha === head_sha);
+            // The run does not say which PR triggered it. A fork branch with several
+            // open PRs (e.g. to different base branches) would have each run
+            // overwrite the report of the others, so skip rather than guess.
+            if (prs.length > 1) {
+              core.warning(
+                `Several open pull requests match ${head_sha}: ${prs.map((pr) => `#${pr.number}`).join(', ')}; skipping the pull request comment.`
+              );
+              return;
+            }
 
             for (const pr of prs) {
               const issue = { ...context.repo, issue_number: pr.number };
