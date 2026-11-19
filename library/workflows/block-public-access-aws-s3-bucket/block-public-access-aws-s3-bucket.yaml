@@ -7,10 +7,10 @@ template-metadata:
     Enable all four bucket-level Amazon S3 Block Public Access controls from a
     security alert or manual input. Reads whether a configuration exists,
     requires explicit analyst approval, applies the controls, and parses the
-    follow-up response for verification. Alert-driven runs require the AWS
-    integration's request-parameter retention mode to be All or Flattened. The
-    AWS connector requires only s3:GetBucketPublicAccessBlock and
-    s3:PutBucketPublicAccessBlock.
+    follow-up response for verification. Alert-driven runs resolve the bucket
+    from either the flattened or keyword request parameters emitted by the AWS
+    integration. The AWS connector requires only
+    s3:GetBucketPublicAccessBlock and s3:PutBucketPublicAccessBlock.
   solutions: [security]
   categories: [response]
   install:
@@ -29,9 +29,9 @@ description: |
   Resolve an S3 bucket, expected owner account, and region from an alert or
   manual input. Distinguish an absent bucket-level Block Public Access
   configuration from a returned one, require analyst approval, enable all four
-  controls, and verify the response. Alert-driven runs require the AWS
-  integration's request-parameter retention mode to be All or Flattened;
-  Keyword retains the bucket name only as an unparsed string.
+  controls, and verify the response. Alert-driven runs support every AWS
+  integration request-parameter retention mode by preferring the flattened
+  bucket name and falling back to the keyword request-parameter string.
 
 triggers:
   - type: alert
@@ -58,7 +58,7 @@ steps:
   - name: resolve_target
     type: data.set
     with:
-      bucket_name: "{{ event.alerts[0].aws.cloudtrail.flattened.request_parameters.bucketName | default: inputs.bucket_name }}"
+      bucket_name: "{% if event.alerts[0].aws.cloudtrail.flattened.request_parameters.bucketName != blank %}{{ event.alerts[0].aws.cloudtrail.flattened.request_parameters.bucketName }}{% elsif event.alerts[0].aws.cloudtrail.request_parameters contains 'bucketName=' %}{{ event.alerts[0].aws.cloudtrail.request_parameters | split: 'bucketName=' | last | split: ',' | first | remove: '}' | strip }}{% else %}{{ inputs.bucket_name }}{% endif %}"
       region: "{{ event.alerts[0].cloud.region | default: inputs.region }}"
       expected_bucket_owner: "{{ event.alerts[0].cloud.account.id | default: inputs.expected_bucket_owner }}"
       alert_id: "{{ event.alerts[0].kibana.alert.uuid | default: event.alerts[0]._id | default: 'manual' }}"
@@ -184,6 +184,19 @@ steps:
                     Pre-change state: {{ steps.classify_pre_read.output.state }}.
                     Follow-up GetPublicAccessBlock response:
                     {{ steps.get_public_access_block_after.output.data }}
+
+              - name: stop_if_unverified
+                type: if
+                condition: "${{ steps.check_verification_response.output.verified != 'true' }}"
+                steps:
+                  - name: fail_if_unverified
+                    type: workflow.fail
+                    with:
+                      message: >-
+                        PutPublicAccessBlock was requested for
+                        {{ variables.bucket_name }}, but the follow-up
+                        GetPublicAccessBlock response did not verify all four
+                        controls.
             else:
               - name: log_rejected_audit_result
                 type: console
@@ -208,12 +221,24 @@ steps:
                 Alert: {{ variables.alert_id }}.
                 Error status: {{ steps.get_public_access_block_before.error.status | default: '(unknown)' }}.
                 Error: {{ steps.get_public_access_block_before.error.message | default: steps.get_public_access_block_before.error }}.
+          - name: fail_pre_read
+            type: workflow.fail
+            with:
+              message: >-
+                GetPublicAccessBlock failed for {{ variables.bucket_name }};
+                remediation stopped before approval.
     else:
       - name: log_missing_target
         type: console
         with:
           message: >-
             AWS S3 Block Public Access remediation skipped because
-            aws.cloudtrail.flattened.request_parameters.bucketName/manual
-            bucket_name, cloud.region/manual region, or
+            neither the flattened nor keyword CloudTrail request parameters
+            supplied bucketName, or cloud.region/manual region or
             cloud.account.id/manual expected_bucket_owner was missing.
+      - name: fail_missing_target
+        type: workflow.fail
+        with:
+          message: >-
+            AWS S3 Block Public Access remediation requires a bucket name,
+            Region, and expected bucket owner.
