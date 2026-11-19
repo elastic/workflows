@@ -48,15 +48,18 @@ jobs:
             const report = fs.existsSync('report.md') ? fs.readFileSync('report.md', 'utf8') : '';
             const body = report ? `${marker}\n\n${report.trim()}` : '';
 
-            // `workflow_run.pull_requests` is empty for fork PRs, so look the PR up
-            // by commit. Only a PR still at this commit gets the comment, so a
-            // slow run for an old commit cannot overwrite a newer report.
-            const { head_sha } = context.payload.workflow_run;
-            const { data: candidates } = await github.rest.repos.listPullRequestsAssociatedWithCommit({
+            // `workflow_run.pull_requests` is empty for fork PRs, and looking the PR
+            // up by commit only searches this repo, which misses fork commits. Look
+            // it up by head `owner:branch` instead. Only a PR still at this commit
+            // gets the comment, so a slow run for an old commit cannot overwrite a
+            // newer report.
+            const { head_sha, head_branch, head_repository } = context.payload.workflow_run;
+            const { data: candidates } = await github.rest.pulls.list({
               ...context.repo,
-              commit_sha: head_sha,
+              state: 'open',
+              head: `${head_repository.owner.login}:${head_branch}`,
             });
-            const prs = candidates.filter((pr) => pr.state === 'open' && pr.head.sha === head_sha);
+            const prs = candidates.filter((pr) => pr.head.sha === head_sha);
 
             for (const pr of prs) {
               const issue = { ...context.repo, issue_number: pr.number };
