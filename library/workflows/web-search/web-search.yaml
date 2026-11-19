@@ -37,7 +37,7 @@ steps:
   # Run the search via the dedicated Brave step type. The subscription
   # token lives in the connector configuration.
   - name: web_search
-    type: brave-search.webSearch2
+    type: brave-search.webSearch
     connector-id: __install__.brave-search-connector
     with:
       q: "{{ inputs.query }}"
