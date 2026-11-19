@@ -1,0 +1,215 @@
+template-metadata:
+  slug: block-process-or-file-by-sha256-hash
+  version: "1.0.0"
+  availability: ">=9.5.0"
+  name: "Block Process or File by SHA256 Hash"
+  description: >-
+    From a security alert, add a SHA256 to the Elastic Defend blocklist.
+    Malicious file alerts (event.code malicious_file) use file.hash.sha256.
+    Every other alert uses process.hash.sha256. The blocklist entry is stored
+    as file.hash.sha256, which is how Defend matches an executable. One entry
+    is created per operating system (Windows, Linux, and macOS) because a
+    blocklist item accepts a single os_types value. Each entry applies to
+    every Defend policy.
+  solutions: [security]
+  categories: [response]
+
+# Defend matches the executable by file.hash.sha256. A process hash is written
+# to that same blocklist field. A blocklist item accepts one operating system,
+# so the same hash is written once for windows, once for linux, and once for
+# macos. consts.policy_tag assigns each entry; policy:all covers every Elastic
+# Defend integration policy. Malware blocklist must be enabled on the policy,
+# which is the default.
+name: Block Process or File by SHA256 Hash
+description: >
+  Run from a security alert, or pass sha256 manually. When event.code is
+  malicious_file, the hash is file.hash.sha256. Otherwise it is
+  process.hash.sha256. A typed sha256 overrides the alert. The value is added
+  to the Elastic Defend blocklist (list endpoint_blocklists) as
+  file.hash.sha256. One item is created for each of Windows, Linux, and
+  macOS. An entry that already uses the same item id is left as-is.
+enabled: true
+tags:
+  - security
+  - response
+  - blocklist
+
+triggers:
+  - type: alert
+  - type: manual
+    inputs:
+      - name: sha256
+        type: string
+        required: false
+        default: ""
+        description: >-
+          SHA256 to block. Leave empty to take file.hash.sha256 when the
+          alert event.code is malicious_file, and process.hash.sha256
+          otherwise.
+
+settings:
+  timeout: 5m
+  concurrency:
+    key: "{{ workflow.id }}"
+    strategy: drop
+    max: 1
+
+consts:
+  blocklist_id: endpoint_blocklists
+  policy_tag: policy:all
+
+steps:
+  - name: set_alert_context
+    type: data.set
+    with:
+      event_code: "{{ event.alerts[0].event.code | join: ',' | split: ',' | first | default: '' | downcase | strip }}"
+      file_sha256: "{{ event.alerts[0].file.hash.sha256 | join: ',' | split: ',' | first | default: '' | downcase | strip }}"
+      process_sha256: "{{ event.alerts[0].process.hash.sha256 | join: ',' | split: ',' | first | default: '' | downcase | strip }}"
+      rule_name: "{{ event.alerts[0].kibana.alert.rule.name | default: '' | append: '' | strip }}"
+      typed_sha256: "{% assign typed = inputs.sha256 | default: '' | append: '' | downcase | strip %}{% if typed == '<your_input>' %}{% else %}{{ typed }}{% endif %}"
+
+  - name: choose_hash
+    type: data.set
+    with:
+      decision: |
+        {%- assign typed = steps.set_alert_context.output.typed_sha256 -%}
+        {%- assign code = steps.set_alert_context.output.event_code -%}
+        {%- assign file_hash = steps.set_alert_context.output.file_sha256 -%}
+        {%- assign process_hash = steps.set_alert_context.output.process_sha256 -%}
+        {%- assign hash = '' -%}
+        {%- assign source = '' -%}
+        {%- if typed != '' -%}
+        {%- assign hash = typed -%}
+        {%- assign source = 'manual' -%}
+        {%- elsif code == 'malicious_file' -%}
+        {%- assign hash = file_hash -%}
+        {%- assign source = 'file.hash.sha256' -%}
+        {%- else -%}
+        {%- assign hash = process_hash -%}
+        {%- assign source = 'process.hash.sha256' -%}
+        {%- endif -%}
+        {%- assign hex_left = hash | remove: '0' | remove: '1' | remove: '2' | remove: '3' | remove: '4' | remove: '5' | remove: '6' | remove: '7' | remove: '8' | remove: '9' | remove: 'a' | remove: 'b' | remove: 'c' | remove: 'd' | remove: 'e' | remove: 'f' -%}
+        {%- assign ready = 'no' -%}
+        {%- assign reason = '' -%}
+        {%- if hash == '' -%}
+        {%- if code == 'malicious_file' -%}
+        {%- assign reason = 'malicious_file alert has no file.hash.sha256.' -%}
+        {%- elsif source == 'manual' -%}
+        {%- assign reason = 'Enter a SHA256, or run this from an alert that has one.' -%}
+        {%- else -%}
+        {%- assign reason = 'Alert has no process.hash.sha256.' -%}
+        {%- endif -%}
+        {%- else -%}
+        {%- if hash.size != 64 -%}
+        {%- assign reason = 'SHA256 must be 64 hex characters.' -%}
+        {%- else -%}
+        {%- if hex_left != '' -%}
+        {%- assign reason = 'SHA256 must be 64 hex characters.' -%}
+        {%- else -%}
+        {%- assign ready = 'yes' -%}
+        {%- endif -%}
+        {%- endif -%}
+        {%- endif -%}
+        {{- ready -}}|{{- hash -}}|{{- source -}}|{{- reason -}}
+
+  - name: classify_hash
+    type: data.set
+    with:
+      ready: "{{ steps.choose_hash.output.decision | split: '|' | first | strip }}"
+      sha256: "{% assign parts = steps.choose_hash.output.decision | split: '|' %}{{ parts[1] | default: '' | strip }}"
+      hash_source: "{% assign parts = steps.choose_hash.output.decision | split: '|' %}{{ parts[2] | default: '' | strip }}"
+      reason: "{% assign parts = steps.choose_hash.output.decision | split: '|' %}{{ parts[3] | default: '' | strip }}"
+
+  - name: log_request
+    type: console
+    with:
+      message: "Blocklist ready={{ steps.classify_hash.output.ready }} event.code={{ steps.set_alert_context.output.event_code }} source={{ steps.classify_hash.output.hash_source }} sha256={{ steps.classify_hash.output.sha256 }}{% if steps.classify_hash.output.ready != 'yes' %} rejected={{ steps.classify_hash.output.reason }}{% endif %}"
+
+  - name: when_ready
+    type: if
+    condition: 'steps.classify_hash.output.ready: "yes"'
+    steps:
+      # A blocklist item accepts one operating system. The hash condition is
+      # "is one of" (match_any) with the SHA256 as the only value.
+      - name: set_os_targets
+        type: data.set
+        with:
+          os_types: "${{ 'windows,linux,macos' | split: ',' }}"
+
+      - name: per_os
+        type: foreach
+        foreach: "{{ steps.set_os_targets.output.os_types }}"
+        on-failure:
+          continue: true
+        steps:
+          - name: get_blocklist_item
+            type: kibana.request
+            on-failure:
+              continue: true
+            with:
+              method: GET
+              path: /api/exception_lists/items
+              headers:
+                kbn-xsrf: "true"
+              query:
+                item_id: "block-{{ steps.classify_hash.output.sha256 }}-{{ foreach.item }}"
+                list_id: "{{ consts.blocklist_id }}"
+                namespace_type: agnostic
+
+          # 404 is the expected lookup result when this hash is not on the blocklist yet.
+          - name: read_existing
+            type: data.set
+            with:
+              state: |-
+                {%- assign message = steps.get_blocklist_item.error.message | default: '' | append: '' -%}
+                {%- assign status = steps.get_blocklist_item.error.details.status | default: 0 | plus: 0 -%}
+                {%- if steps.get_blocklist_item.error == blank -%}exists
+                {%- elsif status == 404 -%}missing
+                {%- elsif message contains '404' -%}missing
+                {%- else -%}failed
+                {%- endif -%}
+
+          - name: when_missing
+            type: if
+            condition: 'steps.read_existing.output.state: "missing"'
+            steps:
+              - name: create_blocklist_item
+                type: kibana.request
+                on-failure:
+                  continue: true
+                with:
+                  method: POST
+                  path: /api/exception_lists/items
+                  headers:
+                    kbn-xsrf: "true"
+                  body:
+                    name: "Block {{ steps.classify_hash.output.sha256 }} ({{ foreach.item }})"
+                    description: "Added by workflow Block Process or File by SHA256 Hash. Source {{ steps.classify_hash.output.hash_source }}. event.code {{ steps.set_alert_context.output.event_code }}. Rule {{ steps.set_alert_context.output.rule_name }}. OS {{ foreach.item }}."
+                    item_id: "block-{{ steps.classify_hash.output.sha256 }}-{{ foreach.item }}"
+                    list_id: "{{ consts.blocklist_id }}"
+                    namespace_type: agnostic
+                    type: simple
+                    os_types:
+                      - "{{ foreach.item }}"
+                    tags:
+                      - "{{ consts.policy_tag }}"
+                    entries:
+                      - field: file.hash.sha256
+                        operator: included
+                        type: match_any
+                        value:
+                          - "{{ steps.classify_hash.output.sha256 }}"
+              - name: log_create
+                type: console
+                with:
+                  message: "{% assign created_message = steps.create_blocklist_item.error.message | default: '' | append: '' %}{% if steps.create_blocklist_item.error == blank %}Blocked {{ steps.classify_hash.output.sha256 }} from {{ steps.classify_hash.output.hash_source }} on the Elastic Defend blocklist for {{ foreach.item }}.{% elsif created_message contains '409' %}{{ steps.classify_hash.output.sha256 }} is already on the Elastic Defend blocklist for {{ foreach.item }}.{% else %}Elastic Defend blocklist did not accept {{ steps.classify_hash.output.sha256 }} for {{ foreach.item }}. {{ created_message }}{% endif %}"
+            else:
+              - name: log_not_created
+                type: console
+                with:
+                  message: "{% if steps.read_existing.output.state == 'exists' %}{{ steps.classify_hash.output.sha256 }} is already on the Elastic Defend blocklist for {{ foreach.item }}.{% else %}Blocklist lookup failed for {{ steps.classify_hash.output.sha256 }} ({{ foreach.item }}). {{ steps.get_blocklist_item.error.message }}{% endif %}"
+    else:
+      - name: log_rejected
+        type: console
+        with:
+          message: "Blocklist entry was not sent. {{ steps.classify_hash.output.reason }}"
