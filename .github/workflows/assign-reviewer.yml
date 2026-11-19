@@ -15,10 +15,8 @@ name: Assign reviewer
 # `pull_request_target` gives fork PRs the Slack secret and a write token, so
 # this workflow must never check out or run code from the PR.
 #
-# The Slack side is a Workflow Builder workflow in #one-workflow-eng that starts
-# from a webhook with the variables `reviewer` (user ID) and `pr_title`,
-# `pr_url`, `pr_author` (text). Its URL is the `SLACK_PR_REVIEW_WEBHOOK_URL`
-# repository secret.
+# Slack messages go through an incoming webhook for #one-workflow-eng, whose URL
+# is the `SLACK_PR_REVIEW_WEBHOOK_URL` repository secret.
 
 on:
   pull_request_target:
@@ -101,18 +99,23 @@ jobs:
         env:
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_PR_REVIEW_WEBHOOK_URL }}
           REVIEWER: ${{ needs.assign.outputs.reviewer_slack_id }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
           PR_TITLE: ${{ github.event.pull_request.title }}
           PR_URL: ${{ github.event.pull_request.html_url }}
           PR_AUTHOR: ${{ github.event.pull_request.user.login }}
         run: |
           set -euo pipefail
 
+          # Anyone can open a PR, so the title is escaped for Slack mrkdwn to
+          # keep it from adding mentions like <!channel> or its own links.
           jq -n \
             --arg reviewer "${REVIEWER}" \
-            --arg pr_title "${PR_TITLE}" \
-            --arg pr_url "${PR_URL}" \
-            --arg pr_author "${PR_AUTHOR}" \
-            '{reviewer: $reviewer, pr_title: $pr_title, pr_url: $pr_url, pr_author: $pr_author}' |
+            --arg number "${PR_NUMBER}" \
+            --arg title "${PR_TITLE}" \
+            --arg url "${PR_URL}" \
+            --arg author "${PR_AUTHOR}" \
+            '($title | gsub("&"; "&amp;") | gsub("<"; "&lt;") | gsub(">"; "&gt;")) as $label
+            | {text: ":eyes: <@\($reviewer)> new PR to review: <\($url)|#\($number) \($label)> by \($author)"}' |
             curl --silent --show-error --fail-with-body --retry 3 \
               -H 'Content-Type: application/json' \
               --data @- \
