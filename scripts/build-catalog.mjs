@@ -33,7 +33,7 @@ import { createHash } from 'node:crypto';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import path from 'node:path';
-import yaml from 'js-yaml';
+import * as yaml from 'js-yaml';
 import semver from 'semver';
 
 const execFileAsync = promisify(execFile);
@@ -150,10 +150,12 @@ async function discoverNamedMinors(oldest) {
       maxBuffer: 16 * 1024 * 1024,
     }));
   } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
     throw new Error(
-      `Failed to list elastic/kibana branches via 'git ls-remote ${repo}': ${err.message}\n` +
+      `Failed to list elastic/kibana branches via 'git ls-remote ${repo}': ${message}\n` +
         `For local iteration you can skip the lookup with KIBANA_NAMED_MINORS ` +
-        `(e.g. KIBANA_NAMED_MINORS="9.5,9.6" or KIBANA_NAMED_MINORS="").`
+        `(e.g. KIBANA_NAMED_MINORS="9.5,9.6" or KIBANA_NAMED_MINORS="").`,
+      { cause: err }
     );
   }
 

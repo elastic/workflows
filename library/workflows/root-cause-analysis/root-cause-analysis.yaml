@@ -1,6 +1,6 @@
 template-metadata:
   slug: root-cause-analysis
-  version: "1.0.0"
+  version: "1.0.2"
   availability: ">=9.5.0"
   name: "Root Cause Analysis (Agent Builder)"
   description: >-
@@ -16,12 +16,12 @@ template-metadata:
         label: "Agent Builder agent ID"
         description: >-
           The Agent Builder agent that performs the root-cause analysis.
-          The default "sre-agent" matches the out-of-the-box SRE agent;
+          Default elastic-ai-agent is the built-in Elastic AI Agent;
           point it at a different agent if you have a custom one
           configured for your environment.
         inputType: text
         required: true
-        default: "sre-agent"
+        default: "elastic-ai-agent"
 
 name: Root Cause Analysis
 description: Use an Agent Builder agent to investigate alerts and document findings as a Case.
@@ -103,7 +103,7 @@ steps:
       case_id: "{{ steps.create_case.output.case.id }}"
       comment: |
         ## 🔍 AI Investigation Summary
-        [View Full Conversation]({{ context.kibanaUrl }}/app/agent_builder/conversations/{{ steps.get_conversation.output.id }})
+        [View Full Conversation]({{ kibanaUrl }}/app/agent_builder/conversations/{{ steps.get_conversation.output.id }})
 
         ### Investigation Steps
 
@@ -136,7 +136,7 @@ steps:
         {%- if has_error %}
         - ❌ **Error:** {{ error_message }}
         {%- elsif query_esql != "" %}
-        - ✅ **Found {{ result_count }} results** → [View in Discover]({{ context.kibanaUrl }}/app/discover#/?_a=(dataSource:(type:esql),query:(esql:'{{ query_esql | url_encode }}')))
+        - ✅ **Found {{ result_count }} results** → [View in Discover]({{ kibanaUrl }}/app/discover#/?_a=(dataSource:(type:esql),query:(esql:'{{ query_esql | url_encode }}')))
         {%- else %}
         - ✅ **Completed**
         {%- endif %}

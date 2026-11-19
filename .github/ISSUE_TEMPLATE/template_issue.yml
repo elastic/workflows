@@ -1,0 +1,23 @@
+name: Report a template issue
+description: Report a problem with a workflow template.
+title: '[Template issue]: '
+body:
+  - type: textarea
+    id: template_details
+    attributes:
+      label: Template
+      description: Template name, version, and source link. Filled in when opened from Kibana.
+    validations:
+      required: true
+  - type: input
+    id: kibana_version
+    attributes:
+      label: Kibana version
+      placeholder: '9.5.0'
+  - type: textarea
+    id: problem
+    attributes:
+      label: What went wrong?
+      description: Include steps to reproduce, the expected result, and any error message.
+    validations:
+      required: true

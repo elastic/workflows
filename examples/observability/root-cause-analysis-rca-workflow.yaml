@@ -220,7 +220,7 @@ steps:
       case_id: "{{ steps.create_case.output.case.id }}"
       comment: |
         ## 🔍 AI Investigation Summary
-        [View Full Conversation]({{ context.kibanaUrl }}/app/agent_builder/conversations/{{ steps.getConversation.output.id }})
+        [View Full Conversation]({{ kibanaUrl }}/app/agent_builder/conversations/{{ steps.getConversation.output.id }})
 
         ### Investigation Steps
 
@@ -253,7 +253,7 @@ steps:
         {%- if has_error %}
         - ❌ **Error:** {{ error_message }}
         {%- elsif query_esql != "" %}
-        - ✅ **Found {{ result_count }} results** → [View in Discover]({{ context.kibanaUrl }}/{{consts.basePath}}app/discover#/?_a=(dataSource:(type:esql),query:(esql:'{{ query_esql | url_encode }}')))
+        - ✅ **Found {{ result_count }} results** → [View in Discover]({{ kibanaUrl }}/{{consts.basePath}}app/discover#/?_a=(dataSource:(type:esql),query:(esql:'{{ query_esql | url_encode }}')))
         {%- else %}
         - ✅ **Completed**
         {%- endif %}

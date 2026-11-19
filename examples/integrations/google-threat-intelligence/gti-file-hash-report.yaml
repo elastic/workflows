@@ -1,0 +1,586 @@
+# Retrieves the GTI reputation and detection report for a file by hash and
+# indexes the full response. When run against an alert (paths 1/2) it also
+# writes a summary note and an alert tag; a standalone run (path 3) only
+# indexes. A different action from File Sandbox Behaviour (sandbox
+# detonation) and MITRE ATT&CK Techniques (technique tree) - this is the
+# reputation/detection report.
+version: '1'
+name: GTI File Hash Report
+description: >-
+  Retrieve the Google Threat Intelligence reputation and detection report for
+  a file by hash (SHA-256, SHA-1, or MD5). Indexes the full response and
+  summarises it on the triggering alert.
+enabled: true
+
+tags:
+  - security
+  - threat-intel
+  - google-threat-intelligence
+  - file-report
+
+consts:
+  gti_connector_id: REPLACE_WITH_GTI_CONNECTOR_ID
+  index: gti-soar-file-report
+  # Alert fields checked in order; a value repeated across fields is enriched once.
+  # Default example fields - please update according to your own needs.
+  observable_fields: ["file.hash.sha256", "process.hash.sha256", "dll.hash.sha256"]
+  gti_ui_base: https://www.virustotal.com/gui/file
+  empty_arr: []
+
+triggers:
+  - type: alert
+  - type: manual
+    inputs:
+      - name: file_hash
+        type: string
+        required: false
+        description: >-
+          SHA-256, SHA-1, or MD5 hash of the file. Leave blank when running
+          against an alert, the hash is read from the alert instead.
+      - name: alert_index
+        type: string
+        required: false
+        description: >-
+          Concrete alert index to annotate. Filled in automatically when the
+          workflow is started from the alert table or flyout.
+      - name: alert_id
+        type: string
+        required: false
+        description: >-
+          Alert document _id to annotate. Filled in automatically when the
+          workflow is started from the alert table or flyout.
+
+steps:
+
+  # Self-provisions this workflow's index template so mapping settings apply
+  # before the first real write, rather than relying on manual setup.
+  - name: bootstrap_index_template
+    type: elasticsearch.request
+    with:
+      method: PUT
+      path: "_index_template/{{ consts.index }}"
+      body:
+        index_patterns: ["{{ consts.index }}"]
+        priority: 500
+        template:
+          settings:
+            index.mapping.total_fields.limit: 2000
+            index.mapping.total_fields.ignore_dynamic_beyond_limit: true
+            index.mapping.ignore_malformed: true
+    on-failure:
+      continue: true
+
+  - name: resolve_target_doc
+    type: data.set
+    with:
+      target_index: "{{ event.alerts[0]._index | default: inputs.alert_index }}"
+      target_id: "{{ event.alerts[0]._id | default: inputs.alert_id }}"
+      rule_id: "{{ event.rule.id }}"
+      rule_name: "{{ event.rule.name | default: 'Manual run' }}"
+
+  # execution.triggeredBy is the reliable discriminator; event.rule is populated on both paths 1 and 2.
+  - name: classify_trigger
+    type: data.set
+    with:
+      trigger_mode: "{% if execution.triggeredBy == 'alert' %}detection_rule{% elsif variables.target_id != blank %}manual_with_alert{% else %}manual_standalone{% endif %}"
+
+  # Only runs when there's an alert to annotate; falls back to plain text in the note if this fails.
+  - name: find_data_view
+    if: "${{ variables.target_id != blank }}"
+    type: kibana.request
+    with:
+      method: GET
+      path: /api/data_views
+    on-failure:
+      continue: true
+
+  - name: check_data_view
+    type: data.set
+    with:
+      existing_data_view_id: |-
+        {%- assign hit = '' -%}
+        {%- for v in steps.find_data_view.output.data_view -%}
+          {%- if v.title == consts.index -%}{%- assign hit = v.id -%}{%- break -%}{%- endif -%}
+        {%- endfor -%}
+        {{ hit }}
+
+  # Duplicate create returns 400, not 409, so on-failure:continue absorbs a race safely.
+  - name: create_data_view
+    if: "${{ variables.target_id != blank and variables.existing_data_view_id == blank }}"
+    type: kibana.request
+    with:
+      method: POST
+      path: /api/data_views/data_view
+      headers:
+        kbn-xsrf: "true"
+        Content-Type: application/json
+      body:
+        data_view:
+          id: "{{ consts.index }}"
+          title: "{{ consts.index }}"
+          name: "{{ consts.index }}"
+          timeFieldName: "@timestamp"
+          allowNoIndex: true
+    on-failure:
+      continue: true
+
+  - name: resolve_data_view
+    type: data.set
+    with:
+      data_view_id: |-
+        {%- if variables.existing_data_view_id != blank -%}{{ variables.existing_data_view_id }}
+        {%- elsif steps.create_data_view.output.data_view.id != blank -%}{{ steps.create_data_view.output.data_view.id }}
+        {%- endif -%}
+
+  - name: build_targets
+    type: data.parseJson
+    source: |-
+      [
+      {%- assign sep = '' -%}
+      {%- if event.alerts[0] != blank -%}
+        {%- assign fields = consts.observable_fields -%}
+        {%- assign seen = consts.empty_arr -%}
+        {%- for f in fields -%}
+          {%- assign parts = f | strip | split: '.' -%}
+          {%- assign node = event.alerts[0] -%}
+          {%- for p in parts -%}{%- assign node = node[p] -%}{%- endfor -%}
+          {%- if node != blank -%}
+            {%- assign node_str = node | join: ',' -%}
+            {%- if node_str == node -%}
+              {%- assign candidates = consts.empty_arr | push: node -%}
+            {%- else -%}
+              {%- assign candidates = node -%}
+            {%- endif -%}
+            {%- for candidate in candidates -%}
+              {%- if candidate != blank -%}
+                {%- unless seen contains candidate -%}
+                  {{ sep }}{"field":"{{ f | strip }}","value":"{{ candidate }}"}
+                  {%- assign sep = ',' -%}
+                  {%- assign seen = seen | push: candidate -%}
+                {%- endunless -%}
+              {%- endif -%}
+            {%- endfor -%}
+          {%- endif -%}
+        {%- endfor -%}
+      {%- elsif inputs.file_hash != blank -%}
+        {"field":"manual","value":"{{ inputs.file_hash | strip }}"}
+      {%- endif -%}
+      ]
+    with: {}
+
+  - name: no_targets
+    type: if
+    condition: "${{ steps.build_targets.output.size == 0 }}"
+    steps:
+      - name: log_no_targets
+        type: console
+        with:
+          message: >-
+            No usable file hash found. Checked {{ consts.observable_fields | join: ', ' }} on
+            the alert and the file_hash input. Nothing to look up.
+
+  - name: enrich_each_hash
+    type: foreach
+    foreach: "${{ steps.build_targets.output }}"
+    steps:
+
+      - name: stash_observable
+        type: data.set
+        with:
+          observable: "{{ foreach.item.value }}"
+          field_name: "{{ foreach.item.field }}"
+          doc_id: "{{ variables.target_id | default: 'manual' | append: '-' | append: foreach.item.value | sha256 }}"
+          failure_doc_id: "{{ variables.target_id | default: 'manual' | append: '-' | append: foreach.item.value | append: '-run-summary' | sha256 }}"
+
+      - name: get_file_report
+        type: google_threat_intelligence.getFileReport
+        connector-id: "{{ consts.gti_connector_id }}"
+        with:
+          fileHash: "{{ foreach.item.value }}"
+        on-failure:
+          retry:
+            max-attempts: 2
+            delay: 3s
+          continue: true
+
+      - name: skip_on_fetch_error
+        type: if
+        condition: "${{ steps.get_file_report.error != blank }}"
+        steps:
+          - name: log_fetch_error
+            type: console
+            with:
+              message: |-
+                STATUS: failed - GTI getFileReport failed for {{ variables.field_name }} ({{ variables.observable }}).
+                {{ steps.get_file_report.error | json }}
+
+          - name: write_fetch_failure
+            type: elasticsearch.index
+            with:
+              index: "{{ consts.index }}"
+              id: "{{ variables.failure_doc_id }}"
+              document:
+                "@timestamp": "{{ execution.startedAt | date: '%Y-%m-%dT%H:%M:%S.%L%z' }}"
+                event:
+                  kind: enrichment
+                  category: threat
+                  dataset: gti_soar.file_report
+                  outcome: failure
+                doc_type: fetch_failure
+                error:
+                  message: "{{ steps.get_file_report.error.message }}"
+                  type: "{{ steps.get_file_report.error.type }}"
+                observable:
+                  type: file_hash
+                  field: "{{ variables.field_name }}"
+                  value: "{{ variables.observable }}"
+                trigger_mode: "{{ variables.trigger_mode }}"
+                kibana:
+                  alert:
+                    uuid: "{{ variables.target_id }}"
+                    index: "{{ variables.target_index }}"
+                rule:
+                  id: "{{ variables.rule_id }}"
+                  name: "{{ variables.rule_name }}"
+                workflow:
+                  execution_id: "{{ execution.id }}"
+            on-failure:
+              continue: true
+
+          # Path 1/2 only - a standalone run has no alert to annotate.
+          - name: annotate_alert_failure
+            type: if
+            condition: "${{ variables.target_id != blank }}"
+            steps:
+              - name: find_existing_note_failure
+                type: kibana.request
+                with:
+                  method: GET
+                  path: /api/note
+                  query:
+                    documentIds: "{{ variables.target_id }}"
+                on-failure:
+                  continue: true
+
+              - name: build_failure_doc_link
+                type: data.set
+                with:
+                  failure_doc_link: |-
+                    {%- if variables.data_view_id != blank -%}
+                      {%- assign sp = '' -%}
+                      {%- if workflow.spaceId != blank and workflow.spaceId != 'default' -%}{%- assign sp = '/s/' | append: workflow.spaceId -%}{%- endif -%}
+                      {{ sp }}/app/discover#/doc/{{ variables.data_view_id }}/{{ consts.index }}?id={{ variables.failure_doc_id }}
+                    {%- endif -%}
+
+              # Same marker the success-path note uses, so this replaces it in place.
+              - name: prepare_failure_note
+                type: data.set
+                with:
+                  existing_note_id: |-
+                    {%- assign marker = 'GTI File Report: ' | append: variables.observable -%}
+                    {%- for n in steps.find_existing_note_failure.output.notes -%}
+                      {%- if n.note contains marker -%}{{ n.noteId }}{%- endif -%}
+                    {%- endfor -%}
+                  note_text: |-
+                    ## GTI File Report: {{ variables.observable }}
+
+                    _Managed by the GTI File Hash Report workflow. This note is replaced on every run; record your own analysis in a separate note._
+
+                    Observed on `{{ variables.field_name }}` - [View file on GTI]({{ consts.gti_ui_base }}/{{ variables.observable }})
+                    Run [{{ workflow.name }}:{{ execution.id }}]({{ execution.url }})
+
+                    ---
+
+                    > **STATUS: failed.** The last refresh attempt could not retrieve data from GTI.
+                    > `{{ steps.get_file_report.error.message }}`
+                    > See the indexed failure record for detail: {% if variables.failure_doc_link != blank %}[open in Discover](<{{ variables.failure_doc_link }}>){% else %}index `{{ consts.index }}`, document
+                    ```
+                    {{ variables.failure_doc_id }}
+                    ```
+                    {% endif %}
+
+              - name: write_failure_note
+                type: if
+                condition: "${{ variables.existing_note_id != blank }}"
+                steps:
+                  - name: update_failure_note
+                    type: kibana.request
+                    with:
+                      method: PATCH
+                      path: /api/note
+                      headers:
+                        kbn-xsrf: "true"
+                        Content-Type: application/json
+                      body:
+                        noteId: "{{ variables.existing_note_id }}"
+                        note:
+                          eventId: "{{ variables.target_id }}"
+                          timelineId: ""
+                          note: "{{ variables.note_text }}"
+                    on-failure:
+                      continue: true
+                else:
+                  - name: create_failure_note
+                    type: kibana.request
+                    with:
+                      method: PATCH
+                      path: /api/note
+                      headers:
+                        kbn-xsrf: "true"
+                        Content-Type: application/json
+                      body:
+                        note:
+                          eventId: "{{ variables.target_id }}"
+                          timelineId: ""
+                          note: "{{ variables.note_text }}"
+                    on-failure:
+                      continue: true
+
+          - name: skip_iteration
+            type: loop.continue
+
+      - name: stash_iter
+        type: data.set
+        with:
+          attrs: "${{ steps.get_file_report.output.data.attributes }}"
+          observable: "{{ foreach.item.value }}"
+          field_name: "{{ foreach.item.field }}"
+          doc_id: "{{ variables.target_id | default: 'manual' | append: '-' | append: foreach.item.value | sha256 }}"
+
+      - name: summarise
+        type: data.set
+        with:
+          verdict: "{{ variables.attrs.gti_assessment.verdict.value | default: 'UNKNOWN' }}"
+          severity: "{{ variables.attrs.gti_assessment.severity.value | default: 'UNKNOWN' }}"
+          threat_score: "{{ variables.attrs.gti_assessment.threat_score.value | default: 0 }}"
+          description: "{{ variables.attrs.gti_assessment.description | replace: '\n', ' ' | replace: '  ', ' ' | strip }}"
+          malicious_count: "{{ variables.attrs.last_analysis_stats.malicious | default: 0 }}"
+          suspicious_count: "{{ variables.attrs.last_analysis_stats.suspicious | default: 0 }}"
+          harmless_count: "{{ variables.attrs.last_analysis_stats.harmless | default: 0 }}"
+          undetected_count: "{{ variables.attrs.last_analysis_stats.undetected | default: 0 }}"
+          last_analysis_date: "{{ variables.attrs.last_analysis_date }}"
+          reputation: "{{ variables.attrs.reputation | default: 0 }}"
+          votes_harmless: "{{ variables.attrs.total_votes.harmless | default: 0 }}"
+          votes_malicious: "{{ variables.attrs.total_votes.malicious | default: 0 }}"
+          type_description: "{{ variables.attrs.type_description }}"
+          meaningful_name: "{{ variables.attrs.meaningful_name }}"
+          file_size: "{{ variables.attrs.size | default: 0 }}"
+          suggested_threat_label: "{{ variables.attrs.popular_threat_classification.suggested_threat_label }}"
+          tags: "${{ variables.attrs.tags }}"
+          crowdsourced_context: "${{ variables.attrs.crowdsourced_context | default: consts.empty_arr }}"
+          top_threat_names: |-
+            {%- assign items = variables.attrs.popular_threat_classification.popular_threat_name | default: consts.empty_arr -%}
+            {%- for it in items limit: 5 -%}
+              {%- if forloop.first == false %}, {% endif -%}{{ it.value }} ({{ it.count }})
+            {%- endfor -%}
+          signature_product: "{{ variables.attrs.signature_info.product }}"
+          signature_description: "{{ variables.attrs.signature_info.description }}"
+
+      - name: index_enrichment
+        type: elasticsearch.index
+        with:
+          index: "{{ consts.index }}"
+          id: "{{ variables.doc_id }}"
+          document:
+            "@timestamp": "{{ execution.startedAt | date: '%Y-%m-%dT%H:%M:%S.%L%z' }}"
+            event:
+              kind: enrichment
+              category: threat
+              dataset: gti_soar.file_report
+            observable:
+              type: file_hash
+              field: "{{ variables.field_name }}"
+              value: "{{ variables.observable }}"
+            trigger_mode: "{{ variables.trigger_mode }}"
+            kibana:
+              alert:
+                uuid: "{{ variables.target_id }}"
+                index: "{{ variables.target_index }}"
+            rule:
+              id: "{{ variables.rule_id }}"
+              name: "{{ variables.rule_name }}"
+            workflow:
+              execution_id: "{{ execution.id }}"
+            summary:
+              verdict: "{{ variables.verdict }}"
+              severity: "{{ variables.severity }}"
+              description: "{{ variables.description }}"
+              threat_score: "${{ variables.threat_score | plus: 0 }}"
+              malicious_count: "${{ variables.malicious_count | plus: 0 }}"
+              suspicious_count: "${{ variables.suspicious_count | plus: 0 }}"
+              harmless_count: "${{ variables.harmless_count | plus: 0 }}"
+              undetected_count: "${{ variables.undetected_count | plus: 0 }}"
+              last_analysis_date: "{{ variables.last_analysis_date | date: '%Y-%m-%dT%H:%M:%S.%L%z' }}"
+              reputation: "${{ variables.reputation | plus: 0 }}"
+              votes_harmless: "${{ variables.votes_harmless | plus: 0 }}"
+              votes_malicious: "${{ variables.votes_malicious | plus: 0 }}"
+              type_description: "{{ variables.type_description }}"
+              meaningful_name: "{{ variables.meaningful_name }}"
+              file_size: "${{ variables.file_size | plus: 0 }}"
+              suggested_threat_label: "{{ variables.suggested_threat_label }}"
+              top_threat_names: "{{ variables.top_threat_names }}"
+              signature_product: "{{ variables.signature_product }}"
+              tags: "${{ variables.tags }}"
+              crowdsourced_context: "${{ variables.crowdsourced_context }}"
+            gti: "${{ steps.get_file_report.output.data }}"
+        on-failure:
+          continue: true
+
+      # Paths 1/2 only, and only once the document actually exists.
+      - name: annotate_alert
+        type: if
+        condition: "${{ variables.target_id != blank and steps.index_enrichment.error == blank }}"
+        steps:
+
+          - name: find_existing_note
+            type: kibana.request
+            with:
+              method: GET
+              path: /api/note
+              query:
+                documentIds: "{{ variables.target_id }}"
+            on-failure:
+              continue: true
+
+          - name: build_doc_link
+            type: data.set
+            with:
+              doc_link: |-
+                {%- if variables.data_view_id != blank -%}
+                  {%- assign sp = '' -%}
+                  {%- if workflow.spaceId != blank and workflow.spaceId != 'default' -%}{%- assign sp = '/s/' | append: workflow.spaceId -%}{%- endif -%}
+                  {{ sp }}/app/discover#/doc/{{ variables.data_view_id }}/{{ consts.index }}?id={{ variables.doc_id }}
+                {%- endif -%}
+
+          - name: prepare_note
+            type: data.set
+            with:
+              existing_note_id: |-
+                {%- assign marker = 'GTI File Report: ' | append: variables.observable -%}
+                {%- for n in steps.find_existing_note.output.notes -%}
+                  {%- if n.note contains marker -%}{{ n.noteId }}{%- endif -%}
+                {%- endfor -%}
+              note_text: |-
+                ## GTI File Report: {{ variables.observable }}
+
+                _Managed by the GTI File Hash Report workflow. This note is replaced on every run; record your own analysis in a separate note._
+
+                Observed on `{{ variables.field_name }}` - [View file on GTI]({{ consts.gti_ui_base }}/{{ variables.observable }})
+                Run [{{ workflow.name }}:{{ execution.id }}]({{ execution.url }})
+
+                ---
+
+                ### Assessment
+                - **Verdict:** {{ variables.verdict }}
+                - **Severity:** {{ variables.severity }}
+                - **Threat score:** {{ variables.threat_score }}
+                - **Reputation:** {{ variables.reputation }}
+                {%- if variables.suggested_threat_label != blank %}
+                - **Suggested label:** {{ variables.suggested_threat_label }}
+                {%- endif %}
+                {%- if variables.description != blank %}
+                - **GTI summary:** {{ variables.description }}
+                {%- endif %}
+
+                ### Detection
+                - **Last analysis:** {{ variables.malicious_count }} malicious, {{ variables.suspicious_count }} suspicious, {{ variables.harmless_count }} harmless, {{ variables.undetected_count }} undetected{% if variables.last_analysis_date != blank %} (as of {{ variables.last_analysis_date | date: '%Y-%m-%d' }}){% endif %}
+                {%- if variables.votes_harmless != blank or variables.votes_malicious != blank %}
+                - **Community votes:** {{ variables.votes_harmless | default: 0 }} harmless, {{ variables.votes_malicious | default: 0 }} malicious
+                {%- endif %}
+                {%- if variables.top_threat_names != blank %}
+                - **Popular threat names:** {{ variables.top_threat_names }}
+                {%- endif %}
+                {%- if variables.type_description != blank or variables.meaningful_name != blank or variables.file_size != blank %}
+
+                ### File info
+                {%- if variables.meaningful_name != blank %}
+                - **Name:** {{ variables.meaningful_name }}
+                {%- endif %}
+                {%- if variables.type_description != blank %}
+                - **Type:** {{ variables.type_description }}
+                {%- endif %}
+                {%- if variables.file_size != blank %}
+                - **Size:** {{ variables.file_size }} bytes
+                {%- endif %}
+                {%- if variables.signature_product != blank %}
+                - **Signed product:** {{ variables.signature_product }}{% if variables.signature_description != blank %} ({{ variables.signature_description }}){% endif %}
+                {%- endif %}
+                {%- endif %}
+                {%- if variables.tags.size > 0 %}
+
+                ### Tags
+                - {{ variables.tags | join: ', ' }}
+                {%- endif %}
+                {%- if variables.crowdsourced_context.size > 0 %}
+
+                ### Community context
+                {%- for c in variables.crowdsourced_context %}
+                {%- assign detail_line = c.details | replace: '\n', ' ' | replace: '  ', ' ' | strip %}
+                - **{{ c.title }}** ({{ c.severity | default: 'unknown' }} severity, via {{ c.source }}){% if c.timestamp != blank %}, {{ c.timestamp | date: '%Y-%m-%d' }}{% endif %}: {{ detail_line }}
+                {%- endfor %}
+                {%- endif %}
+
+                ---
+                {% if variables.doc_link != blank %}Full response: [open the stored document in Discover](<{{ variables.doc_link }}>){% else %}Full response in index `{{ consts.index }}`, document
+                ```
+                {{ variables.doc_id }}
+                ```
+                {% endif %}
+
+          - name: write_note
+            type: if
+            condition: "${{ variables.existing_note_id != blank }}"
+            steps:
+              - name: update_note
+                type: kibana.request
+                with:
+                  method: PATCH
+                  path: /api/note
+                  headers:
+                    kbn-xsrf: "true"
+                    Content-Type: application/json
+                  body:
+                    noteId: "{{ variables.existing_note_id }}"
+                    note:
+                      eventId: "{{ variables.target_id }}"
+                      timelineId: ""
+                      note: "{{ variables.note_text }}"
+                on-failure:
+                  continue: true
+            else:
+              - name: create_note
+                type: kibana.request
+                with:
+                  method: PATCH
+                  path: /api/note
+                  headers:
+                    kbn-xsrf: "true"
+                    Content-Type: application/json
+                  body:
+                    note:
+                      eventId: "{{ variables.target_id }}"
+                      timelineId: ""
+                      note: "{{ variables.note_text }}"
+                on-failure:
+                  continue: true
+
+          - name: tag_alert
+            type: security.setAlertTags
+            with:
+              alert_ids: "{{ variables.target_id }}"
+              tags_to_add:
+                - "gti:file-report"
+            on-failure:
+              continue: true
+
+      # Path 3: no alert to annotate.
+      - name: report_standalone
+        type: if
+        condition: "${{ variables.target_id == blank }}"
+        steps:
+          - name: log_document_reference
+            type: console
+            with:
+              message: |-
+                STATUS: succeeded - GTI file report for {{ variables.observable }}: verdict {{ variables.verdict }}, severity {{ variables.severity }}.
+                Indexed to {{ consts.index }} / {{ variables.doc_id }}

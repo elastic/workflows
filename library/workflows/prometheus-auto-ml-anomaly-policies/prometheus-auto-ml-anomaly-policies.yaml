@@ -1,0 +1,187 @@
+template-metadata:
+  slug: prometheus-auto-ml-anomaly-policies
+  version: "1.0.0"
+  availability: ">=9.6.0"
+  name: "Prometheus Auto ML Anomaly Policies"
+  description: >-
+    Ensure one ML anomaly job and one anomaly alert rule per Prometheus metric family, using canonical auto-prom ids.
+  solutions: [observability]
+  categories: [detection, monitoring, ai-agent]
+  install:
+    form:
+      - name: agent-id
+        label: "Agent Builder agent ID"
+        inputType: text
+        required: true
+        default: "elastic-ai-agent"
+      - name: metrics-index
+        label: "Prometheus metrics index pattern"
+        inputType: esIndex
+        required: true
+        default: "metrics-generic.prometheus-*"
+
+name: Prometheus Auto ML Anomaly Policies
+description: >
+  Hourly (and on demand): detect Prometheus metric families, ensure
+  one ML anomaly job + one anomaly alert rule per family (canonical ids).
+  Gap-only — never multiply ML alerts. Threshold rules are owned by
+  prometheus-auto-alert-policies.
+enabled: true
+triggers:
+  - type: manual
+  - type: scheduled
+    with:
+      every: 1h
+
+settings:
+  timeout: 35m
+  concurrency:
+    key: "{{ workflow.id }}"
+    strategy: drop
+    max: 1
+
+consts:
+  metrics_index: __install__.metrics-index
+  # One ML job + one anomaly alert per family.
+  catalog: |
+    auto-prom-http-rate|auto-prom-http-rate-ml-alert|Auto Prom: High HTTP Rate Anomaly
+    auto-prom-cpu|auto-prom-cpu-ml-alert|Auto Prom: High CPU Usage Anomaly
+    auto-prom-go|auto-prom-go-ml-alert|Auto Prom: High Go Goroutines Anomaly
+    auto-prom-logins|auto-prom-logins-ml-alert|Auto Prom: Logins & Failures Anomaly
+    auto-prom-purchases|auto-prom-purchases-ml-alert|Auto Prom: Purchases Anomaly
+    auto-prom-signups|auto-prom-signups-ml-alert|Auto Prom: Signups Anomaly
+    auto-prom-checkout|auto-prom-checkout-ml-alert|Auto Prom: Checkout & Abandonment Anomaly
+    auto-prom-engagement|auto-prom-engagement-ml-alert|Auto Prom: Product Views & Searches Anomaly
+
+steps:
+  - name: detect_metric_families
+    type: elasticsearch.esql.query
+    with:
+      format: json
+      query: |
+        SET unmapped_fields="nullify";
+        FROM {{ consts.metrics_index }}
+        | WHERE @timestamp > NOW() - 30 minutes
+        | STATS http_samples = COUNT(*) WHERE http_requests_total IS NOT NULL,
+                cpu_samples = COUNT(*) WHERE process_cpu_usage_ratio IS NOT NULL,
+                go_samples = COUNT(*) WHERE go_goroutines IS NOT NULL,
+                login_samples = COUNT(*) WHERE user_logins_total IS NOT NULL,
+                purchase_samples = COUNT(*) WHERE purchases_total IS NOT NULL,
+                signup_samples = COUNT(*) WHERE user_signups_total IS NOT NULL,
+                checkout_samples = COUNT(*) WHERE checkout_orders_total IS NOT NULL OR cart_abandonments_total IS NOT NULL,
+                engagement_samples = COUNT(*) WHERE product_views_total IS NOT NULL OR search_queries_total IS NOT NULL,
+                services = COUNT_DISTINCT(service)
+
+  - name: list_alert_rules
+    type: kibana.request
+    with:
+      method: GET
+      path: /api/alerting/rules/_find
+      query:
+        page: "1"
+        per_page: "100"
+      headers:
+        Elastic-Api-Version: "2023-10-31"
+
+  - name: get_ml_rule_http
+    type: kibana.request
+    on-failure:
+      continue: true
+    with:
+      method: GET
+      path: /api/alerting/rule/auto-prom-http-rate-ml-alert
+      headers:
+        Elastic-Api-Version: "2023-10-31"
+  - name: get_ml_rule_cpu
+    type: kibana.request
+    on-failure:
+      continue: true
+    with:
+      method: GET
+      path: /api/alerting/rule/auto-prom-cpu-ml-alert
+      headers:
+        Elastic-Api-Version: "2023-10-31"
+  - name: get_ml_rule_go
+    type: kibana.request
+    on-failure:
+      continue: true
+    with:
+      method: GET
+      path: /api/alerting/rule/auto-prom-go-ml-alert
+      headers:
+        Elastic-Api-Version: "2023-10-31"
+  - name: get_ml_rule_logins
+    type: kibana.request
+    on-failure:
+      continue: true
+    with:
+      method: GET
+      path: /api/alerting/rule/auto-prom-logins-ml-alert
+      headers:
+        Elastic-Api-Version: "2023-10-31"
+  - name: get_ml_rule_purchases
+    type: kibana.request
+    on-failure:
+      continue: true
+    with:
+      method: GET
+      path: /api/alerting/rule/auto-prom-purchases-ml-alert
+      headers:
+        Elastic-Api-Version: "2023-10-31"
+  - name: get_ml_rule_signups
+    type: kibana.request
+    on-failure:
+      continue: true
+    with:
+      method: GET
+      path: /api/alerting/rule/auto-prom-signups-ml-alert
+      headers:
+        Elastic-Api-Version: "2023-10-31"
+  - name: get_ml_rule_checkout
+    type: kibana.request
+    on-failure:
+      continue: true
+    with:
+      method: GET
+      path: /api/alerting/rule/auto-prom-checkout-ml-alert
+      headers:
+        Elastic-Api-Version: "2023-10-31"
+  - name: get_ml_rule_engagement
+    type: kibana.request
+    on-failure:
+      continue: true
+    with:
+      method: GET
+      path: /api/alerting/rule/auto-prom-engagement-ml-alert
+      headers:
+        Elastic-Api-Version: "2023-10-31"
+
+  - name: sync_ml_anomaly_policies
+    type: ai.agent
+    if: "steps.get_ml_rule_http.error.message: HTTP*404* or steps.get_ml_rule_cpu.error.message: HTTP*404* or steps.get_ml_rule_go.error.message: HTTP*404* or steps.get_ml_rule_logins.error.message: HTTP*404* or steps.get_ml_rule_purchases.error.message: HTTP*404* or steps.get_ml_rule_signups.error.message: HTTP*404* or steps.get_ml_rule_checkout.error.message: HTTP*404* or steps.get_ml_rule_engagement.error.message: HTTP*404*"
+    agent-id: __install__.agent-id
+    with:
+      message: |
+        Prometheus ML ANOMALY steward on this Observability project.
+        Index / datafeed source: {{ consts.metrics_index }}
+
+        Pre-check samples:
+        {{ steps.detect_metric_families.output | json }}
+
+        Existing rules page:
+        {{ steps.list_alert_rules.output | json }}
+
+        CANONICAL CATALOG (job_id|alert_rule_id|alert_name):
+        {{ consts.catalog }}
+
+        HARD RULES (gap-only ML steward — never delete customer rules):
+        1) Exactly ONE open job + ONE xpack.ml.anomaly_detection_alert per catalog row when samples > 0.
+        2) Create/update alert rules with the exact alert_rule_id above (tags: prometheus, auto-prom, ml, agent-builder).
+        3) Ownership scope = tags **auto-prom**. NEVER DELETE rules (scheduled or manual), including
+           non-catalog auto-prom/prometheus anomaly alerts — report extras only.
+        4) Do NOT create .index-threshold / es-query threshold rules (prometheus-auto-alert-policies owns those).
+        5) Jobs: prefer execute_api ml.put_job / open / put_datafeed / start; sync Kibana ML saved objects
+           via GET /api/ml/saved_objects/sync before attaching rules.
+        6) If every catalog alert_rule_id with samples > 0 already exists, make NO writes — "no gaps".
+        7) End table: job_id | alert_id | action (kept|created|fixed|skipped|reported-extra).
+    timeout: 30m

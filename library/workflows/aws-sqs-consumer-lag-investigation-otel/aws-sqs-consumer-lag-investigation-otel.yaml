@@ -1,0 +1,304 @@
+template-metadata:
+  slug: aws-sqs-consumer-lag-investigation-otel
+  version: "1.1.0"
+  availability: ">=9.5.0"
+  name: "AWS SQS consumer lag investigation (OTel)"
+  description: >-
+    Investigate an SQS queue whose backlog is growing. Correlates visible-message
+    backlog, oldest-message age, and sent-vs-deleted throughput to distinguish
+    consumer lag, a stalled consumer, or a producer spike. Requires AWS OTel
+    metrics from the EDOT awscloudwatch collector (metrics-aws.*.otel-*).
+  solutions: [observability]
+  categories: [root-cause-analysis, monitoring]
+
+name: AWS SQS Consumer Lag Investigation (OTel)
+description: >
+  Automated investigation of an SQS queue whose backlog is growing. Confirms
+  whether the queue is backing up because the consumer can't keep up (consumer
+  lag), the consumer has stalled entirely, or producers spiked — by correlating
+  the visible-message backlog, the age of the oldest message, and the sent-vs-
+  deleted throughput balance. Built against OTel-schema AWS CloudWatch metrics
+  shipped by the EDOT awscloudwatch collector (metrics-aws.*.otel-*).
+
+# OTel-schema SQS data stream. Metric value field is the CloudWatch name flattened
+# under `metrics` (dots + slashes), so every reference is backticked in ES|QL.
+consts:
+  sqs_metrics_index: "metrics-aws.sqs.otel-*"
+  # Baseline T-50m..T-20m vs incident T-20m..T+5m — windows must NOT overlap or
+  # incident data contaminates the baseline comparison.
+  baseline_lookback: "50 minutes"
+  baseline_lookend: "20 minutes"
+  incident_lookback: "20 minutes"
+
+# The alert trigger fires only when a rule is connected to this workflow via the
+# "Run Workflow" rule action (.workflows system connector). Configure that action
+# with summaryMode:false so each run carries exactly ONE alert in event.alerts.
+triggers:
+  - type: manual
+    inputs:
+      - name: queue_name
+        type: string
+        description: >-
+          SQS QueueName of the alerting queue (e.g. fis-order-events).
+          Manual runs must supply it; alert-triggered runs derive it from the alert.
+        required: false
+      - name: service_name
+        type: string
+        description: >-
+          The consumer service that drains the queue (e.g. fulfillment-worker).
+        required: false
+      - name: alert_timestamp
+        type: string
+        description: >-
+          ISO8601 timestamp of the alert firing. Manual runs must supply it;
+          alert-triggered runs derive it from the alert.
+        required: false
+  - type: alert
+
+steps:
+  # 0. Resolve the target + timestamp: manual inputs win; otherwise the triggering
+  #    alert's structured group-by fields (kibana.alert.grouping.*) name the resource
+  #    and kibana.alert.start is the firing time. "MISSING" makes the incident query
+  #    match nothing so the evidence gate aborts cleanly.
+  - name: resolve
+    type: data.set
+    with:
+      queue_name: "{{ inputs.queue_name | default: event.alerts[0].kibana.alert.grouping.QueueName | default: 'MISSING' }}"
+      alert_timestamp: "{{ inputs.alert_timestamp | default: event.alerts[0].kibana.alert.start | default: 'MISSING' }}"
+      service_name: "{{ inputs.service_name | default: 'the consumer service' }}"
+      triggering_rule: "{{ event.rule.name | default: 'manual run' }}"
+
+  # 1. Backlog + lag during the incident: did the visible-message count and the age of
+  #    the oldest message climb? That pair is the signature of the queue backing up.
+  #    REQUIRED evidence: a query failure fails the run.
+  - name: backlog_incident
+    type: elasticsearch.esql.query
+    with:
+      query: |
+        FROM {{ consts.sqs_metrics_index }}
+        | WHERE attributes.QueueName == "{{ steps.resolve.output.queue_name }}"
+          AND @timestamp >= TO_DATETIME("{{ steps.resolve.output.alert_timestamp }}") - {{ consts.incident_lookback }}
+          AND @timestamp <= TO_DATETIME("{{ steps.resolve.output.alert_timestamp }}") + 5 minutes
+        | STATS
+            peak_visible    = MAX(`metrics.amazonaws.com/AWS/SQS/ApproximateNumberOfMessagesVisible`)    WHERE attributes.stat == "Maximum",
+            avg_visible     = AVG(`metrics.amazonaws.com/AWS/SQS/ApproximateNumberOfMessagesVisible`)    WHERE attributes.stat == "Maximum",
+            peak_oldest_age = MAX(`metrics.amazonaws.com/AWS/SQS/ApproximateAgeOfOldestMessage`)         WHERE attributes.stat == "Maximum",
+            peak_in_flight  = MAX(`metrics.amazonaws.com/AWS/SQS/ApproximateNumberOfMessagesNotVisible`) WHERE attributes.stat == "Maximum"
+      format: json
+
+  # 2. Baseline backlog BEFORE the incident — the comparison denominator.
+  #    Averages are taken over the per-period MAXIMUM stat, not "Average": the EDOT
+  #    awscloudwatch receiver ships SQS gauges as Sum/Maximum only, so a stat == "Average"
+  #    filter matches nothing and the baseline silently reads as "not available".
+  - name: backlog_baseline
+    type: elasticsearch.esql.query
+    with:
+      query: |
+        FROM {{ consts.sqs_metrics_index }}
+        | WHERE attributes.QueueName == "{{ steps.resolve.output.queue_name }}"
+          AND @timestamp >= TO_DATETIME("{{ steps.resolve.output.alert_timestamp }}") - {{ consts.baseline_lookback }}
+          AND @timestamp <= TO_DATETIME("{{ steps.resolve.output.alert_timestamp }}") - {{ consts.baseline_lookend }}
+        | STATS baseline_visible = AVG(`metrics.amazonaws.com/AWS/SQS/ApproximateNumberOfMessagesVisible`) WHERE attributes.stat == "Maximum",
+                baseline_oldest_age = AVG(`metrics.amazonaws.com/AWS/SQS/ApproximateAgeOfOldestMessage`) WHERE attributes.stat == "Maximum"
+      format: json
+
+  # 3. Throughput balance — sent vs deleted vs received, in the incident window AND the
+  #    baseline window. The incident-only balance cannot separate the two ways a backlog
+  #    grows: a producer surge against a consumer still running at its normal rate, or a
+  #    consumer that slowed/stopped under normal arrivals. Only the baseline rates tell
+  #    them apart. Both windows come from one query so the two are always comparable.
+  - name: throughput_balance
+    type: elasticsearch.esql.query
+    with:
+      query: |
+        FROM {{ consts.sqs_metrics_index }}
+        | WHERE attributes.QueueName == "{{ steps.resolve.output.queue_name }}"
+          AND @timestamp >= TO_DATETIME("{{ steps.resolve.output.alert_timestamp }}") - {{ consts.baseline_lookback }}
+          AND @timestamp <= TO_DATETIME("{{ steps.resolve.output.alert_timestamp }}") + 5 minutes
+          AND attributes.stat == "Sum"
+        | EVAL window_start = TO_DATETIME("{{ steps.resolve.output.alert_timestamp }}") - {{ consts.incident_lookback }},
+               baseline_end = TO_DATETIME("{{ steps.resolve.output.alert_timestamp }}") - {{ consts.baseline_lookend }}
+        | STATS
+            sent              = SUM(`metrics.amazonaws.com/AWS/SQS/NumberOfMessagesSent`)     WHERE @timestamp >= window_start,
+            deleted           = SUM(`metrics.amazonaws.com/AWS/SQS/NumberOfMessagesDeleted`)  WHERE @timestamp >= window_start,
+            received          = SUM(`metrics.amazonaws.com/AWS/SQS/NumberOfMessagesReceived`) WHERE @timestamp >= window_start,
+            empty_receives    = SUM(`metrics.amazonaws.com/AWS/SQS/NumberOfEmptyReceives`)    WHERE @timestamp >= window_start,
+            baseline_sent     = SUM(`metrics.amazonaws.com/AWS/SQS/NumberOfMessagesSent`)     WHERE @timestamp <= baseline_end,
+            baseline_deleted  = SUM(`metrics.amazonaws.com/AWS/SQS/NumberOfMessagesDeleted`)  WHERE @timestamp <= baseline_end,
+            baseline_received = SUM(`metrics.amazonaws.com/AWS/SQS/NumberOfMessagesReceived`) WHERE @timestamp <= baseline_end
+      format: json
+
+  # 4. Evidence gate — deterministic, BEFORE any AI step. Zero datapoints for the
+  #    resolved queue (wrong/missing name, data not yet ingested, degenerate alert
+  #    group) → refuse to diagnose instead of classifying a row of nulls.
+  - name: evidence_gate
+    type: if
+    condition: "steps.backlog_incident.output.documents_found > 0"
+    steps:
+      # 5. Classify the queue failure mode from backlog growth + throughput balance.
+      - name: classify_queue_pattern
+        type: ai.classify
+        with:
+          input: |
+            QueueName: {{ steps.resolve.output.queue_name }}
+            Backlog during incident: {{ steps.backlog_incident.output | json }}
+            Baseline backlog:        {{ steps.backlog_baseline.output | json }}
+            Throughput (incident window = {{ consts.incident_lookback }} + 5 minutes; baseline window = {{ consts.baseline_lookback }} to {{ consts.baseline_lookend }} before the alert): {{ steps.throughput_balance.output | json }}
+          categories:
+            - consumer_lag
+            - consumer_stalled
+            - producer_spike
+            - healthy
+          instructions: |
+            Classify why the SQS queue backlog is behaving as it is. First convert `sent`,
+            `deleted`, `baseline_sent`, `baseline_deleted` to per-minute rates using the two
+            window lengths given in the input, then decide on the RATES, not the raw counts:
+              - consumer_stalled: backlog and oldest-age climb while the incident `deleted`
+                rate is near zero (under ~5% of the incident `sent` rate) — the consumer has
+                stopped draining. A consumer that deletes thousands of messages is NOT
+                stalled, however large the backlog.
+              - producer_spike: the incident `sent` rate is several times `baseline_sent`
+                rate while the incident `deleted` rate is at or above the `baseline_deleted`
+                rate — the consumer is still working at its normal capacity and the arrival
+                surge is the dominant driver, even though a backlog grows.
+              - consumer_lag: the incident `sent` rate is near its baseline while the
+                `deleted` rate fell below both `sent` and its own baseline — the consumer
+                slowed down under normal arrivals.
+              - healthy: peak_visible stays near baseline and oldest-age is low.
+            If the arrival rate surged AND the deletion rate also fell, name the larger
+            proportional change as the category and describe the other in the rationale.
+            If a baseline returned no rows or nulls, say the comparison is unavailable — do
+            not treat a missing baseline as a zero baseline. In the rationale, state each
+            rate as "<incident per-minute> vs baseline <per-minute>".
+          includeRationale: true
+
+      # Optional calibration anchors (graceful if SLOs/alerts aren't deployed).
+      - name: slo_context
+        type: elasticsearch.esql.query
+        with:
+          query: |
+            FROM .slo-observability.summary-*
+            | WHERE slo.instanceId LIKE "*{{ steps.resolve.output.queue_name }}*"
+            | STATS sliValue = MAX(sliValue), errorBudgetConsumed = MAX(errorBudgetConsumed), status = VALUES(status) BY slo.name
+          format: json
+        on-failure:
+          continue: true
+
+      - name: active_alerts
+        type: elasticsearch.esql.query
+        with:
+          query: |
+            FROM .alerts-*
+            | WHERE kibana.alert.instance.id LIKE "*{{ steps.resolve.output.queue_name }}*"
+              AND kibana.alert.start <= TO_DATETIME("{{ steps.resolve.output.alert_timestamp }}") + 5 minutes
+              AND @timestamp >= TO_DATETIME("{{ steps.resolve.output.alert_timestamp }}") - {{ consts.incident_lookback }}
+            | EVAL window_start = TO_DATETIME("{{ steps.resolve.output.alert_timestamp }}") - {{ consts.incident_lookback }},
+                   alert_relation = CASE(kibana.alert.start < window_start,
+                                         "pre-existing: started before the incident window",
+                                         "started during the incident window")
+            | KEEP kibana.alert.rule.name, kibana.alert.status, alert_relation, kibana.alert.start, kibana.alert.reason
+            | SORT kibana.alert.start DESC
+            | LIMIT 20
+          format: json
+        on-failure:
+          continue: true
+
+      - name: synthesize_findings
+        type: ai.summarize
+        with:
+          input: |
+            ## SQS incident investigation for {{ steps.resolve.output.queue_name }}
+            Alert timestamp: {{ steps.resolve.output.alert_timestamp }}
+            Triggered by: {{ steps.resolve.output.triggering_rule }}
+            Consumer service: {{ steps.resolve.output.service_name }}
+
+            Classification: {{ steps.classify_queue_pattern.output.category }}
+            Rationale: {{ steps.classify_queue_pattern.output.rationale }}
+
+            Backlog (incident): {{ steps.backlog_incident.output | json }}
+            Backlog (baseline): {{ steps.backlog_baseline.output | json }}
+            Throughput:         {{ steps.throughput_balance.output | json }}
+            SLO status:    {{ steps.slo_context.output | json }}
+            Alerts on this resource (alert_relation says whether each pre-dates the incident window): {{ steps.active_alerts.output | json }}
+          instructions: |
+            You are an SRE assistant synthesising an AWS SQS incident investigation. Report
+            only what the supplied step outputs show; every number you cite must appear in
+            them. Produce a structured root-cause summary in EXACTLY these sections:
+
+            Writing rules for the report: write for an on-call engineer in plain words. The
+            field and step names below are for YOUR reading only — never print them (write
+            "messages deleted per minute", not "baseline_deleted"; "the alert pre-dates the
+            incident window", not "alert_relation"). When you state a ratio, name both
+            numbers it divides ("1,690 sent per minute vs 7.5 at baseline, about 225x"). If
+            "Triggered by" is not "manual run", open SEVERITY & CALIBRATION by naming the
+            triggering alert and saying whether the classified failure mode explains it.
+
+            ROOT CAUSE HYPOTHESIS — one sentence naming the most likely cause. Do not assert
+              a downstream impact unless a supplied value directly shows it; otherwise phrase
+              it as the likely consequence.
+
+            EVIDENCE — the specific values: peak vs baseline visible messages, oldest-message
+              age vs baseline, and the sent and deleted RATES in the incident window vs the
+              baseline window (the classification rests on which rate changed). If a step
+              returned no rows or an error, say "not available" rather than treating it as
+              zero.
+
+            SEVERITY & CALIBRATION — apply these rules literally:
+              1. An SLO or alert CORROBORATES the root cause only if BOTH hold: (a) it
+                 measures the same signal as the classified failure mode (backlog depth,
+                 oldest-message age or the sent/deleted balance for this queue), and (b) its
+                 alert_relation says it started during the incident window, or the SLO's
+                 status changed in this window.
+              2. An alert whose alert_relation is "pre-existing" was already firing before
+                 the incident. List it under "Pre-existing context" with its start time and
+                 say explicitly that it is not corroboration and may be unrelated standing
+                 state. Never describe a pre-existing alert as a symptom of the incident.
+              3. A HEALTHY SLO is not corroboration; report it as scope. A VIOLATED SLO
+                 whose status pre-dates the window is standing context, not corroboration.
+              4. If nothing satisfies rule 1, state that the assessment rests on raw metrics
+                 alone, with no SLO/alert corroboration. Do NOT invent one.
+              Then give the severity (low / moderate / high) with a one-line reason.
+
+            HYPOTHESIZED CAUSAL CHAIN — one link per line, cause to impact. Tag EVERY link
+              [observed: <the metric or alert that shows it>] when a supplied value directly
+              shows it, or [inferred] when it is the expected mechanism but no supplied data
+              shows it (e.g. "downstream processing is delayed" is inferred unless a
+              downstream metric was supplied). Use conditional language for inferred links.
+              If every link is observed, retitle the section CAUSAL CHAIN.
+
+            RECOMMENDED NEXT STEPS — numbered. First the checks that would confirm any
+              [inferred] link, then remediation: scale out consumer concurrency / batch
+              size to drain the backlog; shed or throttle producer load until the queue
+              recovers; check for a stalled or crash-looping consumer.
+
+            DOWNSTREAM IMPACT — what is delayed and the user-facing symptom, each marked
+              observed or expected in the same way.
+
+            CONFIDENCE NOTE — only if the classification was ambiguous.
+          maxLength: 2200
+
+      # Expose the result as the workflow's output for callers / composing workflows.
+      - name: output_result
+        type: workflow.output
+        with:
+          status: "investigated"
+          resource: "{{ steps.resolve.output.queue_name }}"
+          triggered_by: "{{ steps.resolve.output.triggering_rule }}"
+          classification: "{{ steps.classify_queue_pattern.output.category }}"
+          rationale: "{{ steps.classify_queue_pattern.output.rationale }}"
+          summary: "{{ steps.synthesize_findings.output.content }}"
+
+    else:
+      - name: output_insufficient_evidence
+        type: workflow.output
+        with:
+          status: "insufficient_evidence"
+          resource: "{{ steps.resolve.output.queue_name }}"
+          triggered_by: "{{ steps.resolve.output.triggering_rule }}"
+          summary: >-
+            No SQS datapoints found for "{{ steps.resolve.output.queue_name }}" in the
+            incident window around {{ steps.resolve.output.alert_timestamp }}. Either the
+            queue name could not be resolved (manual input missing, or the triggering
+            alert's group carries no QueueName), the metrics have not been ingested yet,
+            or the name does not match this cluster's data. Refusing to produce a
+            diagnosis without evidence.

@@ -1,0 +1,16 @@
+name: Request a template
+description: Suggest a workflow template for the library.
+title: '[Template request]: '
+body:
+  - type: textarea
+    id: use_case
+    attributes:
+      label: What do you want to automate?
+      description: Describe the task and the expected result.
+    validations:
+      required: true
+  - type: textarea
+    id: integrations
+    attributes:
+      label: Integrations and requirements
+      description: List the products, data, and triggers the workflow needs.
