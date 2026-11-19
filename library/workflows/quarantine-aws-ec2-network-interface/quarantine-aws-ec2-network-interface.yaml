@@ -59,7 +59,7 @@ steps:
   - name: resolve_target
     type: data.set
     with:
-      network_interface_id: "{{ event.alerts[0].network.interface.id | default: inputs.network_interface_id }}"
+      network_interface_id: "{{ event.alerts[0].aws.vpcflow.interface_id | default: event.alerts[0].aws.cloudtrail.flattened.request_parameters.networkInterfaceId | default: inputs.network_interface_id }}"
       region: "{{ event.alerts[0].cloud.region | default: inputs.region }}"
       alert_id: "{{ event.alerts[0].kibana.alert.uuid | default: event.alerts[0]._id | default: 'manual' }}"
 
