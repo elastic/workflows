@@ -68,6 +68,7 @@ steps:
 
       - name: request_approval
         type: waitForInput
+        timeout: 1h
         with:
           message: |-
             Approve deactivation of AWS IAM access key {{ variables.access_key_id }}
@@ -117,17 +118,68 @@ steps:
             Version: "2010-05-08"
             UserName: "{{ variables.user_name }}"
 
-      - name: log_audit_result
-        type: console
+      # Match the exact key/status pair in IAM's AccessKeyMetadata XML.
+      - name: classify_verification
+        type: data.set
         with:
-          message: |-
-            Outcome: {% if steps.request_approval.output.response.approved == true %}AWS IAM access key {{ variables.access_key_id }} was deactivated for user {{ variables.user_name }}.{% else %}No change was made to AWS IAM access key {{ variables.access_key_id }} for user {{ variables.user_name }} because deactivation was rejected.{% endif %}
-            Alert: {{ variables.alert_id }}.
-            Approved: {{ steps.request_approval.output.response.approved }}.
-            Responder: {{ steps.request_approval.output.respondedBy }}.
-            Notes: {{ steps.request_approval.output.response.notes | default: '(none)' }}.
-            Verification ListAccessKeys response:
-            {{ steps.list_access_keys_after.output.data | json }}
+          state: >-
+            {% assign key_element = '<AccessKeyId>' | append: variables.access_key_id | append: '</AccessKeyId>' -%}
+            {% assign state = 'missing' -%}
+            {% assign members = steps.list_access_keys_after.output.data | split: '<member>' -%}
+            {% for member in members -%}
+              {% if member contains key_element -%}
+                {% if member contains '<Status>Inactive</Status>' -%}{% assign state = 'inactive' -%}{% else -%}{% assign state = 'not_inactive' -%}{% endif -%}
+              {% endif -%}
+            {% endfor -%}
+            {{ state }}
+
+      - name: log_audit_result
+        type: if
+        condition: "${{ steps.request_approval.output.response.approved == true }}"
+        steps:
+          - name: classify_approved_result
+            type: if
+            condition: "${{ steps.classify_verification.output.state == 'inactive' }}"
+            steps:
+              - name: log_verified_deactivation
+                type: console
+                with:
+                  message: |-
+                    Outcome: verified; AWS IAM access key {{ variables.access_key_id }} is Inactive for user {{ variables.user_name }}.
+                    Alert: {{ variables.alert_id }}.
+                    Approved: {{ steps.request_approval.output.response.approved }}.
+                    Responder: {{ steps.request_approval.output.respondedBy }}.
+                    Notes: {{ steps.request_approval.output.response.notes | default: '(none)' }}.
+                    Verification ListAccessKeys response:
+                    {{ steps.list_access_keys_after.output.data | json }}
+            else:
+              - name: log_failed_verification
+                type: console
+                with:
+                  message: |-
+                    Outcome: verification_failed; UpdateAccessKey was approved, but the exact access key was not confirmed Inactive in the follow-up ListAccessKeys response.
+                    User: {{ variables.user_name }}.
+                    Access key: {{ variables.access_key_id }}.
+                    Observed verification state: {{ steps.classify_verification.output.state }}.
+                    Alert: {{ variables.alert_id }}.
+                    Approved: {{ steps.request_approval.output.response.approved }}.
+                    Responder: {{ steps.request_approval.output.respondedBy }}.
+                    Notes: {{ steps.request_approval.output.response.notes | default: '(none)' }}.
+                    Verification ListAccessKeys response:
+                    {{ steps.list_access_keys_after.output.data | json }}
+        else:
+          - name: log_rejected_result
+            type: console
+            with:
+              message: |-
+                Outcome: no_change; no UpdateAccessKey request was made for AWS IAM access key {{ variables.access_key_id }} because deactivation was rejected.
+                User: {{ variables.user_name }}.
+                Alert: {{ variables.alert_id }}.
+                Approved: {{ steps.request_approval.output.response.approved }}.
+                Responder: {{ steps.request_approval.output.respondedBy }}.
+                Notes: {{ steps.request_approval.output.response.notes | default: '(none)' }}.
+                Follow-up ListAccessKeys response:
+                {{ steps.list_access_keys_after.output.data | json }}
     else:
       - name: log_missing_target
         type: console
