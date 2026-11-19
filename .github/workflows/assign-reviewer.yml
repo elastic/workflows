@@ -7,6 +7,11 @@ name: Assign reviewer
 # among all PRs (not its number, which is shared with issues), so concurrent
 # runs never collide. When that slot is the author, the next person gets it.
 #
+# PRs that already have an individual reviewer are skipped, so the Slack ping
+# lives in its own job: if it fails, "Re-run failed jobs" retries it with the
+# reviewer picked by the first attempt. "Re-run all jobs" finds that reviewer
+# already requested and skips the PR, so it never pings twice.
+#
 # `pull_request_target` gives fork PRs the Slack secret and a write token, so
 # this workflow must never check out or run code from the PR.
 #
@@ -19,17 +24,19 @@ on:
   pull_request_target:
     types: [opened, ready_for_review]
 
-permissions:
-  pull-requests: write
+permissions: {}
 
 jobs:
   assign:
     if: ${{ !github.event.pull_request.draft }}
     runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write
+    outputs:
+      reviewer_slack_id: ${{ steps.pick.outputs.reviewer_slack_id }}
     steps:
-      - uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
-        env:
-          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_PR_REVIEW_WEBHOOK_URL }}
+      - id: pick
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         with:
           script: |
             // Slack member IDs: Slack profile > ⋮ > "Copy member ID".
@@ -48,7 +55,17 @@ jobs:
             ];
 
             const { owner, repo } = context.repo;
-            const { number, title, html_url: url, user } = context.payload.pull_request;
+            const { number, user } = context.payload.pull_request;
+
+            const { data: requested } = await github.rest.pulls.listRequestedReviewers({
+              owner,
+              repo,
+              pull_number: number,
+            });
+            if (requested.users.length > 0) {
+              core.info(`#${number} already has an individual reviewer; skipping.`);
+              return;
+            }
 
             // Oldest first, so PRs opened while paginating land on the last page
             // instead of shifting earlier pages and double-counting a PR.
@@ -66,38 +83,37 @@ jobs:
               reviewer = rotation[(position + 1) % rotation.length];
             }
 
-            // A re-run finds its own earlier request: keep it and retry Slack.
-            const { data: requested } = await github.rest.pulls.listRequestedReviewers({
+            await github.rest.pulls.requestReviewers({
               owner,
               repo,
               pull_number: number,
+              reviewers: [reviewer.github],
             });
-            const requestedLogins = requested.users.map(({ login }) => login);
-            if (requestedLogins.some((login) => login !== reviewer.github)) {
-              core.info(`#${number} already has an individual reviewer; skipping.`);
-              return;
-            }
+            core.info(`Requested a review from ${reviewer.github} on #${number}.`);
+            core.setOutput('reviewer_slack_id', reviewer.slack);
 
-            if (!requestedLogins.includes(reviewer.github)) {
-              await github.rest.pulls.requestReviewers({
-                owner,
-                repo,
-                pull_number: number,
-                reviewers: [reviewer.github],
-              });
-              core.info(`Requested a review from ${reviewer.github} on #${number}.`);
-            }
+  notify:
+    needs: assign
+    if: ${{ needs.assign.outputs.reviewer_slack_id != '' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Mention the reviewer in Slack
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_PR_REVIEW_WEBHOOK_URL }}
+          REVIEWER: ${{ needs.assign.outputs.reviewer_slack_id }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+        run: |
+          set -euo pipefail
 
-            const response = await fetch(process.env.SLACK_WEBHOOK_URL, {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({
-                reviewer: reviewer.slack,
-                pr_title: title,
-                pr_url: url,
-                pr_author: user.login,
-              }),
-            });
-            if (!response.ok) {
-              core.setFailed(`Slack webhook returned ${response.status}: ${await response.text()}`);
-            }
+          jq -n \
+            --arg reviewer "${REVIEWER}" \
+            --arg pr_title "${PR_TITLE}" \
+            --arg pr_url "${PR_URL}" \
+            --arg pr_author "${PR_AUTHOR}" \
+            '{reviewer: $reviewer, pr_title: $pr_title, pr_url: $pr_url, pr_author: $pr_author}' |
+            curl --silent --show-error --fail-with-body --retry 3 \
+              -H 'Content-Type: application/json' \
+              --data @- \
+              "${SLACK_WEBHOOK_URL}"
