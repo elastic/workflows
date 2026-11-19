@@ -7,8 +7,9 @@ template-metadata:
     Restore logging for an AWS CloudTrail trail from a security alert or manual
     input. Reads the current trail status, requires explicit analyst approval,
     requests logging to start, and reads the trail status again for
-    verification. The AWS connector requires only cloudtrail:GetTrailStatus and
-    cloudtrail:StartLogging.
+    verification. Alert-driven runs require the AWS integration's
+    request-parameter retention mode to be All or Flattened. The AWS connector
+    requires only cloudtrail:GetTrailStatus and cloudtrail:StartLogging.
   solutions: [security]
   categories: [response]
   install:
@@ -26,7 +27,9 @@ name: Restore AWS CloudTrail Logging
 description: |
   Resolve a CloudTrail trail and region from an alert or manual input, inspect
   its current logging status, request analyst approval, request logging to
-  start, and verify the resulting status.
+  start, and verify the resulting status. Alert-driven runs require the AWS
+  integration's request-parameter retention mode to be All or Flattened;
+  Keyword retains the trail name only as an unparsed string.
 
 triggers:
   - type: alert
@@ -44,116 +47,171 @@ triggers:
         default: ""
 
 steps:
-  # Alert fields take precedence; manual inputs support direct runs.
-  - name: resolve_target
-    type: data.set
-    with:
-      trail_name: "{{ event.alerts[0].aws.cloudtrail.request_parameters.name | default: inputs.trail_name }}"
-      region: "{{ event.alerts[0].cloud.region | default: inputs.region }}"
-      alert_id: "{{ event.alerts[0].kibana.alert.uuid | default: event.alerts[0]._id | default: 'manual' }}"
+  # Build one target per distinct trail and Region in an alert batch. Manual
+  # runs produce one target from their inputs.
+  - name: build_targets
+    type: data.parseJson
+    source: |
+      {% assign targets = "" | split: "" -%}
+      {% assign seen = "" | split: "" -%}
+      {% if event.alerts and event.alerts.size > 0 -%}
+        {% for alert in event.alerts -%}
+          {% assign trail_name = alert.aws.cloudtrail.flattened.request_parameters.name | default: "" -%}
+          {% assign region = alert.cloud.region | default: "" -%}
+          {% assign target_key = region | append: "|" | append: trail_name -%}
+          {% unless seen contains target_key -%}
+            {% assign alert_ids = "" | split: "" -%}
+            {% for contributing_alert in event.alerts -%}
+              {% assign contributing_trail = contributing_alert.aws.cloudtrail.flattened.request_parameters.name | default: "" -%}
+              {% assign contributing_region = contributing_alert.cloud.region | default: "" -%}
+              {% assign contributing_key = contributing_region | append: "|" | append: contributing_trail -%}
+              {% if contributing_key == target_key -%}
+                {% assign contributing_id = contributing_alert.kibana.alert.uuid | default: contributing_alert._id | default: "unknown" -%}
+                {% assign alert_ids = alert_ids | push: contributing_id -%}
+              {% endif -%}
+            {% endfor -%}
+            {% capture target -%}{"trail_name":{{ trail_name | json }},"region":{{ region | json }},"alert_ids":{{ alert_ids | json }}}{%- endcapture -%}
+            {% assign targets = targets | push: target -%}
+            {% assign seen = seen | push: target_key -%}
+          {% endunless -%}
+        {% endfor -%}
+      {% else -%}
+        {% capture target -%}{"trail_name":{{ inputs.trail_name | default: "" | json }},"region":{{ inputs.region | default: "" | json }},"alert_ids":["manual"]}{%- endcapture -%}
+        {% assign targets = targets | push: target -%}
+      {% endif -%}
+      [{{ targets | join: "," }}]
 
-  # Fail closed when either target identifier is missing.
-  - name: validate_target
-    type: if
-    condition: "${{ variables.trail_name != blank and variables.region != blank }}"
+  - name: process_targets
+    type: foreach
+    foreach: "${{ steps.build_targets.output }}"
     steps:
-      - name: get_trail_status_before
-        type: aws.request
-        connector-id: __install__.aws-connector
+      - name: set_target
+        type: data.set
         with:
-          service: cloudtrail
-          region: "{{ variables.region }}"
-          method: POST
-          headers:
-            Content-Type: application/x-amz-json-1.1
-            X-Amz-Target: CloudTrail_20131101.GetTrailStatus
-          body:
-            Name: "{{ variables.trail_name }}"
+          trail_name: "{{ foreach.item.trail_name }}"
+          region: "{{ foreach.item.region }}"
+          alert_ids: "{{ foreach.item.alert_ids | join: ', ' }}"
 
-      - name: request_approval
-        type: waitForInput
-        with:
-          message: |-
-            Approve a request to start logging for AWS CloudTrail trail
-            {{ variables.trail_name }} in {{ variables.region }}?
-
-            Alert: {{ variables.alert_id }}
-            Pre-change GetTrailStatus response:
-            {{ steps.get_trail_status_before.output.data | json }}
-          schema:
-            type: object
-            properties:
-              approved:
-                type: boolean
-                title: Start logging for this trail
-                default: false
-              notes:
-                type: string
-                title: Analyst notes
-            required:
-              - approved
-
-      # The mutation and its verification read require explicit boolean approval.
-      - name: start_logging_when_approved
+      # Fail closed for an incomplete target while continuing other distinct
+      # trails in the batch.
+      - name: validate_target
         type: if
-        condition: "${{ steps.request_approval.output.response.approved == true }}"
+        condition: "${{ steps.set_target.output.trail_name != blank and steps.set_target.output.region != blank }}"
         steps:
-          - name: start_logging
+          - name: get_trail_status_before
             type: aws.request
             connector-id: __install__.aws-connector
             with:
               service: cloudtrail
-              region: "{{ variables.region }}"
-              method: POST
-              headers:
-                Content-Type: application/x-amz-json-1.1
-                X-Amz-Target: CloudTrail_20131101.StartLogging
-              body:
-                Name: "{{ variables.trail_name }}"
-
-          - name: get_trail_status_after
-            type: aws.request
-            connector-id: __install__.aws-connector
-            with:
-              service: cloudtrail
-              region: "{{ variables.region }}"
+              region: "{{ steps.set_target.output.region }}"
               method: POST
               headers:
                 Content-Type: application/x-amz-json-1.1
                 X-Amz-Target: CloudTrail_20131101.GetTrailStatus
               body:
-                Name: "{{ variables.trail_name }}"
+                Name: "{{ steps.set_target.output.trail_name }}"
 
-          - name: log_approved_audit_result
-            type: console
+          - name: request_approval
+            type: waitForInput
+            timeout: 1h
             with:
               message: |-
-                Outcome: StartLogging was requested for AWS CloudTrail trail {{ variables.trail_name }} in {{ variables.region }}. {% if steps.get_trail_status_after.output.data.IsLogging == true %}The follow-up GetTrailStatus response was parsed and verified IsLogging=true.{% else %}The follow-up GetTrailStatus response did not verify IsLogging=true; review the response and trail health.{% endif %}
-                Alert: {{ variables.alert_id }}.
-                Approved: {{ steps.request_approval.output.response.approved }}.
-                Responder: {{ steps.request_approval.output.respondedBy }}.
-                Notes: {{ steps.request_approval.output.response.notes | default: '(none)' }}.
+                Approve a request to start logging for AWS CloudTrail trail
+                {{ steps.set_target.output.trail_name }} in {{ steps.set_target.output.region }}?
+
+                Alerts: {{ steps.set_target.output.alert_ids }}
                 Pre-change GetTrailStatus response:
                 {{ steps.get_trail_status_before.output.data | json }}
-                Follow-up GetTrailStatus response:
-                {{ steps.get_trail_status_after.output.data | json }}
+              schema:
+                type: object
+                properties:
+                  approved:
+                    type: boolean
+                    title: Start logging for this trail
+                    default: false
+                  notes:
+                    type: string
+                    title: Analyst notes
+                required:
+                  - approved
+
+          # The mutation and verification read require explicit approval for
+          # this distinct trail.
+          - name: start_logging_when_approved
+            type: if
+            condition: "${{ steps.request_approval.output.response.approved == true }}"
+            steps:
+              - name: start_logging
+                type: aws.request
+                connector-id: __install__.aws-connector
+                with:
+                  service: cloudtrail
+                  region: "{{ steps.set_target.output.region }}"
+                  method: POST
+                  headers:
+                    Content-Type: application/x-amz-json-1.1
+                    X-Amz-Target: CloudTrail_20131101.StartLogging
+                  body:
+                    Name: "{{ steps.set_target.output.trail_name }}"
+
+              - name: get_trail_status_after
+                type: aws.request
+                connector-id: __install__.aws-connector
+                with:
+                  service: cloudtrail
+                  region: "{{ steps.set_target.output.region }}"
+                  method: POST
+                  headers:
+                    Content-Type: application/x-amz-json-1.1
+                    X-Amz-Target: CloudTrail_20131101.GetTrailStatus
+                  body:
+                    Name: "{{ steps.set_target.output.trail_name }}"
+
+              - name: verify_logging_restored
+                type: if
+                condition: "${{ steps.get_trail_status_after.output.data.IsLogging == true }}"
+                steps:
+                  - name: log_verified_audit_result
+                    type: console
+                    with:
+                      message: |-
+                        Outcome: verified; GetTrailStatus confirmed IsLogging=true for AWS CloudTrail trail {{ steps.set_target.output.trail_name }} in {{ steps.set_target.output.region }}.
+                        Alerts: {{ steps.set_target.output.alert_ids }}.
+                        Responder: {{ steps.request_approval.output.respondedBy }}.
+                        Notes: {{ steps.request_approval.output.response.notes | default: '(none)' }}.
+                        Pre-change response: {{ steps.get_trail_status_before.output.data | json }}.
+                        Follow-up response: {{ steps.get_trail_status_after.output.data | json }}.
+                else:
+                  - name: log_failed_verification
+                    type: console
+                    with:
+                      message: |-
+                        Outcome: verification_failed; StartLogging completed, but GetTrailStatus did not confirm IsLogging=true.
+                        Trail: {{ steps.set_target.output.trail_name }}.
+                        Region: {{ steps.set_target.output.region }}.
+                        Alerts: {{ steps.set_target.output.alert_ids }}.
+                        Responder: {{ steps.request_approval.output.respondedBy }}.
+                        Notes: {{ steps.request_approval.output.response.notes | default: '(none)' }}.
+                        Pre-change response: {{ steps.get_trail_status_before.output.data | json }}.
+                        Follow-up response: {{ steps.get_trail_status_after.output.data | json }}.
+            else:
+              - name: log_rejected_audit_result
+                type: console
+                with:
+                  message: |-
+                    Outcome: no_change; no StartLogging request was made because restoration was rejected.
+                    Trail: {{ steps.set_target.output.trail_name }}.
+                    Region: {{ steps.set_target.output.region }}.
+                    Alerts: {{ steps.set_target.output.alert_ids }}.
+                    Responder: {{ steps.request_approval.output.respondedBy }}.
+                    Notes: {{ steps.request_approval.output.response.notes | default: '(none)' }}.
+                    Current GetTrailStatus response: {{ steps.get_trail_status_before.output.data | json }}.
         else:
-          - name: log_rejected_audit_result
+          - name: log_missing_target
             type: console
             with:
-              message: |-
-                Outcome: No StartLogging request was made for AWS CloudTrail trail {{ variables.trail_name }} in {{ variables.region }} because restoration was rejected.
-                Alert: {{ variables.alert_id }}.
-                Approved: {{ steps.request_approval.output.response.approved }}.
-                Responder: {{ steps.request_approval.output.respondedBy }}.
-                Notes: {{ steps.request_approval.output.response.notes | default: '(none)' }}.
-                Current GetTrailStatus response:
-                {{ steps.get_trail_status_before.output.data | json }}
-    else:
-      - name: log_missing_target
-        type: console
-        with:
-          message: >-
-            AWS CloudTrail logging restoration skipped because
-            aws.cloudtrail.request_parameters.name/trail_name or
-            cloud.region/region was missing.
+              message: >-
+                Outcome: no_change; CloudTrail logging restoration was skipped
+                for alerts {{ steps.set_target.output.alert_ids }} because
+                aws.cloudtrail.flattened.request_parameters.name/manual
+                trail_name or cloud.region/manual region was missing.
