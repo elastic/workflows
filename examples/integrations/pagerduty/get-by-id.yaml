@@ -25,10 +25,12 @@ steps:
     condition: "${{inputs.item_type == 'schedule'}}"
     steps:
       - name: get-schedule
-        type: pagerduty_mcp.getSchedule
+        type: pagerduty_mcp.browseSchedules
         connector-id: <%= pagerduty_mcp-stack-connector-id %>
         with:
-          schedule_id: "${{inputs.id}}"
+          request:
+            action: get
+            schedule_id: "${{inputs.id}}"
       - name: filter-schedule
         type: data.map
         items: ${{steps['get-schedule'].output}}
@@ -60,10 +62,12 @@ steps:
         condition: "${{inputs.item_type == 'incident'}}"
         steps:
           - name: get-incident
-            type: pagerduty_mcp.getIncident
+            type: pagerduty_mcp.browseIncidents
             connector-id: <%= pagerduty_mcp-stack-connector-id %>
             with:
-              incident_id: "${{inputs.id}}"
+              request:
+                action: get
+                incident_id: "${{inputs.id}}"
           - name: filter-incident
             type: data.map
             items: ${{steps['get-incident'].output}}
@@ -90,10 +94,12 @@ steps:
             condition: "${{ inputs.item_type == 'escalation_policy' }}"
             steps:
               - name: get-escalation-policy
-                type: pagerduty_mcp.getEscalationPolicy
+                type: pagerduty_mcp.browseEscalationPolicies
                 connector-id: <%= pagerduty_mcp-stack-connector-id %>
                 with:
-                  policy_id: "${{inputs.id}}"
+                  request:
+                    action: get
+                    policy_id: "${{inputs.id}}"
               - name: filter-escalation-policy
                 type: data.map
                 items: ${{steps['get-escalation-policy'].output}}
@@ -125,10 +131,12 @@ steps:
                 condition: "${{ inputs.item_type == 'team' }}"
                 steps:
                   - name: get-team
-                    type: pagerduty_mcp.getTeam
+                    type: pagerduty_mcp.browseTeams
                     connector-id: <%= pagerduty_mcp-stack-connector-id %>
                     with:
-                      team_id: "${{inputs.id}}"
+                      request:
+                        action: get
+                        team_id: "${{inputs.id}}"
                   - name: filter-team
                     type: data.map
                     items: ${{steps['get-team'].output}}
