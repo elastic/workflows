@@ -1,0 +1,95 @@
+name: Assign reviewer
+
+# Requests a review from one `@elastic/workflows-eng` member per PR, in round
+# robin, and mentions them in #one-workflow-eng.
+#
+# Round robin without stored state: the reviewer is picked by the PR's position
+# among all PRs (not its number, which is shared with issues), so concurrent
+# runs never collide. When that slot is the author, the next person gets it.
+#
+# `pull_request_target` gives fork PRs the Slack secret and a write token, so
+# this workflow must never check out or run code from the PR.
+#
+# The Slack side is a Workflow Builder workflow in #one-workflow-eng that starts
+# from a webhook with the variables `reviewer` (user ID) and `pr_title`,
+# `pr_url`, `pr_author` (text). Its URL is the `SLACK_PR_REVIEW_WEBHOOK_URL`
+# repository secret.
+
+on:
+  pull_request_target:
+    types: [opened, ready_for_review]
+
+permissions:
+  pull-requests: write
+
+jobs:
+  assign:
+    if: ${{ !github.event.pull_request.draft }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_PR_REVIEW_WEBHOOK_URL }}
+        with:
+          script: |
+            // Slack member IDs: Slack profile > ⋮ > "Copy member ID".
+            const rotation = [
+              { github: 'cesco-f', slack: 'U08ES3X1JR2' },
+              { github: 'CoenWarmer', slack: 'U03TS961V0C' },
+              { github: 'dej611', slack: 'U015A9A3ADS' },
+              { github: 'h88', slack: 'U09PNV1KZ9N' },
+              { github: 'Kiryous', slack: 'U08SUNTMWTD' },
+              { github: 'rosomri', slack: 'U09E1LQM6RY' },
+              { github: 'semd', slack: 'U01ULMCU54M' },
+              { github: 'shahargl', slack: 'U08TSNBB1PS' },
+              { github: 'skynetigor', slack: 'U08T0GHGRPG' },
+              { github: 'talboren', slack: 'U08SW81NFK8' },
+              { github: 'yngrdyn', slack: 'U0407J177EH' },
+            ];
+
+            const { owner, repo } = context.repo;
+            const { number, title, html_url: url, user } = context.payload.pull_request;
+
+            const { data: requested } = await github.rest.pulls.listRequestedReviewers({
+              owner,
+              repo,
+              pull_number: number,
+            });
+            if (requested.users.length > 0) {
+              core.info(`#${number} already has an individual reviewer; skipping.`);
+              return;
+            }
+
+            const pulls = await github.paginate(github.rest.pulls.list, {
+              owner,
+              repo,
+              state: 'all',
+              per_page: 100,
+            });
+            const position = pulls.filter((pull) => pull.number < number).length;
+            let reviewer = rotation[position % rotation.length];
+            if (reviewer.github === user.login) {
+              reviewer = rotation[(position + 1) % rotation.length];
+            }
+
+            await github.rest.pulls.requestReviewers({
+              owner,
+              repo,
+              pull_number: number,
+              reviewers: [reviewer.github],
+            });
+            core.info(`Requested a review from ${reviewer.github} on #${number}.`);
+
+            const response = await fetch(process.env.SLACK_WEBHOOK_URL, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                reviewer: reviewer.slack,
+                pr_title: title,
+                pr_url: url,
+                pr_author: user.login,
+              }),
+            });
+            if (!response.ok) {
+              core.setFailed(`Slack webhook returned ${response.status}: ${await response.text()}`);
+            }
