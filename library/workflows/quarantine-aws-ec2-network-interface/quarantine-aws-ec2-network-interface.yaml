@@ -1,0 +1,162 @@
+template-metadata:
+  slug: quarantine-aws-ec2-network-interface
+  version: "1.0.0"
+  availability: ">=9.7.0"
+  name: "Quarantine AWS EC2 Network Interface"
+  description: >-
+    Quarantine an AWS EC2 network interface from a security alert or manual
+    input. Reads the current interface state, requires explicit analyst
+    approval, replaces its complete security-group set with a configured
+    isolation group, and reads the interface again for verification. The AWS
+    connector requires only ec2:DescribeNetworkInterfaces and
+    ec2:ModifyNetworkInterfaceAttribute.
+  solutions: [security]
+  categories: [response]
+  install:
+    form:
+      - name: aws-connector
+        label: "AWS connector"
+        description: >-
+          AWS connector with permission to describe and modify the network
+          interfaces this workflow may quarantine.
+        inputType: connector
+        connectorType: .aws
+        required: true
+      - name: isolation-security-group-id
+        label: "Isolation security group ID"
+        description: >-
+          Security group that will become the complete security-group set on a
+          quarantined network interface.
+        inputType: text
+        required: true
+
+name: Quarantine AWS EC2 Network Interface
+description: |
+  Resolve an EC2 network interface and region from an alert or manual input,
+  preserve its current state, request analyst approval, replace its security
+  groups with the isolation group, and verify the resulting state.
+
+consts:
+  isolation_security_group_id: "__install__.isolation-security-group-id"
+
+triggers:
+  - type: alert
+  - type: manual
+    inputs:
+      - name: network_interface_id
+        type: string
+        description: AWS EC2 network interface ID to quarantine.
+        required: true
+        default: ""
+      - name: region
+        type: string
+        description: AWS region containing the network interface.
+        required: true
+        default: ""
+
+steps:
+  # Alert fields take precedence; manual inputs support direct runs.
+  - name: resolve_target
+    type: data.set
+    with:
+      network_interface_id: "{{ event.alerts[0].network.interface.id | default: inputs.network_interface_id }}"
+      region: "{{ event.alerts[0].cloud.region | default: inputs.region }}"
+      alert_id: "{{ event.alerts[0].kibana.alert.uuid | default: event.alerts[0]._id | default: 'manual' }}"
+
+  # Fail closed when either target identifier is missing.
+  - name: validate_target
+    type: if
+    condition: "${{ variables.network_interface_id != blank and variables.region != blank }}"
+    steps:
+      # Retain the raw pre-change response in execution history for rollback.
+      - name: describe_network_interface_before
+        type: aws.request
+        connector-id: __install__.aws-connector
+        with:
+          service: ec2
+          region: "{{ variables.region }}"
+          query:
+            Action: DescribeNetworkInterfaces
+            Version: "2016-11-15"
+            NetworkInterfaceId.1: "{{ variables.network_interface_id }}"
+
+      - name: request_approval
+        type: waitForInput
+        with:
+          message: |-
+            Approve quarantine of AWS EC2 network interface {{ variables.network_interface_id }}
+            in {{ variables.region }}?
+
+            WARNING: Approval will replace the complete ENI security-group set
+            with only isolation group {{ consts.isolation_security_group_id }}.
+            Existing security groups will be removed from the ENI. Use the
+            pre-change DescribeNetworkInterfaces response retained in this
+            execution history to restore the original complete set if rollback
+            is required.
+
+            Alert: {{ variables.alert_id }}
+            Pre-change DescribeNetworkInterfaces response:
+            {{ steps.describe_network_interface_before.output.data | json }}
+          schema:
+            type: object
+            properties:
+              approved:
+                type: boolean
+                title: Replace the complete security-group set
+                default: false
+              notes:
+                type: string
+                title: Analyst notes
+            required:
+              - approved
+
+      # The only mutation is gated on an explicit boolean approval.
+      - name: quarantine_when_approved
+        type: if
+        condition: "${{ steps.request_approval.output.response.approved == true }}"
+        steps:
+          - name: replace_security_groups
+            type: aws.request
+            connector-id: __install__.aws-connector
+            with:
+              service: ec2
+              region: "{{ variables.region }}"
+              query:
+                Action: ModifyNetworkInterfaceAttribute
+                Version: "2016-11-15"
+                NetworkInterfaceId: "{{ variables.network_interface_id }}"
+                SecurityGroupId.1: "{{ consts.isolation_security_group_id }}"
+
+      # Read after the approval branch to provide the resulting state for review.
+      - name: describe_network_interface_after
+        type: aws.request
+        connector-id: __install__.aws-connector
+        with:
+          service: ec2
+          region: "{{ variables.region }}"
+          query:
+            Action: DescribeNetworkInterfaces
+            Version: "2016-11-15"
+            NetworkInterfaceId.1: "{{ variables.network_interface_id }}"
+
+      - name: log_audit_result
+        type: console
+        with:
+          message: |-
+            Outcome: {% if steps.request_approval.output.response.approved == true %}Replacement of the complete security-group set on AWS EC2 network interface {{ variables.network_interface_id }} with isolation security group {{ consts.isolation_security_group_id }} was requested in {{ variables.region }}.{% else %}No change was requested for AWS EC2 network interface {{ variables.network_interface_id }} in {{ variables.region }} because quarantine was rejected.{% endif %}
+            Alert: {{ variables.alert_id }}.
+            Approved: {{ steps.request_approval.output.response.approved }}.
+            Responder: {{ steps.request_approval.output.respondedBy }}.
+            Notes: {{ steps.request_approval.output.response.notes | default: '(none)' }}.
+            Pre-change DescribeNetworkInterfaces response retained for rollback:
+            {{ steps.describe_network_interface_before.output.data | json }}
+            Post-decision current-state DescribeNetworkInterfaces response for analyst verification:
+            {{ steps.describe_network_interface_after.output.data | json }}
+    else:
+      - name: log_missing_target
+        type: console
+        with:
+          message: >-
+            AWS EC2 network-interface quarantine skipped because
+            network.interface.id/network_interface_id or cloud.region/region
+            was missing.
