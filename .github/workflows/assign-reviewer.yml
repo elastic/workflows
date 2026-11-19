@@ -50,20 +50,14 @@ jobs:
             const { owner, repo } = context.repo;
             const { number, title, html_url: url, user } = context.payload.pull_request;
 
-            const { data: requested } = await github.rest.pulls.listRequestedReviewers({
-              owner,
-              repo,
-              pull_number: number,
-            });
-            if (requested.users.length > 0) {
-              core.info(`#${number} already has an individual reviewer; skipping.`);
-              return;
-            }
-
+            // Oldest first, so PRs opened while paginating land on the last page
+            // instead of shifting earlier pages and double-counting a PR.
             const pulls = await github.paginate(github.rest.pulls.list, {
               owner,
               repo,
               state: 'all',
+              sort: 'created',
+              direction: 'asc',
               per_page: 100,
             });
             const position = pulls.filter((pull) => pull.number < number).length;
@@ -72,13 +66,27 @@ jobs:
               reviewer = rotation[(position + 1) % rotation.length];
             }
 
-            await github.rest.pulls.requestReviewers({
+            // A re-run finds its own earlier request: keep it and retry Slack.
+            const { data: requested } = await github.rest.pulls.listRequestedReviewers({
               owner,
               repo,
               pull_number: number,
-              reviewers: [reviewer.github],
             });
-            core.info(`Requested a review from ${reviewer.github} on #${number}.`);
+            const requestedLogins = requested.users.map(({ login }) => login);
+            if (requestedLogins.some((login) => login !== reviewer.github)) {
+              core.info(`#${number} already has an individual reviewer; skipping.`);
+              return;
+            }
+
+            if (!requestedLogins.includes(reviewer.github)) {
+              await github.rest.pulls.requestReviewers({
+                owner,
+                repo,
+                pull_number: number,
+                reviewers: [reviewer.github],
+              });
+              core.info(`Requested a review from ${reviewer.github} on #${number}.`);
+            }
 
             const response = await fetch(process.env.SLACK_WEBHOOK_URL, {
               method: 'POST',
