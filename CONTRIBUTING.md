@@ -263,7 +263,7 @@ Multi-version coexistence (the `<slug>/<slug>-v2.yaml` sibling layout) lands in 
    - Validation output (paste the last few lines of `npm run build:catalog`).
    - A short test plan (e.g. "installed in local 9.5, ran with `ip_address=8.8.8.8`, output report rendered as expected").
 
-A maintainer will review and either request changes or merge. Once merged, the next push to `main` republishes the catalog and the template becomes installable from the Kibana UI on every active Kibana version whose semver satisfies your `availability:` range.
+A reviewer from `@elastic/workflows-eng` is assigned automatically and will either request changes or merge. Once merged, the next push to `main` republishes the catalog and the template becomes installable from the Kibana UI on every active Kibana version whose semver satisfies your `availability:` range.
 
 ---
 

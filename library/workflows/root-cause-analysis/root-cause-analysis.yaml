@@ -1,6 +1,6 @@
 template-metadata:
   slug: root-cause-analysis
-  version: "1.0.1"
+  version: "1.0.2"
   availability: ">=9.5.0"
   name: "Root Cause Analysis (Agent Builder)"
   description: >-
@@ -16,12 +16,12 @@ template-metadata:
         label: "Agent Builder agent ID"
         description: >-
           The Agent Builder agent that performs the root-cause analysis.
-          The default "sre-agent" matches the out-of-the-box SRE agent;
+          Default elastic-ai-agent is the built-in Elastic AI Agent;
           point it at a different agent if you have a custom one
           configured for your environment.
         inputType: text
         required: true
-        default: "sre-agent"
+        default: "elastic-ai-agent"
 
 name: Root Cause Analysis
 description: Use an Agent Builder agent to investigate alerts and document findings as a Case.

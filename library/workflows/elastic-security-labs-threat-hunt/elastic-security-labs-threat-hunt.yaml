@@ -1,6 +1,6 @@
 template-metadata:
   slug: elastic-security-labs-threat-hunt
-  version: '1.0.0'
+  version: '1.1.0'
   availability: '>=9.5.0'
   name: 'Elastic Security Labs Threat Hunt'
   description: >-
@@ -56,7 +56,7 @@ steps:
   # RSS has no dedicated connector. Allow enough space for the full feed response.
   - name: fetch_feed
     type: http
-    max-step-size: 10mb
+    max-step-size: 20mb
     with:
       url: 'https://www.elastic.co/security-labs/rss/feed.xml'
       method: GET
@@ -64,13 +64,21 @@ steps:
     on-failure:
       retry:
         max-attempts: 2
+        delay: 5s
+
+  # The feed is served as application/xml, which the http step returns as base64.
+  - name: decode_feed
+    type: data.set
+    max-step-size: 20mb
+    with:
+      decoded_xml: '{{ steps.fetch_feed.output.data | base64_decode }}'
 
   # These RSS feeds use <item> elements. Bound the text sent to the agent.
   - name: prepare_articles
     type: data.set
     with:
       articles: |
-        {% assign items = steps.fetch_feed.output.data | split: '<item>' | slice: 1, 10 %}
+        {% assign items = steps.decode_feed.output.decoded_xml | split: '<item>' | slice: 1, 10 %}
         {% for item in items %}
         {% assign article = item | split: '</item>' | first %}
         ARTICLE {{ forloop.index }}

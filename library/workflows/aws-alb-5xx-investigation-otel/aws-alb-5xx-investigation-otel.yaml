@@ -1,6 +1,6 @@
 template-metadata:
   slug: aws-alb-5xx-investigation-otel
-  version: "1.0.0"
+  version: "1.1.0"
   availability: ">=9.5.0"
   name: "AWS ALB 5xx surge investigation (OTel)"
   description: >-
@@ -60,6 +60,13 @@ triggers:
         required: false
   - type: alert
 
+# SPARSE-METRIC DISCIPLINE (learned on a live alert-triggered run): CloudWatch omits
+# zero-valued counters entirely, so a per-code or error-count field is UNMAPPED in
+# Elastic until the first such error ever occurs — and ES|QL fails verification on any
+# unknown column, killing the whole query. Therefore: the REQUIRED evidence step below
+# references only dense fields (RequestCount / TargetResponseTime), and every sparse
+# family gets its OWN on-failure:continue step. A failed/empty sparse step means "no
+# such errors ever observed on this LB" — that is itself a finding, never a failure.
 steps:
   # 0. Resolve the target + timestamp: manual inputs win; otherwise the triggering
   #    alert's structured group-by fields (kibana.alert.grouping.*) name the resource
@@ -73,6 +80,12 @@ steps:
       service_name: "{{ inputs.service_name | default: 'the backend service' }}"
       triggering_rule: "{{ event.rule.name | default: 'manual run' }}"
 
+  # DIMENSION DISCIPLINE: CloudWatch publishes every ApplicationELB metric at up to four
+  # dimension levels — LoadBalancer alone, +AvailabilityZone, +TargetGroup, and +both —
+  # and the collector ships all of them into the same stream. Filtering on LoadBalancer
+  # alone therefore SUMS the same request four times (proven live: 11,384 "target 5xx"
+  # that were really ~2,850). Every counter below pins ONE level: LB-only for LB-scoped
+  # metrics, TargetGroup-only for host-health gauges (which CloudWatch emits per TG).
   # ── Layer 0: traffic context (REQUIRED — dense fields only; hard-fails) ──────────
   - name: traffic_incident
     type: elasticsearch.esql.query
@@ -80,6 +93,7 @@ steps:
       query: |
         FROM {{ consts.alb_metrics_index }}
         | WHERE attributes.LoadBalancer == "{{ steps.resolve.output.load_balancer }}"
+          AND attributes.TargetGroup IS NULL AND attributes.AvailabilityZone IS NULL
           AND @timestamp >= TO_DATETIME("{{ steps.resolve.output.alert_timestamp }}") - {{ consts.incident_lookback }}
           AND @timestamp <= TO_DATETIME("{{ steps.resolve.output.alert_timestamp }}") + 5 minutes
         | STATS
@@ -93,6 +107,7 @@ steps:
       query: |
         FROM {{ consts.alb_metrics_index }}
         | WHERE attributes.LoadBalancer == "{{ steps.resolve.output.load_balancer }}"
+          AND attributes.TargetGroup IS NULL AND attributes.AvailabilityZone IS NULL
           AND @timestamp >= TO_DATETIME("{{ steps.resolve.output.alert_timestamp }}") - {{ consts.baseline_lookback }}
           AND @timestamp <= TO_DATETIME("{{ steps.resolve.output.alert_timestamp }}") - {{ consts.baseline_lookend }}
         | STATS
@@ -108,6 +123,7 @@ steps:
       query: |
         FROM {{ consts.alb_metrics_index }}
         | WHERE attributes.LoadBalancer == "{{ steps.resolve.output.load_balancer }}"
+          AND attributes.TargetGroup IS NULL AND attributes.AvailabilityZone IS NULL
           AND attributes.stat == "Sum"
           AND @timestamp >= TO_DATETIME("{{ steps.resolve.output.alert_timestamp }}") - {{ consts.baseline_lookback }}
           AND @timestamp <= TO_DATETIME("{{ steps.resolve.output.alert_timestamp }}") + 5 minutes
@@ -127,6 +143,7 @@ steps:
       query: |
         FROM {{ consts.alb_metrics_index }}
         | WHERE attributes.LoadBalancer == "{{ steps.resolve.output.load_balancer }}"
+          AND attributes.TargetGroup IS NULL AND attributes.AvailabilityZone IS NULL
           AND attributes.stat == "Sum"
           AND @timestamp >= TO_DATETIME("{{ steps.resolve.output.alert_timestamp }}") - {{ consts.incident_lookback }}
           AND @timestamp <= TO_DATETIME("{{ steps.resolve.output.alert_timestamp }}") + 5 minutes
@@ -141,6 +158,7 @@ steps:
       query: |
         FROM {{ consts.alb_metrics_index }}
         | WHERE attributes.LoadBalancer == "{{ steps.resolve.output.load_balancer }}"
+          AND attributes.TargetGroup IS NULL AND attributes.AvailabilityZone IS NULL
           AND attributes.stat == "Sum"
           AND @timestamp >= TO_DATETIME("{{ steps.resolve.output.alert_timestamp }}") - {{ consts.incident_lookback }}
           AND @timestamp <= TO_DATETIME("{{ steps.resolve.output.alert_timestamp }}") + 5 minutes
@@ -155,6 +173,7 @@ steps:
       query: |
         FROM {{ consts.alb_metrics_index }}
         | WHERE attributes.LoadBalancer == "{{ steps.resolve.output.load_balancer }}"
+          AND attributes.TargetGroup IS NULL AND attributes.AvailabilityZone IS NULL
           AND attributes.stat == "Sum"
           AND @timestamp >= TO_DATETIME("{{ steps.resolve.output.alert_timestamp }}") - {{ consts.incident_lookback }}
           AND @timestamp <= TO_DATETIME("{{ steps.resolve.output.alert_timestamp }}") + 5 minutes
@@ -169,6 +188,7 @@ steps:
       query: |
         FROM {{ consts.alb_metrics_index }}
         | WHERE attributes.LoadBalancer == "{{ steps.resolve.output.load_balancer }}"
+          AND attributes.TargetGroup IS NULL AND attributes.AvailabilityZone IS NULL
           AND attributes.stat == "Sum"
           AND @timestamp >= TO_DATETIME("{{ steps.resolve.output.alert_timestamp }}") - {{ consts.incident_lookback }}
           AND @timestamp <= TO_DATETIME("{{ steps.resolve.output.alert_timestamp }}") + 5 minutes
@@ -184,6 +204,7 @@ steps:
       query: |
         FROM {{ consts.alb_metrics_index }}
         | WHERE attributes.LoadBalancer == "{{ steps.resolve.output.load_balancer }}"
+          AND attributes.TargetGroup IS NULL AND attributes.AvailabilityZone IS NULL
           AND attributes.stat == "Sum"
           AND @timestamp >= TO_DATETIME("{{ steps.resolve.output.alert_timestamp }}") - {{ consts.incident_lookback }}
           AND @timestamp <= TO_DATETIME("{{ steps.resolve.output.alert_timestamp }}") + 5 minutes
@@ -198,6 +219,7 @@ steps:
       query: |
         FROM {{ consts.alb_metrics_index }}
         | WHERE attributes.LoadBalancer == "{{ steps.resolve.output.load_balancer }}"
+          AND attributes.TargetGroup IS NULL AND attributes.AvailabilityZone IS NULL
           AND attributes.stat == "Sum"
           AND @timestamp >= TO_DATETIME("{{ steps.resolve.output.alert_timestamp }}") - {{ consts.incident_lookback }}
           AND @timestamp <= TO_DATETIME("{{ steps.resolve.output.alert_timestamp }}") + 5 minutes
@@ -215,6 +237,7 @@ steps:
       query: |
         FROM {{ consts.alb_metrics_index }}
         | WHERE attributes.LoadBalancer == "{{ steps.resolve.output.load_balancer }}"
+          AND attributes.TargetGroup IS NOT NULL AND attributes.AvailabilityZone IS NULL
           AND @timestamp >= TO_DATETIME("{{ steps.resolve.output.alert_timestamp }}") - {{ consts.incident_lookback }}
           AND @timestamp <= TO_DATETIME("{{ steps.resolve.output.alert_timestamp }}") + 5 minutes
         | STATS
@@ -231,6 +254,7 @@ steps:
       query: |
         FROM {{ consts.alb_metrics_index }}
         | WHERE attributes.LoadBalancer == "{{ steps.resolve.output.load_balancer }}"
+          AND attributes.TargetGroup IS NULL AND attributes.AvailabilityZone IS NULL
           AND attributes.stat == "Sum"
           AND @timestamp >= TO_DATETIME("{{ steps.resolve.output.alert_timestamp }}") - {{ consts.incident_lookback }}
           AND @timestamp <= TO_DATETIME("{{ steps.resolve.output.alert_timestamp }}") + 5 minutes
@@ -344,9 +368,13 @@ steps:
           query: |
             FROM .alerts-*
             | WHERE kibana.alert.instance.id LIKE "*{{ steps.resolve.output.load_balancer }}*"
+              AND kibana.alert.start <= TO_DATETIME("{{ steps.resolve.output.alert_timestamp }}") + 5 minutes
               AND @timestamp >= TO_DATETIME("{{ steps.resolve.output.alert_timestamp }}") - {{ consts.incident_lookback }}
-              AND @timestamp <= TO_DATETIME("{{ steps.resolve.output.alert_timestamp }}") + 5 minutes
-            | KEEP kibana.alert.rule.name, kibana.alert.status, kibana.alert.reason, kibana.alert.start
+            | EVAL window_start = TO_DATETIME("{{ steps.resolve.output.alert_timestamp }}") - {{ consts.incident_lookback }},
+                   alert_relation = CASE(kibana.alert.start < window_start,
+                                         "pre-existing: started before the incident window",
+                                         "started during the incident window")
+            | KEEP kibana.alert.rule.name, kibana.alert.status, alert_relation, kibana.alert.start, kibana.alert.reason
             | SORT kibana.alert.start DESC
             | LIMIT 20
           format: json
@@ -374,33 +402,65 @@ steps:
             ALB pressure:  {{ steps.alb_pressure.output | json }}
             App logs:      {{ steps.app_logs.output | json }}
             SLO status:    {{ steps.slo_context.output | json }}
-            Active alerts: {{ steps.active_alerts.output | json }}
+            Alerts on this resource (alert_relation says whether each pre-dates the incident window): {{ steps.active_alerts.output | json }}
           instructions: |
-            You are an SRE assistant synthesising an AWS ALB incident investigation.
-            Produce a structured root-cause summary in EXACTLY these sections:
+            You are an SRE assistant synthesising an AWS ALB incident investigation. Report
+            only what the supplied step outputs show; every number you cite must appear in
+            them. Produce a structured root-cause summary in EXACTLY these sections:
+
+            Writing rules for the report: write for an on-call engineer in plain words. The
+            field and step names below are for YOUR reading only — never print them (write
+            "the load balancer had no healthy targets", not "min_healthy=0"; "the alert
+            pre-dates the incident window", not "alert_relation"). When you state a ratio,
+            name both numbers it divides. If "Triggered by" is not "manual run", open
+            SEVERITY & CALIBRATION by naming the triggering alert and saying whether the
+            classified mechanism explains it.
+
             ROOT CAUSE HYPOTHESIS — one sentence naming the layer (target application /
               target reachability / ALB capacity / ALB internal / backend latency) and the
               mechanism. If the targets are answering 5xx, name the BACKEND
               ({{ steps.resolve.output.service_name }}) and note the next place to look is
-              that service's own dependencies.
+              that service's own dependencies. Do not assert what that dependency is unless
+              a supplied value shows it.
+
             EVIDENCE — the per-code 5xx split, target vs ELB attribution, reach/health
               signals, and latency vs baseline. Name what was ABSENT too (e.g. "no
-              connection or TLS errors ever recorded") — absence localizes the fault.
-            SEVERITY & CALIBRATION — if an SLO is VIOLATED/DEGRADING or an alert is active
-              for this resource, ANCHOR severity on that calibrated signal and name it. If
-              no SLO/alert context is present, state the assessment rests on raw metrics
-              alone — do NOT invent one.
-            CAUSAL CHAIN — from the originating layer to the user-visible 5xx (adjust to
-              the classified mechanism).
-            RECOMMENDED NEXT STEPS — targeted at the classified layer (e.g. app logs/
+              connection or TLS errors ever recorded") — absence localizes the fault. If a
+              step returned no rows or an error, say "not available" rather than treating
+              it as zero.
+
+            SEVERITY & CALIBRATION — apply these rules literally:
+              1. An SLO or alert CORROBORATES the root cause only if BOTH hold: (a) it
+                 measures the same signal as the classified mechanism (5xx rate, target
+                 health or latency for this load balancer), and (b) its alert_relation says
+                 it started during the incident window, or the SLO's status changed in this
+                 window.
+              2. An alert whose alert_relation is "pre-existing" was already firing before
+                 the incident. List it under "Pre-existing context" with its start time and
+                 say explicitly that it is not corroboration and may be unrelated standing
+                 state. Never describe a pre-existing alert as a symptom of the incident.
+              3. A HEALTHY SLO is not corroboration; report it as scope.
+              4. If nothing satisfies rule 1, state that the assessment rests on raw metrics
+                 alone, with no SLO/alert corroboration. Do NOT invent one.
+              Then give the severity (low / moderate / high) with a one-line reason.
+
+            HYPOTHESIZED CAUSAL CHAIN — from the originating layer to the user-visible 5xx,
+              one link per line. Tag EVERY link [observed: <the metric or alert that shows
+              it>] or [inferred] when no supplied data shows it; use conditional language for
+              inferred links. If every link is observed, retitle the section CAUSAL CHAIN.
+
+            RECOMMENDED NEXT STEPS — numbered; first the checks that confirm any [inferred]
+              link, then remediation targeted at the classified layer (e.g. app logs/
               dependencies for target_application_5xx; target process/port health for
               connection failures; cert chain for TLS; scaling/health-check config for
               no_healthy_targets; ALB limits for capacity; timeout tuning + profiling for
               latency).
-            DOWNSTREAM IMPACT — user-facing symptom.
+
+            DOWNSTREAM IMPACT — user-facing symptom, marked observed or expected.
+
             CONFIDENCE NOTE — required when a COARSENING rule was applied or a
               discriminating metric family was absent.
-          maxLength: 1500
+          maxLength: 2200
 
       # Expose the result as the workflow's output for callers / composing workflows.
       - name: output_result
