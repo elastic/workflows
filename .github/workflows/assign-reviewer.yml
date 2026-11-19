@@ -116,7 +116,7 @@ jobs:
             --arg author "${PR_AUTHOR}" \
             '($title | gsub("&"; "&amp;") | gsub("<"; "&lt;") | gsub(">"; "&gt;")) as $label
             | {text: ":eyes: <@\($reviewer)> new PR to review: <\($url)|#\($number) \($label)> by \($author)"}' |
-            curl --silent --show-error --fail-with-body --retry 3 \
+            curl --silent --show-error --fail-with-body --max-time 10 --retry 3 \
               -H 'Content-Type: application/json' \
               --data @- \
               "${SLACK_WEBHOOK_URL}"
