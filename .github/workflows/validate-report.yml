@@ -1,0 +1,77 @@
+name: Report validation errors
+
+# Comments the validation errors of "Validate workflows" on its pull request,
+# replacing the comment of a previous run, and removes that comment once the
+# errors are gone.
+#
+# This is a separate `workflow_run` workflow because the token of a fork PR run
+# is read-only. It runs from the default branch with a write token, so it must
+# never check out or run code from the PR: the validation reports it downloads
+# are only data, and scripts/validation-report.mjs renders them inert.
+
+on:
+  workflow_run:
+    workflows: ['Validate workflows']
+    types: [completed]
+
+permissions: {}
+
+concurrency:
+  group: validation-report-${{ github.event.workflow_run.head_branch }}
+
+jobs:
+  report:
+    if: ${{ github.event.workflow_run.event == 'pull_request' && contains(fromJSON('["success", "failure"]'), github.event.workflow_run.conclusion) }}
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+      pull-requests: write
+    steps:
+      # No `ref`: checks out the default branch, not the PR.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: validation-*
+          path: reports
+          run-id: ${{ github.event.workflow_run.id }}
+          github-token: ${{ github.token }}
+      - name: Build report
+        # Writes report.md only when a schema has validation errors.
+        run: node scripts/validation-report.mjs reports report.md
+      - name: Update the pull request comment
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        with:
+          script: |
+            const fs = require('node:fs');
+            const marker = '<!-- validation-report -->';
+            const report = fs.existsSync('report.md') ? fs.readFileSync('report.md', 'utf8') : '';
+            const body = report ? `${marker}\n\n${report.trim()}` : '';
+
+            // `workflow_run.pull_requests` is empty for fork PRs, so look the PR up
+            // by commit. Only a PR still at this commit gets the comment, so a
+            // slow run for an old commit cannot overwrite a newer report.
+            const { head_sha } = context.payload.workflow_run;
+            const { data: candidates } = await github.rest.repos.listPullRequestsAssociatedWithCommit({
+              ...context.repo,
+              commit_sha: head_sha,
+            });
+            const prs = candidates.filter((pr) => pr.state === 'open' && pr.head.sha === head_sha);
+
+            for (const pr of prs) {
+              const issue = { ...context.repo, issue_number: pr.number };
+              const comments = (await github.paginate(github.rest.issues.listComments, issue)).filter(
+                (comment) =>
+                  comment.user?.login === 'github-actions[bot]' && comment.body?.startsWith(marker)
+              );
+              // Keep an up to date comment instead of re-posting an identical one.
+              if (body && comments.length === 1 && comments[0].body.trim() === body) {
+                continue;
+              }
+              for (const comment of comments) {
+                await github.rest.issues.deleteComment({ ...context.repo, comment_id: comment.id });
+              }
+              if (body) {
+                await github.rest.issues.createComment({ ...issue, body });
+              }
+            }
