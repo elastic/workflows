@@ -84,7 +84,7 @@ steps:
             {% assign trail_name = arn_resource_parts | last | strip -%}
             {% assign account_id = arn_account -%}
             {% assign region = arn_region -%}
-            {% if arn_service != "cloudtrail" or arn_resource_type != "trail" or trail_name == "" or account_id == "" or region == "" -%}
+            {% if arn_service != "cloudtrail" or arn_resource_parts.size != 2 or arn_resource_type != "trail" or trail_name == "" or account_id == "" or region == "" -%}
               {% assign valid = false -%}
               {% assign invalid_reason = "malformed CloudTrail trail ARN" -%}
             {% elsif event_account != "" and event_account != account_id -%}
@@ -143,7 +143,7 @@ steps:
                   {% assign contributing_resource_parts = contributing_parts[5] | split: "/" -%}
                   {% assign contributing_resource_type = contributing_resource_parts | first -%}
                   {% assign contributing_name = contributing_resource_parts | last | strip -%}
-                  {% if contributing_service != "cloudtrail" or contributing_resource_type != "trail" or contributing_name == "" or contributing_arn_account == "" or contributing_arn_region == "" -%}
+                  {% if contributing_service != "cloudtrail" or contributing_resource_parts.size != 2 or contributing_resource_type != "trail" or contributing_name == "" or contributing_arn_account == "" or contributing_arn_region == "" -%}
                     {% assign contributing_valid = false -%}
                   {% elsif contributing_account != "" and contributing_account != contributing_arn_account -%}
                     {% assign contributing_valid = false -%}
@@ -215,7 +215,7 @@ steps:
           {% assign trail_name = arn_resource_parts | last | strip -%}
           {% assign account_id = arn_account -%}
           {% assign region = arn_region -%}
-          {% if arn_service != "cloudtrail" or arn_resource_type != "trail" or trail_name == "" or account_id == "" or region == "" -%}
+          {% if arn_service != "cloudtrail" or arn_resource_parts.size != 2 or arn_resource_type != "trail" or trail_name == "" or account_id == "" or region == "" -%}
             {% assign valid = false -%}
             {% assign invalid_reason = "malformed CloudTrail trail ARN" -%}
           {% elsif supplied_account != "" and supplied_account != account_id -%}
@@ -261,6 +261,13 @@ steps:
       {% endif -%}
       [{{ targets | join: "," }}]
 
+  # Verification failures are collected so later targets still receive their
+  # own approval and remediation attempt. The workflow fails after the loop.
+  - name: initialize_verification_failures
+    type: data.set
+    with:
+      verification_failures: ""
+
   - name: process_targets
     type: foreach
     foreach: "${{ steps.build_targets.output }}"
@@ -276,8 +283,8 @@ steps:
           valid: "${{ foreach.item.valid }}"
           invalid_reason: "{{ foreach.item.invalid_reason | default: '' }}"
 
-      # Invalid targets fail closed. AWS and approval errors intentionally
-      # remain fail-fast because foreach does not isolate iteration failures.
+      # Invalid targets fail closed. Verification failures are accumulated,
+      # while AWS request and approval errors remain fail-fast.
       - name: validate_target
         type: if
         condition: "${{ steps.set_target.output.valid == true }}"
@@ -380,13 +387,11 @@ steps:
                         Notes: {{ steps.request_approval.output.response.notes | default: '(none)' }}.
                         Pre-change response: {{ steps.get_trail_status_before.output.data | json }}.
                         Follow-up response: {{ steps.get_trail_status_after.output.data | json }}.
-                  - name: fail_failed_verification
-                    type: workflow.fail
+                  - name: record_failed_verification
+                    type: data.set
                     with:
-                      message: >-
-                        StartLogging was requested for
-                        {{ steps.set_target.output.trail_arn }}, but
-                        GetTrailStatus did not verify IsLogging=true.
+                      verification_failures: >-
+                        {% if variables.verification_failures == blank %}{{ steps.set_target.output.trail_arn }}{% else %}{{ variables.verification_failures }}, {{ steps.set_target.output.trail_arn }}{% endif %}
             else:
               - name: log_rejected_audit_result
                 type: console
@@ -408,3 +413,21 @@ steps:
                 for alerts {{ steps.set_target.output.alert_ids }} because
                 the target could not be canonicalized safely:
                 {{ steps.set_target.output.invalid_reason }}.
+
+  - name: fail_after_all_targets_if_unverified
+    type: if
+    condition: "${{ variables.verification_failures != blank }}"
+    steps:
+      - name: log_verification_failure_summary
+        type: console
+        with:
+          message: >-
+            Outcome: verification_failed; all distinct CloudTrail targets were
+            processed, but logging was not verified for:
+            {{ variables.verification_failures }}.
+      - name: fail_verification_summary
+        type: workflow.fail
+        with:
+          message: >-
+            CloudTrail logging restoration was not verified for:
+            {{ variables.verification_failures }}.
