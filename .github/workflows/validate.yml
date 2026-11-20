@@ -29,9 +29,9 @@ jobs:
             schema_url: https://workflows.elastic.co/schema/v1/serverless
             blocking: true
           - name: release
-            # Bump the version to the latest released Kibana minor. The release
-            # schema can lag templates targeting a newer stack (see
-            # `availability`), so this line reports without blocking.
+            # Bump both versions to the latest released Kibana minor. Templates
+            # whose `availability` excludes `kibana_version` are skipped.
+            kibana_version: 9.6.0
             schema_url: https://workflows.elastic.co/schema/v1/9.6.0/release
             blocking: false
     name: validate (${{ matrix.name }})
@@ -59,12 +59,14 @@ jobs:
         if: steps.schema.outputs.published == 'true'
         env:
           WORKFLOWS_SCHEMA_CDN_URL: ${{ matrix.schema_url }}
+          WORKFLOWS_KIBANA_VERSION: ${{ matrix.kibana_version }}
         run: npm run validate:templates -- --json reports/templates.json
       - name: Validate examples
         # Run even if the templates step failed, so both results are reported.
         if: ${{ !cancelled() && steps.schema.outputs.published == 'true' }}
         env:
           WORKFLOWS_SCHEMA_CDN_URL: ${{ matrix.schema_url }}
+          WORKFLOWS_KIBANA_VERSION: ${{ matrix.kibana_version }}
         run: npm run validate:examples -- --json reports/examples.json
       - name: Upload validation reports
         # Run after failed validation too: validate-report.yml reads these.
