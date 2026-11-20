@@ -1,0 +1,545 @@
+template-metadata:
+  slug: msi-installer-alert-cleanup
+  version: "1.0.0"
+  availability: ">=9.5.0"
+  name: "Uninstall Recent MSI After Malicious Installer Alert"
+  description: >-
+    Warning: this action may uninstall an unrelated installer whose
+    UninstallString was written in the same window. Run this when an alert is
+    a malicious Windows Installer detection, such as a behavior alert for
+    msiexec.exe. It attempts to uninstall any package installed on that host
+    in the 5 minutes before the alert and the 5 minutes after it, not only a package named in the alert.
+    Windows installs are not a frequent activity. agent.id and the alert time
+    select the host and the window. msiexec.exe UninstallString registry
+    events supply the product code, and Elastic Defend runs msiexec.exe /x
+    for each code. The raw uninstall string is not executed. A legitimate
+    install in that window is removed too. The workflow log and a new case
+    name the Publisher and product from registry events with the same
+    process.entity_id. A case is also opened when the uninstall action is
+    not accepted. The case title starts with "MSI Cleanup workflow - "
+    and the agent id.
+  solutions: [security]
+  categories: [response]
+
+# Run this for a malicious Windows Installer alert, such as a behavior alert
+# on msiexec.exe. It attempts to uninstall any package installed in the
+# window, including a legitimate MSI. The alert contributes agent.id and the
+# event time only. The product code comes from logs-endpoint.events.registry-*
+# on that agent, within consts.lookaround_minutes of
+# kibana.alert.original_time. Creation and modification both count: the first
+# UninstallString write is often creation. Windows stores MSI uninstall
+# commands as MsiExec.exe /I{GUID} or /X{GUID}. Either form is accepted. The
+# response action is always:
+# msiexec.exe /x {GUID} /qn /norestart /L*v C:\Windows\Temp\msi-removal-{GUID}.log
+# Registry events with the same process.entity_id supply Publisher, ProductName,
+# and DisplayName for the workflow log and the case. The case title starts with
+# "MSI Cleanup workflow - " and the agent id. At most consts.max_packages
+# distinct product codes are removed, newest first.
+name: Uninstall Recent MSI After Malicious Installer Alert
+description: >
+  Warning: this action may uninstall an unrelated installer whose
+  UninstallString was written in the same window. Run this when the alert is
+  a malicious Windows Installer detection, such as a behavior alert for
+  msiexec.exe. It attempts to uninstall any package installed on that host
+  in the 5 minutes before the alert and the 5 minutes after it, not only a package named in the alert.
+  Windows installs are not a frequent activity. Pass agent_id and alert_time
+  to run it manually. The workflow reads agent.id and
+  kibana.alert.original_time from the alert. It searches
+  logs-endpoint.events.registry-* on that agent for msiexec.exe writing
+  UninstallString. The product code is taken from registry.data.strings.
+  Elastic Defend response actions then run msiexec.exe /x {GUID} /qn
+  /norestart. The raw UninstallString is not executed. At most 3 distinct
+  product codes are removed. A legitimate install in that window is removed
+  too. Each submitted uninstall is logged with the Publisher, ProductName,
+  and DisplayName from registry events that share the msiexec
+  process.entity_id, and a case is opened. A case is also opened when the
+  uninstall action is not accepted. The case title starts with
+  "MSI Cleanup workflow - " and the agent id.
+enabled: true
+tags:
+  - security
+  - response
+  - endpoint
+
+triggers:
+  - type: alert
+  - type: manual
+    inputs:
+      - name: agent_id
+        type: string
+        required: false
+        default: ""
+        description: >-
+          Elastic Agent id of the host. Leave empty to use agent.id from the
+          alert.
+      - name: alert_time
+        type: string
+        required: false
+        default: ""
+        description: >-
+          ISO-8601 time to center the 5 minute registry search on. Leave
+          empty to use kibana.alert.original_time from the alert.
+
+settings:
+  timeout: 30m
+  concurrency:
+    key: "{{ workflow.id }}-{{ event.alerts[0].agent.id | default: inputs.agent_id | default: '' }}"
+    strategy: queue
+    max: 1
+
+consts:
+  registry_index: "logs-endpoint.events.registry-*"
+  lookaround_minutes: "5"
+  max_packages: "3"
+
+steps:
+  - name: set_kibana_space
+    type: data.set
+    with:
+      api_root: "/s/{{ workflow.spaceId | default: 'default' }}"
+
+  - name: set_alert_context
+    type: data.set
+    with:
+      agent_id: |-
+        {%- assign agent = event.alerts[0].agent.id | default: '' | append: '' | strip -%}
+        {%- if agent == '' -%}
+        {%- assign agent = event.alerts[0].elastic.agent.id | default: '' | append: '' | strip -%}
+        {%- endif -%}
+        {%- if agent == '' or agent == '<your_input>' -%}
+        {%- assign agent = inputs.agent_id | default: '' | append: '' | strip -%}
+        {%- endif -%}
+        {%- if agent == '<your_input>' -%}
+        {%- assign agent = '' -%}
+        {%- endif -%}
+        {%- if agent contains '"' or agent contains '|' or agent contains ' ' -%}
+        {%- assign agent = '' -%}
+        {%- endif -%}
+        {{- agent -}}
+      alert_time: |-
+        {%- assign stamp = event.alerts[0].kibana.alert.original_time | default: '' | append: '' | strip -%}
+        {%- if stamp == '' -%}
+        {%- assign stamp = event.alerts[0]['@timestamp'] | default: '' | append: '' | strip -%}
+        {%- endif -%}
+        {%- if stamp == '' or stamp == '<your_input>' -%}
+        {%- assign stamp = inputs.alert_time | default: '' | append: '' | strip -%}
+        {%- endif -%}
+        {%- if stamp == '<your_input>' -%}
+        {%- assign stamp = '' -%}
+        {%- endif -%}
+        {%- if stamp contains '"' or stamp contains '|' or stamp contains ' ' -%}
+        {%- assign stamp = '' -%}
+        {%- endif -%}
+        {{- stamp -}}
+
+  - name: note_context
+    type: data.set
+    with:
+      ready: |-
+        {%- assign agent = steps.set_alert_context.output.agent_id | default: '' | append: '' -%}
+        {%- assign stamp = steps.set_alert_context.output.alert_time | default: '' | append: '' -%}
+        {%- if agent != '' -%}
+        {%- if stamp != '' -%}yes
+        {%- else -%}no
+        {%- endif -%}
+        {%- else -%}no
+        {%- endif -%}
+
+  - name: init_counters
+    type: data.set
+    with:
+      uninstall_count: "0"
+      seen_codes: ","
+
+  - name: log_scope
+    type: console
+    with:
+      message: "{% assign agent = steps.set_alert_context.output.agent_id | default: '' | append: '' %}{% assign stamp = steps.set_alert_context.output.alert_time | default: '' | append: '' %}{% if agent != '' and stamp != '' %}MSI cleanup on agent {{ agent }} within {{ consts.lookaround_minutes }} minutes of {{ stamp }}.{% elsif agent == '' %}MSI cleanup was not started. The alert has no agent.id.{% else %}MSI cleanup was not started. The alert has no kibana.alert.original_time.{% endif %}"
+
+  - name: when_context_ready
+    type: if
+    condition: 'steps.note_context.output.ready: "yes"'
+    steps:
+      - name: query_uninstall_strings
+        type: elasticsearch.esql.query
+        on-failure:
+          continue: true
+        with:
+          format: json
+          query: |
+            FROM {{ consts.registry_index }}
+            | WHERE agent.id == "{{ steps.set_alert_context.output.agent_id }}"
+            | WHERE @timestamp >= TO_DATETIME("{{ steps.set_alert_context.output.alert_time }}") - {{ consts.lookaround_minutes }} minutes
+            | WHERE @timestamp <= TO_DATETIME("{{ steps.set_alert_context.output.alert_time }}") + {{ consts.lookaround_minutes }} minutes
+            | WHERE event.category == "registry"
+            | WHERE TO_LOWER(process.name) == "msiexec.exe"
+            | WHERE registry.value == "UninstallString"
+            | WHERE event.action == "modification" OR event.action == "creation"
+            | EVAL uninstall_raw = MV_CONCAT(registry.data.strings, " "),
+                entity_id = MV_FIRST(process.entity_id)
+            | WHERE uninstall_raw IS NOT NULL AND TO_LOWER(uninstall_raw) LIKE "*msiexec*" AND uninstall_raw LIKE "*{*"
+            | SORT @timestamp DESC
+            | LIMIT 20
+            | KEEP @timestamp, uninstall_raw, entity_id
+
+      - name: count_rows
+        type: data.set
+        with:
+          row_count: "{{ steps.query_uninstall_strings.output.values | size | default: 0 }}"
+
+      - name: when_query_ok
+        type: if
+        condition: "not steps.query_uninstall_strings.error: *"
+        steps:
+          - name: when_rows_found
+            type: if
+            condition: "steps.count_rows.output.row_count > 0"
+            steps:
+              - name: per_registry_event
+                type: foreach
+                foreach: "{{ steps.query_uninstall_strings.output.values }}"
+                on-failure:
+                  continue: true
+                steps:
+                  - name: parse_product_code
+                    type: data.set
+                    with:
+                      decision: |-
+                        {%- assign raw = foreach.item[1] | default: '' | append: '' -%}
+                        {%- assign lower = raw | downcase -%}
+                        {%- assign parts = raw | split: '{' -%}
+                        {%- assign after = parts[1] | default: '' | append: '' -%}
+                        {%- assign guid_body = after | split: '}' | first | strip | upcase -%}
+                        {%- assign compact = guid_body | remove: '-' | downcase -%}
+                        {%- assign hex_left = compact | remove: '0' | remove: '1' | remove: '2' | remove: '3' | remove: '4' | remove: '5' | remove: '6' | remove: '7' | remove: '8' | remove: '9' | remove: 'a' | remove: 'b' | remove: 'c' | remove: 'd' | remove: 'e' | remove: 'f' -%}
+                        {%- assign ready = 'no' -%}
+                        {%- assign product_code = '' -%}
+                        {%- assign reason = 'registry.data.strings has no MSI product code.' -%}
+                        {%- assign segments = guid_body | split: '-' -%}
+                        {%- assign seg_count = segments | size -%}
+                        {%- assign s0 = segments[0] | default: '' | size -%}
+                        {%- assign s1 = segments[1] | default: '' | size -%}
+                        {%- assign s2 = segments[2] | default: '' | size -%}
+                        {%- assign s3 = segments[3] | default: '' | size -%}
+                        {%- assign s4 = segments[4] | default: '' | size -%}
+                        {%- assign switch_ok = 'no' -%}
+                        {%- if lower contains '/x{' or lower contains '/i{' or lower contains '/x {' or lower contains '/i {' -%}
+                        {%- assign switch_ok = 'yes' -%}
+                        {%- endif -%}
+                        {%- if lower contains 'msiexec' -%}
+                        {%- if switch_ok == 'yes' -%}
+                        {%- if after contains '}' -%}
+                        {%- if seg_count == 5 and s0 == 8 and s1 == 4 and s2 == 4 and s3 == 4 and s4 == 12 -%}
+                        {%- if compact.size == 32 and hex_left == '' -%}
+                        {%- assign ready = 'yes' -%}
+                        {%- assign product_code = '{' | append: guid_body | append: '}' -%}
+                        {%- assign reason = '' -%}
+                        {%- else -%}
+                        {%- assign reason = 'Product code is not an 8-4-4-4-12 GUID.' -%}
+                        {%- endif -%}
+                        {%- else -%}
+                        {%- assign reason = 'Product code is not an 8-4-4-4-12 GUID.' -%}
+                        {%- endif -%}
+                        {%- else -%}
+                        {%- assign reason = 'Product code is not an 8-4-4-4-12 GUID.' -%}
+                        {%- endif -%}
+                        {%- else -%}
+                        {%- assign reason = 'UninstallString has no /I or /X product code.' -%}
+                        {%- endif -%}
+                        {%- else -%}
+                        {%- assign reason = 'UninstallString is not an msiexec command.' -%}
+                        {%- endif -%}
+                        {{- ready -}}|{{- product_code -}}|{{- guid_body -}}|{{- reason -}}
+
+                  - name: read_product_code
+                    type: data.set
+                    with:
+                      ready: "{{ steps.parse_product_code.output.decision | split: '|' | first | strip }}"
+                      product_code: "{% assign parts = steps.parse_product_code.output.decision | split: '|' %}{{ parts[1] | default: '' | strip }}"
+                      log_id: "{% assign parts = steps.parse_product_code.output.decision | split: '|' %}{{ parts[2] | default: '' | strip }}"
+                      reason: "{% assign parts = steps.parse_product_code.output.decision | split: '|' %}{{ parts[3] | default: '' | strip }}"
+
+                  - name: decide_uninstall
+                    type: data.set
+                    with:
+                      go: |-
+                        {%- assign ready = steps.read_product_code.output.ready | default: '' | append: '' | strip -%}
+                        {%- assign code = steps.read_product_code.output.product_code | default: '' | append: '' | strip -%}
+                        {%- assign seen = variables.seen_codes | default: ',' | append: '' -%}
+                        {%- assign count = variables.uninstall_count | default: 0 | plus: 0 -%}
+                        {%- assign cap = consts.max_packages | plus: 0 -%}
+                        {%- assign needle = ',' | append: code | append: ',' -%}
+                        {%- if ready == 'yes' -%}
+                        {%- if count < cap -%}
+                        {%- if seen contains needle -%}cap
+                        {%- else -%}yes
+                        {%- endif -%}
+                        {%- else -%}cap
+                        {%- endif -%}
+                        {%- else -%}no
+                        {%- endif -%}
+
+                  - name: when_should_uninstall
+                    type: if
+                    condition: 'steps.decide_uninstall.output.go: "yes"'
+                    steps:
+                      - name: read_entity_id
+                        type: data.set
+                        with:
+                          entity_id: |-
+                            {%- assign id = foreach.item[2] | default: '' | append: '' | strip -%}
+                            {%- if id contains '"' -%}
+                            {%- assign id = '' -%}
+                            {%- endif -%}
+                            {{- id -}}
+                      - name: clear_product_names
+                        type: data.set
+                        with:
+                          publisher: "unset"
+                          product_name: "unset"
+                          display_name: "unset"
+                      - name: when_entity_known
+                        type: if
+                        condition: 'steps.read_entity_id.output.entity_id: * and not steps.read_entity_id.output.entity_id: ""'
+                        steps:
+                          # Same process.entity_id as the UninstallString event.
+                          # Publisher and ProductName are separate registry events.
+                          - name: query_product_names
+                            type: elasticsearch.esql.query
+                            on-failure:
+                              continue: true
+                            with:
+                              format: json
+                              query: |
+                                FROM {{ consts.registry_index }}
+                                | WHERE agent.id == "{{ steps.set_alert_context.output.agent_id }}"
+                                | WHERE process.entity_id == "{{ steps.read_entity_id.output.entity_id }}"
+                                | WHERE registry.value == "Publisher" OR registry.value == "ProductName" OR registry.value == "DisplayName"
+                                | EVAL value_name = MV_FIRST(registry.value),
+                                    value_data = MV_CONCAT(registry.data.strings, " ")
+                                | KEEP value_name, value_data
+                                | LIMIT 20
+                          - name: count_name_rows
+                            type: data.set
+                            with:
+                              row_count: "{{ steps.query_product_names.output.values | size | default: 0 }}"
+                          - name: when_names_found
+                            type: if
+                            condition: "not steps.query_product_names.error: * and steps.count_name_rows.output.row_count > 0"
+                            steps:
+                              - name: per_identity_row
+                                type: foreach
+                                foreach: "{{ steps.query_product_names.output.values }}"
+                                on-failure:
+                                  continue: true
+                                steps:
+                                  - name: take_identity_value
+                                    type: data.set
+                                    with:
+                                      publisher: |-
+                                        {%- assign kind = foreach.item[0] | default: '' | append: '' | downcase | strip -%}
+                                        {%- assign text = foreach.item[1] | default: '' | append: '' | strip -%}
+                                        {%- assign current = variables.publisher | default: '' | append: '' | strip -%}
+                                        {%- if current == 'unset' -%}{%- assign current = '' -%}{%- endif -%}
+                                        {%- if kind == 'publisher' and text != '' and current == '' -%}
+                                        {{- text -}}
+                                        {%- else -%}
+                                        {{- current -}}
+                                        {%- endif -%}
+                                      product_name: |-
+                                        {%- assign kind = foreach.item[0] | default: '' | append: '' | downcase | strip -%}
+                                        {%- assign text = foreach.item[1] | default: '' | append: '' | strip -%}
+                                        {%- assign current = variables.product_name | default: '' | append: '' | strip -%}
+                                        {%- if current == 'unset' -%}{%- assign current = '' -%}{%- endif -%}
+                                        {%- if kind == 'productname' and text != '' and current == '' -%}
+                                        {{- text -}}
+                                        {%- else -%}
+                                        {{- current -}}
+                                        {%- endif -%}
+                                      display_name: |-
+                                        {%- assign kind = foreach.item[0] | default: '' | append: '' | downcase | strip -%}
+                                        {%- assign text = foreach.item[1] | default: '' | append: '' | strip -%}
+                                        {%- assign current = variables.display_name | default: '' | append: '' | strip -%}
+                                        {%- if current == 'unset' -%}{%- assign current = '' -%}{%- endif -%}
+                                        {%- if kind == 'displayname' and text != '' and current == '' -%}
+                                        {{- text -}}
+                                        {%- else -%}
+                                        {{- current -}}
+                                        {%- endif -%}
+                      - name: read_product_names
+                        type: data.set
+                        with:
+                          publisher: |-
+                            {%- assign v = variables.publisher | default: '' | append: '' | strip -%}
+                            {%- if v == '' or v == 'unset' -%}unknown{%- else -%}{{ v }}{%- endif -%}
+                          product_name: |-
+                            {%- assign v = variables.product_name | default: '' | append: '' | strip -%}
+                            {%- if v == '' or v == 'unset' -%}unknown{%- else -%}{{ v }}{%- endif -%}
+                          display_name: |-
+                            {%- assign v = variables.display_name | default: '' | append: '' | strip -%}
+                            {%- if v == '' or v == 'unset' -%}unknown{%- else -%}{{ v }}{%- endif -%}
+                          label: |-
+                            {%- assign display = variables.display_name | default: '' | append: '' | strip -%}
+                            {%- assign product = variables.product_name | default: '' | append: '' | strip -%}
+                            {%- if display == 'unset' -%}{%- assign display = '' -%}{%- endif -%}
+                            {%- if product == 'unset' -%}{%- assign product = '' -%}{%- endif -%}
+                            {%- if display != '' -%}
+                            {{- display -}}
+                            {%- elsif product != '' -%}
+                            {{- product -}}
+                            {%- else -%}
+                            {{- steps.read_product_code.output.product_code -}}
+                            {%- endif -%}
+                          case_title: |-
+                            {%- assign display = variables.display_name | default: '' | append: '' | strip -%}
+                            {%- assign product = variables.product_name | default: '' | append: '' | strip -%}
+                            {%- if display == 'unset' -%}{%- assign display = '' -%}{%- endif -%}
+                            {%- if product == 'unset' -%}{%- assign product = '' -%}{%- endif -%}
+                            {%- assign label = steps.read_product_code.output.product_code -%}
+                            {%- if display != '' -%}
+                            {%- assign label = display -%}
+                            {%- elsif product != '' -%}
+                            {%- assign label = product -%}
+                            {%- endif -%}
+                            {%- assign title = 'MSI Cleanup workflow - ' | append: steps.set_alert_context.output.agent_id | append: ' - ' | append: label -%}
+                            {{- title | slice: 0, 160 -}}
+                      - name: log_product_names
+                        type: console
+                        with:
+                          message: "Registry identity for process.entity_id {{ steps.read_entity_id.output.entity_id }}: rows={{ steps.count_name_rows.output.row_count | default: 0 }} Publisher={{ variables.publisher | default: '' }} ProductName={{ variables.product_name | default: '' }} DisplayName={{ variables.display_name | default: '' }}{% if steps.query_product_names.error != blank %} error={{ steps.query_product_names.error.message }}{% endif %}"
+                      - name: uninstall_package
+                        type: kibana.request
+                        on-failure:
+                          continue: true
+                        with:
+                          method: POST
+                          path: "{{ steps.set_kibana_space.output.api_root }}/api/endpoint/action/execute"
+                          headers:
+                            kbn-xsrf: "true"
+                          body:
+                            endpoint_ids:
+                              - "{{ steps.set_alert_context.output.agent_id }}"
+                            comment: "Workflow Uninstall Recent MSI After Malicious Installer Alert — uninstall {{ steps.read_product_code.output.product_code }}."
+                            parameters:
+                              command: 'msiexec.exe /x {{ steps.read_product_code.output.product_code }} /qn /norestart /L*v C:\Windows\Temp\msi-removal-{{ steps.read_product_code.output.log_id }}.log'
+                              timeout: 600
+                      - name: when_submitted
+                        type: if
+                        condition: "not steps.uninstall_package.error: *"
+                        steps:
+                          - name: remember_product
+                            type: data.set
+                            with:
+                              seen_codes: "{{ variables.seen_codes | default: ',' | append: steps.read_product_code.output.product_code | append: ',' }}"
+                              uninstall_count: "{{ variables.uninstall_count | default: 0 | plus: 1 }}"
+                          - name: log_uninstall
+                            type: console
+                            with:
+                              message: "Uninstall submitted for {{ steps.read_product_code.output.product_code }} on agent {{ steps.set_alert_context.output.agent_id }}. DisplayName {{ steps.read_product_names.output.display_name | default: 'unknown' }}. ProductName {{ steps.read_product_names.output.product_name | default: 'unknown' }}. Publisher {{ steps.read_product_names.output.publisher | default: 'unknown' }}. process.entity_id {{ steps.read_entity_id.output.entity_id }}. Log C:\\Windows\\Temp\\msi-removal-{{ steps.read_product_code.output.log_id }}.log."
+                          - name: note_uninstall_submitted
+                            type: data.set
+                            with:
+                              outcome: submitted
+                              detail: ""
+                        else:
+                          - name: log_uninstall_failed
+                            type: console
+                            with:
+                              message: "Uninstall was not submitted for {{ steps.read_product_code.output.product_code }}. {{ steps.uninstall_package.error.message }}"
+                          - name: note_uninstall_failed
+                            type: data.set
+                            with:
+                              outcome: failed
+                              detail: "{{ steps.uninstall_package.error.message | default: '' | append: '' }}"
+                      - name: create_uninstall_case
+                        type: cases.createCase
+                        on-failure:
+                          continue: true
+                        with:
+                          title: "{% assign label = steps.read_product_names.output.label | default: steps.read_product_code.output.product_code %}{% assign title = 'MSI Cleanup workflow - ' | append: steps.set_alert_context.output.agent_id %}{% if variables.outcome == 'failed' %}{% assign title = title | append: ' - uninstall failed' %}{% endif %}{% assign title = title | append: ' - ' | append: label %}{{ title | slice: 0, 160 }}"
+                          description: |
+                            {% if variables.outcome == 'failed' %}MSI Cleanup workflow could not submit the uninstall. The package may still be installed.
+                            {% else %}MSI Cleanup workflow submitted an uninstall for a recently installed package on this agent. Removal is not verified after Defend accepts the action.
+                            {% endif %}
+                            The package is any MSI whose UninstallString was written from 5 minutes before the alert to 5 minutes after it, not only a package named in the alert.
+
+                            Result: {{ variables.outcome }}
+                            {% if variables.outcome == 'failed' %}Error: {{ variables.detail }}
+                            {% endif %}
+                            Agent id: {{ steps.set_alert_context.output.agent_id }}
+                            Product code: {{ steps.read_product_code.output.product_code }}
+                            DisplayName: {{ steps.read_product_names.output.display_name | default: 'unknown' }}
+                            ProductName: {{ steps.read_product_names.output.product_name | default: 'unknown' }}
+                            Publisher: {{ steps.read_product_names.output.publisher | default: 'unknown' }}
+                            process.entity_id: {{ steps.read_entity_id.output.entity_id }}
+                            Command: msiexec.exe /x {{ steps.read_product_code.output.product_code }} /qn /norestart /L*v C:\Windows\Temp\msi-removal-{{ steps.read_product_code.output.log_id }}.log
+                          owner: securitySolution
+                          severity: medium
+                          tags:
+                            - msi-cleanup
+                          settings:
+                            syncAlerts: false
+                      - name: note_source_alert
+                        type: data.set
+                        with:
+                          attach: "{% assign id = event.alerts[0]._id | default: '' | append: '' | strip %}{% assign index = event.alerts[0]._index | default: '' | append: '' | strip %}{% if id != '' and index != '' %}yes{% else %}no{% endif %}"
+                          alert_id: "{{ event.alerts[0]._id | default: '' | append: '' | strip }}"
+                          alert_index: "{{ event.alerts[0]._index | default: '' | append: '' | strip }}"
+                          rule_id: "{{ event.alerts[0].kibana.alert.rule.uuid | default: event.rule.id | default: '' | append: '' | strip }}"
+                          rule_name: "{{ event.alerts[0].kibana.alert.rule.name | default: event.rule.name | default: '' | append: '' | strip }}"
+                      - name: when_case_and_alert
+                        type: if
+                        condition: "not steps.create_uninstall_case.error: * and steps.note_source_alert.output.attach: \"yes\""
+                        steps:
+                          - name: attach_source_alert
+                            type: cases.addAlerts
+                            on-failure:
+                              continue: true
+                            with:
+                              case_id: "{{ steps.create_uninstall_case.output.case.id }}"
+                              alerts:
+                                - alertId: "{{ steps.note_source_alert.output.alert_id }}"
+                                  index: "{{ steps.note_source_alert.output.alert_index }}"
+                                  rule:
+                                    id: "{{ steps.note_source_alert.output.rule_id }}"
+                                    name: "{{ steps.note_source_alert.output.rule_name }}"
+                      - name: log_case
+                        type: console
+                        with:
+                          message: "{% if steps.create_uninstall_case.error == blank %}Case opened ({{ variables.outcome }}): {{ steps.create_uninstall_case.output.case.title | default: steps.read_product_names.output.case_title }}.{% else %}Case was not opened for {{ steps.read_product_code.output.product_code }}. {{ steps.create_uninstall_case.error.message }}{% endif %}"
+                  - name: when_skipped
+                    type: if
+                    condition: 'steps.decide_uninstall.output.go: "no"'
+                    steps:
+                      - name: log_unparsed
+                        type: console
+                        with:
+                          message: "Skipped a registry event at {{ foreach.item[0] }}. {{ steps.read_product_code.output.reason }}"
+                  - name: when_capped
+                    type: if
+                    condition: 'steps.decide_uninstall.output.go: "cap"'
+                    steps:
+                      - name: log_skipped_cap
+                        type: console
+                        with:
+                          message: "Left {{ steps.read_product_code.output.product_code }} installed. It is already queued in this run, or {{ consts.max_packages }} packages were already submitted."
+            else:
+              - name: log_none
+                type: console
+                with:
+                  message: "No msiexec.exe UninstallString events for agent {{ steps.set_alert_context.output.agent_id }} within {{ consts.lookaround_minutes }} minutes of {{ steps.set_alert_context.output.alert_time }}."
+        else:
+          - name: log_query_failed
+            type: console
+            with:
+              message: "MSI registry search failed for agent {{ steps.set_alert_context.output.agent_id }}. {{ steps.query_uninstall_strings.error.message }}"
+    else:
+      - name: log_missing_context
+        type: console
+        with:
+          message: "MSI cleanup needs an agent id and an alert time."
+
+  - name: log_done
+    type: console
+    with:
+      message: "MSI cleanup finished. submitted={{ variables.uninstall_count | default: 0 }} max_packages={{ consts.max_packages }}."
