@@ -20,17 +20,23 @@
  *   --variant <mode>         Schema variant: auto | strict | template (default: auto)
  *   --schema <path|url>      Explicit schema source: a bundle directory or http(s):// base URL
  *   --schema-cdn-url <url>   CDN base URL fallback (or set WORKFLOWS_SCHEMA_CDN_URL)
+ *   --kibana-version <ver>   Skip templates whose `template-metadata.availability` range
+ *                            does not include this Kibana version (or set
+ *                            WORKFLOWS_KIBANA_VERSION). Files without one are always validated.
  *   --json <path>            Write a structured JSON report to this path
  */
 
 import fs from 'node:fs';
 import { parseArgs } from 'node:util';
+import semver from 'semver';
 import { discoverFiles } from './validate/discover-files.mjs';
 import { loadSchemaDocuments } from './validate/load-schema.mjs';
 import { createSchemaValidator } from './validate/validate-schema.mjs';
 import { validateWorkflowYaml } from './validate/index.mjs';
 import { printFileResult, printSummary, writeJsonReport } from './validate/report.mjs';
 import { VARIANTS } from './validate/variants.mjs';
+import { parseYamlToJSONWithoutValidation } from './validate/yaml-parse.mjs';
+import { METADATA_KEY } from './validate/validate-file.mjs';
 
 // Minimal console logger mirroring the ToolingLog surface the report uses.
 const log = {
@@ -55,6 +61,19 @@ const parseVariantMode = (value) => {
 const emptyToUndefined = (value) =>
   typeof value === 'string' && value.length > 0 ? value : undefined;
 
+/**
+ * The `availability` range of a template that excludes `kibanaVersion`, else
+ * undefined. A missing or invalid range never skips: the file is validated.
+ */
+const unsatisfiedAvailability = (yaml, kibanaVersion) => {
+  const parsed = parseYamlToJSONWithoutValidation(yaml);
+  const availability = parsed.success ? parsed.json?.[METADATA_KEY]?.availability : undefined;
+  if (typeof availability !== 'string' || !semver.validRange(availability)) {
+    return undefined;
+  }
+  return semver.satisfies(kibanaVersion, availability) ? undefined : availability;
+};
+
 async function main() {
   const { values, positionals } = parseArgs({
     allowPositionals: true,
@@ -64,6 +83,7 @@ async function main() {
       variant: { type: 'string' },
       schema: { type: 'string' },
       'schema-cdn-url': { type: 'string' },
+      'kibana-version': { type: 'string' },
       json: { type: 'string' },
     },
   });
@@ -76,6 +96,12 @@ async function main() {
   const cdnUrl =
     emptyToUndefined(values['schema-cdn-url']) ??
     emptyToUndefined(process.env.WORKFLOWS_SCHEMA_CDN_URL);
+  const kibanaVersion =
+    emptyToUndefined(values['kibana-version']) ??
+    emptyToUndefined(process.env.WORKFLOWS_KIBANA_VERSION);
+  if (kibanaVersion && !semver.valid(kibanaVersion)) {
+    throw new Error(`Invalid --kibana-version "${kibanaVersion}". Expected a semver like 9.6.0.`);
+  }
   const jsonOutput = emptyToUndefined(values.json);
 
   // Discover files across every target, de-duped and sorted for determinism.
@@ -99,6 +125,11 @@ async function main() {
     // Stream each file's result as it completes.
     for (const file of files) {
       const yaml = await fs.promises.readFile(file, 'utf8');
+      const unavailable = kibanaVersion && unsatisfiedAvailability(yaml, kibanaVersion);
+      if (unavailable) {
+        log.info(`SKIP  ${file} (availability "${unavailable}" excludes Kibana ${kibanaVersion})`);
+        continue;
+      }
       const outcome = await validateWorkflowYaml({ file, yaml, validateSchema, variantMode });
       outcomes.push(outcome);
       if (!summaryOnly) {
