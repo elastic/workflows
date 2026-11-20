@@ -4,10 +4,12 @@ template-metadata:
   availability: ">=9.7.0"
   name: "Deactivate AWS IAM Access Key"
   description: >-
-    Deactivate an AWS IAM access key from a security alert or manual input.
-    Reads the user's access keys, requires explicit analyst approval, changes
-    the selected key to Inactive, and reads the keys again for verification.
-    The AWS connector requires only iam:ListAccessKeys and iam:UpdateAccessKey.
+    Deactivate a long-term AWS IAM user access key from a security alert or
+    manual input. Reads the user's access keys, requires explicit analyst
+    approval, changes the selected key to Inactive, and reads the keys again
+    for verification. Temporary role and federated-session credentials are
+    rejected before any IAM request. The AWS connector requires only
+    iam:ListAccessKeys and iam:UpdateAccessKey.
   solutions: [security]
   categories: [response]
   install:
@@ -23,9 +25,11 @@ template-metadata:
 
 name: Deactivate AWS IAM Access Key
 description: |
-  Resolve an IAM user and access key from an alert or manual input, inspect the
-  current keys, request analyst approval, deactivate the selected key, and
-  verify the resulting state.
+  Resolve an IAM user and long-term access key from an alert or manual input,
+  inspect the current keys, request analyst approval, deactivate the selected
+  key, and verify the resulting state. Temporary credentials issued to assumed
+  roles or federated sessions cannot be deactivated with UpdateAccessKey; revoke
+  those sessions through the appropriate identity control instead.
 
 triggers:
   - type: alert
@@ -49,7 +53,35 @@ steps:
     with:
       user_name: "{{ event.alerts[0].user.name | default: inputs.user_name }}"
       access_key_id: "{{ event.alerts[0].aws.cloudtrail.user_identity.access_key_id | default: inputs.access_key_id }}"
+      identity_type: "{{ event.alerts[0].aws.cloudtrail.user_identity.type | default: 'manual' }}"
+      access_key_is_long_term: >-
+        {% assign resolved_key = event.alerts[0].aws.cloudtrail.user_identity.access_key_id | default: inputs.access_key_id | default: '' -%}
+        {% assign key_prefix = resolved_key | slice: 0, 4 -%}
+        {% if key_prefix == 'AKIA' %}true{% else %}false{% endif %}
       alert_id: "{{ event.alerts[0].kibana.alert.uuid | default: event.alerts[0]._id | default: 'manual' }}"
+
+  # UpdateAccessKey supports IAM-user long-term keys, not temporary session
+  # credentials such as ASIA keys issued to assumed roles or federated users.
+  - name: reject_temporary_credentials
+    type: if
+    condition: "${{ variables.user_name != blank and variables.access_key_id != blank and variables.access_key_is_long_term != 'true' }}"
+    steps:
+      - name: log_temporary_credentials
+        type: console
+        with:
+          message: |-
+            Outcome: unsupported_target; no IAM request was made because {{ variables.access_key_id }} is not a long-term AKIA IAM user access key.
+            Identity type: {{ variables.identity_type }}.
+            User or role name: {{ variables.user_name }}.
+            Alert: {{ variables.alert_id }}.
+            Temporary assumed-role or federated credentials must be contained by revoking the corresponding sessions or identity access.
+      - name: fail_temporary_credentials
+        type: workflow.fail
+        with:
+          message: >-
+            IAM access-key deactivation supports long-term AKIA IAM user keys;
+            {{ variables.access_key_id }} is a temporary or unsupported
+            credential that requires session revocation instead.
 
   # Fail closed when either target identifier is missing.
   - name: validate_target
@@ -61,6 +93,8 @@ steps:
         connector-id: __install__.aws-connector
         with:
           service: iam
+          headers:
+            Accept: application/json
           query:
             Action: ListAccessKeys
             Version: "2010-05-08"
@@ -76,7 +110,10 @@ steps:
 
             Alert: {{ variables.alert_id }}
             The current ListAccessKeys response was:
-            {{ steps.list_access_keys_before.output.data | json }}
+
+            ~~~json
+            {{ steps.list_access_keys_before.output.data | json: 2 }}
+            ~~~
           schema:
             type: object
             properties:
@@ -126,6 +163,8 @@ steps:
                 connector-id: __install__.aws-connector
                 with:
                   service: iam
+                  headers:
+                    Accept: application/json
                   query:
                     Action: ListAccessKeys
                     Version: "2010-05-08"
@@ -202,3 +241,9 @@ steps:
           message: >-
             AWS IAM access-key remediation skipped because user.name/user_name
             or aws.cloudtrail.user_identity.access_key_id/access_key_id was missing.
+      - name: fail_missing_target
+        type: workflow.fail
+        with:
+          message: >-
+            AWS IAM access-key deactivation requires an IAM user name and a
+            long-term access key ID.
