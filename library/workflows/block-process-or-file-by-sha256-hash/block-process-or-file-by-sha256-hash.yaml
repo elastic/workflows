@@ -209,7 +209,7 @@ steps:
             {%- if steps.find_blocklist_item.error == blank -%}
             {%- if found_id == wanted -%}
             {%- if found_os == wanted_os -%}
-            {%- if found_tags contains 'policy:all' -%}exists
+            {%- if found_tags contains consts.policy_tag -%}exists
             {%- else -%}mismatch
             {%- endif -%}
             {%- else -%}mismatch
