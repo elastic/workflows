@@ -1,0 +1,571 @@
+template-metadata:
+  slug: sensitive-file-download-young-domain
+  version: "1.0.0"
+  availability: ">=9.5.0"
+  name: "Sensitive File Download from Young Domain"
+  description: >-
+    Every hour, and on demand, find browser downloads of sensitive file types
+    from Elastic Defend file events in the last hour. Requires Elastic Defend
+    file event collection in logs-endpoint.events.file-*. Keep downloads seen
+    on a single host whose origin domain is not a known vendor, look up WHOIS,
+    and open a medium-severity Security case when the domain was registered
+    within the configured maximum age (default 90 days). Names ending in
+    .local or .internal, and direct IP origins, are not sent to WHOIS. One
+    open or in-progress case per agent, domain, and file extension.
+  solutions: [security]
+  categories: [detection, hunting, case-management]
+  install:
+    form:
+      - name: max-domain-age-days
+        label: "Maximum domain age (days)"
+        description: >-
+          Open a case when the WHOIS registration date is this many days old
+          or newer. The default of 90 flags recently registered domains.
+        inputType: number
+        required: true
+        default: 90
+
+name: Sensitive File Download from Young Domain
+description: >
+  Requires Elastic Defend file events (logs-endpoint.events.file-*). Query
+  those events from the last hour for browser downloads of sensitive file
+  types, check WHOIS registration age of the origin domain, and open a
+  medium-severity Security case when that age is within the threshold. Names
+  ending in .local or .internal, and direct IP origins, are not sent to WHOIS.
+  Runs every hour and can be started manually. Each run pages through the
+  hour in batches of consts.max_rows_per_run. An open or in-progress case for
+  the same agent, domain, and file extension is left as-is. Closing that case
+  allows a later run to open a new one if the download shows up again.
+enabled: true
+tags:
+  - security
+  - young-domain
+  - file-download
+
+triggers:
+  - type: scheduled
+    with:
+      every: 1h
+  - type: manual
+
+settings:
+  timeout: 30m
+  concurrency:
+    key: "{{ workflow.id }}"
+    strategy: drop
+    max: 1
+
+consts:
+  max_domain_age_days: __install__.max-domain-age-days
+  # Elastic Defend file events. File event collection must be enabled.
+  # Narrow this if the workflow user can read more data streams than this
+  # workflow should case.
+  file_events_index: "logs-endpoint.events.file-*"
+  lookback: 1 hour
+  # who-dat has no dedicated connector. Each query page returns at most this
+  # many rows, then the run continues with the next page of the same hour.
+  max_rows_per_run: 20
+  whois_base_url: https://who-dat.as93.net/v1/whois
+  # Also open a case when dates.updated falls inside the age threshold.
+  # Leave false: registrars refresh that date on renewal, so old domains look
+  # recently updated. Registration age is the case gate either way.
+  flag_recent_whois_update: false
+  # Last two labels are the registrable domain, except these multi-part
+  # suffixes, which take the last three. Dots are escaped for ES|QL RLIKE.
+  # This is not the public suffix list; extend the value in consts when a
+  # suffix is missing.
+  multi_part_suffixes: "co\\.uk|org\\.uk|ac\\.uk|gov\\.uk|net\\.uk|co\\.jp|ne\\.jp|or\\.jp|ac\\.jp|go\\.jp|com\\.au|net\\.au|org\\.au|edu\\.au|co\\.nz|org\\.nz|net\\.nz|com\\.br|com\\.mx|com\\.ar|com\\.tr|com\\.sg|com\\.hk|com\\.tw|com\\.cn|co\\.in|net\\.in|org\\.in|co\\.za|org\\.za|com\\.co|com\\.pe|co\\.kr|or\\.kr|com\\.my|com\\.ph|co\\.id|com\\.vn|co\\.il|org\\.il|com\\.eg|com\\.sa|com\\.pk|com\\.ng"
+
+steps:
+  # Liquid turns a non-numeric max_domain_age_days into 0, which would skip
+  # every domain. Fall back to 90 unless the const is a positive number.
+  - name: set_age_threshold
+    type: data.set
+    with:
+      max_domain_age_days: "{% assign max_age = consts.max_domain_age_days | plus: 0 %}{% if max_age > 0 %}{{ max_age }}{% else %}90{% endif %}"
+
+  - name: log_run_start
+    type: console
+    with:
+      message: |
+        Sensitive file download from young domain — run start
+        execution.id={{ execution.id }}
+        lookback={{ consts.lookback }}
+        max_domain_age_days={{ steps.set_age_threshold.output.max_domain_age_days }}
+        max_rows_per_run={{ consts.max_rows_per_run }}
+
+  - name: init_counters
+    type: data.set
+    with:
+      downloads_checked: 0
+      young_domains: 0
+      cases_opened: 0
+      keep_paging: "yes"
+      cursor_domain: ""
+      cursor_extension: ""
+
+  # Pages the hour by domain and extension. A full page continues from the
+  # last row so later downloads in the same window are not dropped.
+  - name: page_downloads
+    type: while
+    condition: "variables.keep_paging: yes"
+    max-iterations:
+      limit: 25
+      on-limit: continue
+    steps:
+      # Columns consumed as foreach.item[N]:
+      #   [0] domain  [1] host.id  [2] file.extension
+      #   [3] file.name  [4] agent.id  [5] user
+      # The authority drops a trailing :port. The registrable domain is the
+      # last two labels, or the last three when consts.multi_part_suffixes
+      # matches. .local, .internal, and direct IP origins are removed here.
+      # Edit the vendor RLIKE to extend the exclusion list.
+      - name: query_file_downloads
+        type: elasticsearch.esql.query
+        with:
+          query: |
+            FROM {{ consts.file_events_index }}
+            | WHERE @timestamp > NOW() - {{ consts.lookback }}
+              AND process.name IN ("chrome.exe", "msedge.exe", "firefox.exe")
+              AND file.extension IN ("msi", "js", "vbs", "vbe", "jse", "lnk", "url", "iso", "zip", "rar", "exe", "ps1")
+              AND file.origin_url IS NOT NULL
+            | GROK file.origin_url """^https?:\/\/(?<domain>(?:\[[^\]]+\]|[^\/\?:#]+))"""
+            | WHERE domain IS NOT NULL
+            | EVAL domain = TO_LOWER(domain)
+            | WHERE NOT ENDS_WITH(domain, ".local")
+                AND NOT ENDS_WITH(domain, ".local.")
+                AND NOT ENDS_WITH(domain, ".internal")
+                AND NOT ENDS_WITH(domain, ".internal.")
+                AND NOT STARTS_WITH(domain, "[")
+                AND NOT domain RLIKE """[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}"""
+            | EVAL label_count = MV_COUNT(SPLIT(domain, "."))
+            | EVAL multipart = CASE(domain RLIKE """(.*\.)?({{ consts.multi_part_suffixes }})$""", 1, 0)
+            | EVAL registrable = CASE(
+                multipart == 1 AND label_count >= 4, REPLACE(domain, """^.*\.([^.]+)\.([^.]+)\.([^.]+)$""", "$1.$2.$3"),
+                multipart == 1, domain,
+                label_count >= 3, REPLACE(domain, """^.*\.([^.]+)\.([^.]+)$""", "$1.$2"),
+                domain
+              )
+            | EVAL domain = COALESCE(registrable, domain)
+            | WHERE NOT domain RLIKE """(.*\.)?(elastic\.co|amazonaws\.com|mysql\.com|windows\.net|microsoft\.com|google\.com|logrhythm\.com|veeam\.com|whatsapp\.com|sharepoint\.com|githubusercontent\.com|ubuntu\.com)$"""
+            | STATS
+                hosts_count = COUNT_DISTINCT(host.id),
+                hosts = VALUES(host.id),
+                agents = VALUES(agent.id),
+                files = VALUES(file.name),
+                users = VALUES(user.name)
+              BY domain, file.extension
+            | WHERE hosts_count == 1
+            | EVAL host.id = MV_FIRST(hosts), agent.id = MV_FIRST(agents), file.name = MV_FIRST(files), user = MV_FIRST(users)
+            | STATS BY domain, host.id, file.extension, file.name, agent.id, user
+            | KEEP domain, host.id, file.extension, file.name, agent.id, user
+            {% if variables.cursor_domain != blank %}
+            | WHERE domain > "{{ variables.cursor_domain }}" OR (domain == "{{ variables.cursor_domain }}" AND file.extension > "{{ variables.cursor_extension }}")
+            {% endif %}
+            | SORT domain, file.extension
+            | LIMIT {{ consts.max_rows_per_run }}
+
+      - name: when_downloads_found
+        type: if
+        condition: "steps.query_file_downloads.output.values.length > 0"
+        steps:
+          - name: log_download_count
+            type: console
+            with:
+              message: "Sensitive file downloads — {{ steps.query_file_downloads.output.values | size }} row(s) from {{ consts.file_events_index }} over the last {{ consts.lookback }}."
+
+          - name: per_download
+            type: foreach
+            foreach: "{{ steps.query_file_downloads.output.values }}"
+            on-failure:
+              continue: true
+            steps:
+              - name: set_download_context
+                type: data.set
+                with:
+                  domain: "{{ foreach.item[0] | strip | downcase }}"
+                  host_id: "{% if foreach.item[1] != blank %}{{ foreach.item[1] }}{% else %}unknown{% endif %}"
+                  file_extension: "{% if foreach.item[2] != blank %}{{ foreach.item[2] | downcase }}{% else %}unknown{% endif %}"
+                  file_name: "{% if foreach.item[3] != blank %}{{ foreach.item[3] }}{% else %}unknown{% endif %}"
+                  agent_id: "{% if foreach.item[4] != blank %}{{ foreach.item[4] }}{% else %}unknown{% endif %}"
+                  user_name: "{% if foreach.item[5] != blank %}{{ foreach.item[5] }}{% else %}unknown{% endif %}"
+                  whois_domain: "{{ foreach.item[0] | strip | downcase }}"
+                  dedup_tag: "file-download:{% if foreach.item[4] != blank %}{{ foreach.item[4] }}{% else %}unknown{% endif %}:{{ foreach.item[0] | strip | downcase }}:{% if foreach.item[2] != blank %}{{ foreach.item[2] | downcase }}{% else %}unknown{% endif %}"
+
+              # .local and .internal are not sent to the public WHOIS proxy.
+              - name: set_lookup_gate
+                type: data.set
+                with:
+                  allowed: |-
+                    {%- assign sent = steps.set_download_context.output.whois_domain | default: '' | downcase | strip -%}
+                    {%- assign observed = steps.set_download_context.output.domain | default: '' | downcase | strip -%}
+                    {%- assign sent_last = sent | slice: -1, 1 -%}
+                    {%- if sent_last == '.' -%}
+                    {%- assign sent_len = sent.size | minus: 1 -%}
+                    {%- assign sent = sent | slice: 0, sent_len -%}
+                    {%- endif -%}
+                    {%- assign obs_last = observed | slice: -1, 1 -%}
+                    {%- if obs_last == '.' -%}
+                    {%- assign obs_len = observed.size | minus: 1 -%}
+                    {%- assign observed = observed | slice: 0, obs_len -%}
+                    {%- endif -%}
+                    {%- assign sent_local = sent | slice: -6, 6 -%}
+                    {%- assign sent_internal = sent | slice: -9, 9 -%}
+                    {%- assign obs_local = observed | slice: -6, 6 -%}
+                    {%- assign obs_internal = observed | slice: -9, 9 -%}
+                    {%- if sent_local == '.local' -%}no
+                    {%- elsif sent_internal == '.internal' -%}no
+                    {%- elsif obs_local == '.local' -%}no
+                    {%- elsif obs_internal == '.internal' -%}no
+                    {%- else -%}yes
+                    {%- endif -%}
+
+              - name: when_public_domain
+                type: if
+                condition: "steps.set_lookup_gate.output.allowed: yes"
+                steps:
+                  - name: count_download_checked
+                    type: data.set
+                    with:
+                      downloads_checked: "{{ variables.downloads_checked | plus: 1 }}"
+
+                  # Public WHOIS proxy. Retry only when error.details.status is 429.
+                  # The retry condition sees the failed attempt as `error`, not steps.self.
+                  - name: whois_lookup
+                    type: http
+                    timeout: 30s
+                    on-failure:
+                      retry:
+                        max-attempts: 3
+                        delay: 10s
+                        condition: "${{ error.details.status == 429 }}"
+                      continue: true
+                    with:
+                      method: GET
+                      url: "{{ consts.whois_base_url }}/{{ steps.set_download_context.output.whois_domain }}"
+                      headers:
+                        Accept: "application/json"
+
+                  - name: read_whois_dates
+                    type: data.set
+                    with:
+                      usable: |-
+                        {%- assign created = steps.whois_lookup.output.data.dates.created | append: '' -%}
+                        {%- assign updated = steps.whois_lookup.output.data.dates.updated | append: '' -%}
+                        {%- if steps.whois_lookup.error != blank -%}no
+                        {%- elsif created != blank -%}yes
+                        {%- elsif updated != blank -%}yes
+                        {%- else -%}no
+                        {%- endif -%}
+
+                  - name: when_whois_ok
+                    type: if
+                    condition: "steps.read_whois_dates.output.usable: yes"
+                    steps:
+                      - name: set_whois_meta
+                        type: data.set
+                        with:
+                          registration_date: "{{ steps.whois_lookup.output.data.dates.created }}"
+                          updated_date: "{% if steps.whois_lookup.output.data.dates.updated != blank %}{{ steps.whois_lookup.output.data.dates.updated }}{% else %}unknown{% endif %}"
+                          expires_date: "{% if steps.whois_lookup.output.data.dates.expires != blank %}{{ steps.whois_lookup.output.data.dates.expires }}{% else %}unknown{% endif %}"
+                          registrar: "{{ steps.whois_lookup.output.data.registrar.name | default: 'unknown' }}"
+                          whois_source: "{{ steps.whois_lookup.output.data.meta.source | default: 'unknown' }}"
+                          domain_age_days: >-
+                            {% assign reg = steps.whois_lookup.output.data.dates.created | default: '' -%}
+                            {% if reg != '' -%}
+                            {% assign reg_s = reg | date: '%s' | plus: 0 -%}
+                            {% assign now_s = 'now' | date: '%s' | plus: 0 -%}
+                            {{ now_s | minus: reg_s | divided_by: 86400 | floor -}}
+                            {% else -%}
+                            unknown
+                            {% endif %}
+                          domain_updated_days: >-
+                            {% assign upd = steps.whois_lookup.output.data.dates.updated -%}
+                            {% if upd != blank -%}
+                            {% assign upd_s = upd | date: '%s' | plus: 0 -%}
+                            {% assign now_s = 'now' | date: '%s' | plus: 0 -%}
+                            {{ now_s | minus: upd_s | divided_by: 86400 | floor -}}
+                            {% else -%}
+                            unknown
+                            {% endif %}
+                          is_young_domain: >-
+                            {% assign reg = steps.whois_lookup.output.data.dates.created | default: '' -%}
+                            {% assign upd = steps.whois_lookup.output.data.dates.updated -%}
+                            {% assign max_age = steps.set_age_threshold.output.max_domain_age_days | plus: 0 -%}
+                            {% assign young = false -%}
+                            {% if reg != '' -%}
+                            {% assign reg_s = reg | date: '%s' | plus: 0 -%}
+                            {% assign now_s = 'now' | date: '%s' | plus: 0 -%}
+                            {% assign age = now_s | minus: reg_s | divided_by: 86400 | floor -%}
+                            {% if age >= 0 and age <= max_age -%}
+                            {% assign young = true -%}
+                            {% endif -%}
+                            {% endif -%}
+                            {% assign flag_update = consts.flag_recent_whois_update | append: '' -%}
+                            {% if flag_update == 'true' and upd != blank -%}
+                            {% assign upd_s = upd | date: '%s' | plus: 0 -%}
+                            {% assign now_s = 'now' | date: '%s' | plus: 0 -%}
+                            {% assign upd_age = now_s | minus: upd_s | divided_by: 86400 | floor -%}
+                            {% if upd_age >= 0 and upd_age <= max_age -%}
+                            {% assign young = true -%}
+                            {% endif -%}
+                            {% endif -%}
+                            {% if young -%}yes{% else -%}no{% endif %}
+                          domain_age_trigger: >-
+                            {% assign reg = steps.whois_lookup.output.data.dates.created | default: '' -%}
+                            {% assign upd = steps.whois_lookup.output.data.dates.updated -%}
+                            {% assign max_age = steps.set_age_threshold.output.max_domain_age_days | plus: 0 -%}
+                            {% assign young_reg = false -%}
+                            {% assign young_upd = false -%}
+                            {% if reg != '' -%}
+                            {% assign reg_s = reg | date: '%s' | plus: 0 -%}
+                            {% assign now_s = 'now' | date: '%s' | plus: 0 -%}
+                            {% assign age = now_s | minus: reg_s | divided_by: 86400 | floor -%}
+                            {% if age >= 0 and age <= max_age -%}
+                            {% assign young_reg = true -%}
+                            {% endif -%}
+                            {% endif -%}
+                            {% assign flag_update = consts.flag_recent_whois_update | append: '' -%}
+                            {% if flag_update == 'true' and upd != blank -%}
+                            {% assign upd_s = upd | date: '%s' | plus: 0 -%}
+                            {% assign now_s = 'now' | date: '%s' | plus: 0 -%}
+                            {% assign upd_age = now_s | minus: upd_s | divided_by: 86400 | floor -%}
+                            {% if upd_age >= 0 and upd_age <= max_age -%}
+                            {% assign young_upd = true -%}
+                            {% endif -%}
+                            {% endif -%}
+                            {% if young_reg and young_upd -%}
+                            registration_and_update
+                            {% elsif young_reg -%}
+                            registration
+                            {% elsif young_upd -%}
+                            update
+                            {% else -%}
+                            none
+                            {% endif %}
+
+                      - name: log_whois_result
+                        type: console
+                        with:
+                          message: >-
+                            agent.id={{ steps.set_download_context.output.agent_id }}
+                            domain={{ steps.set_download_context.output.domain }}
+                            file={{ steps.set_download_context.output.file_name }}
+                            extension={{ steps.set_download_context.output.file_extension }}
+                            registration={{ steps.set_whois_meta.output.registration_date }}
+                            age_days={{ steps.set_whois_meta.output.domain_age_days }}
+                            updated_days={{ steps.set_whois_meta.output.domain_updated_days }}
+                            trigger={{ steps.set_whois_meta.output.domain_age_trigger }}
+                            young={{ steps.set_whois_meta.output.is_young_domain }}
+
+                      - name: when_young_domain
+                        type: if
+                        condition: "steps.set_whois_meta.output.is_young_domain: yes"
+                        steps:
+                          - name: count_young_domain
+                            type: data.set
+                            with:
+                              young_domains: "{{ variables.young_domains | plus: 1 }}"
+
+                          # Exact tag match. A title search would also match a longer name
+                          # that merely contains this domain.
+                          - name: find_open_case
+                            type: cases.findCases
+                            with:
+                              owner: [securitySolution]
+                              status: [open, in-progress]
+                              tags:
+                                - "{{ steps.set_download_context.output.dedup_tag }}"
+                              page: 1
+                              perPage: 1
+                              sortField: createdAt
+                              sortOrder: desc
+                            on-failure:
+                              continue: true
+
+                          - name: decide_create_case
+                            type: data.set
+                            with:
+                              should_create: >-
+                                {% if steps.find_open_case.error -%}
+                                no
+                                {%- elsif steps.find_open_case.output.total > 0 -%}
+                                no
+                                {%- elsif steps.find_open_case.output.cases.size > 0 -%}
+                                no
+                                {%- else -%}
+                                yes
+                                {%- endif %}
+                              skip_reason: >-
+                                {% if steps.find_open_case.error -%}
+                                case lookup failed
+                                {%- elsif steps.find_open_case.output.total > 0 or steps.find_open_case.output.cases.size > 0 -%}
+                                open or in-progress case exists
+                                {%- else -%}
+                                {%- endif %}
+
+                          - name: when_should_create_case
+                            type: if
+                            condition: "steps.decide_create_case.output.should_create: yes"
+                            steps:
+                              - name: create_young_domain_case
+                                type: cases.createCase
+                                on-failure:
+                                  continue: true
+                                with:
+                                  title: "Sensitive file download from young domain {{ steps.set_download_context.output.domain }} ({{ steps.set_download_context.output.agent_id }})"
+                                  description: |
+                                    A browser downloaded a sensitive file type from a domain whose WHOIS registration is within {{ steps.set_age_threshold.output.max_domain_age_days }} days, and that domain was seen on a single host. This is a lead from endpoint file telemetry, not a confirmed incident.
+
+                                    | Field | Value |
+                                    |---|---|
+                                    | **Domain** | `{{ steps.set_download_context.output.domain }}` |
+                                    | **File name** | `{{ steps.set_download_context.output.file_name }}` |
+                                    | **File extension** | `{{ steps.set_download_context.output.file_extension }}` |
+                                    | **User** | `{{ steps.set_download_context.output.user_name }}` |
+                                    | **agent.id** | `{{ steps.set_download_context.output.agent_id }}` |
+                                    | **host.id** | `{{ steps.set_download_context.output.host_id }}` |
+                                    | **Registration date** | `{{ steps.set_whois_meta.output.registration_date }}` |
+                                    | **Domain age (days)** | {{ steps.set_whois_meta.output.domain_age_days }} |
+                                    | **Last updated** | `{{ steps.set_whois_meta.output.updated_date }}` |
+                                    | **Days since update** | {{ steps.set_whois_meta.output.domain_updated_days }} |
+                                    | **Expiry** | `{{ steps.set_whois_meta.output.expires_date }}` |
+                                    | **Registrar** | {{ steps.set_whois_meta.output.registrar }} |
+                                    | **WHOIS source** | {{ steps.set_whois_meta.output.whois_source }} |
+                                    | **Trigger** | {{ steps.set_whois_meta.output.domain_age_trigger }} |
+                                    | **Threshold (days)** | {{ steps.set_age_threshold.output.max_domain_age_days }} |
+                                    | **Execution** | `{{ execution.id }}` |
+
+                                    WHOIS queried `{{ steps.set_download_context.output.whois_domain }}` via who-dat.as93.net. The domain is the registrable name from `file.origin_url` (last two labels, or last three for a multi-part suffix). When several files share that domain and extension, `file.name` is the first value returned.
+                                  owner: securitySolution
+                                  severity: medium
+                                  tags:
+                                    - young-domain
+                                    - sensitive-file-download
+                                    - "{{ steps.set_download_context.output.dedup_tag }}"
+                                  settings:
+                                    syncAlerts: false
+
+                              - name: when_case_created
+                                type: if
+                                condition: "not steps.create_young_domain_case.error: * and steps.create_young_domain_case.output.case.id: *"
+                                steps:
+                                  - name: count_case_opened
+                                    type: data.set
+                                    with:
+                                      cases_opened: "{{ variables.cases_opened | plus: 1 }}"
+
+                                  - name: log_case_created
+                                    type: console
+                                    with:
+                                      message: >-
+                                        Opened case {{ steps.create_young_domain_case.output.case.id }}
+                                        for agent.id={{ steps.set_download_context.output.agent_id }}
+                                        domain={{ steps.set_download_context.output.domain }}
+                                        file={{ steps.set_download_context.output.file_name }}
+                                        age_days={{ steps.set_whois_meta.output.domain_age_days }}.
+                                        {{ kibanaUrl }}/app/security/cases/{{ steps.create_young_domain_case.output.case.id }}
+                                else:
+                                  - name: log_case_failed
+                                    type: console
+                                    with:
+                                      message: >-
+                                        Case creation failed for agent.id={{ steps.set_download_context.output.agent_id }}
+                                        domain={{ steps.set_download_context.output.domain }}
+                                        file={{ steps.set_download_context.output.file_name }}
+                                        err={{ steps.create_young_domain_case.error.message }}
+                            else:
+                              - name: log_case_skipped
+                                type: console
+                                with:
+                                  message: >-
+                                    Case skipped ({{ steps.decide_create_case.output.skip_reason | default: "not created" }})
+                                    for agent.id={{ steps.set_download_context.output.agent_id }}
+                                    domain={{ steps.set_download_context.output.domain }}
+                                    file={{ steps.set_download_context.output.file_name }}.
+                        else:
+                          - name: log_skip_old_domain
+                            type: console
+                            with:
+                              message: >-
+                                Skipped — registration {{ steps.set_whois_meta.output.domain_age_days }}d ago
+                                (threshold {{ steps.set_age_threshold.output.max_domain_age_days }}d)
+                                for {{ steps.set_download_context.output.domain }}
+                                file {{ steps.set_download_context.output.file_name }}
+                                on agent.id {{ steps.set_download_context.output.agent_id }}.
+                    else:
+                      - name: log_whois_failed
+                        type: console
+                        with:
+                          message: >-
+                            WHOIS lookup failed for agent.id={{ steps.set_download_context.output.agent_id }}
+                            domain={{ steps.set_download_context.output.domain }}
+                            file={{ steps.set_download_context.output.file_name }}
+                            {% assign http_status = steps.whois_lookup.error.details.status | default: 0 | plus: 0 %}{% if http_status == 429 %}err=429 rate-limited{% elsif steps.whois_lookup.error %}err={{ steps.whois_lookup.error.message }}{% elsif steps.whois_lookup.output.data.error.message %}err={{ steps.whois_lookup.output.data.error.message }}{% else %}err=no dates.created or dates.updated in response{% endif %}
+                else:
+                  - name: log_skip_private_domain
+                    type: console
+                    with:
+                      message: >-
+                        Skipped WHOIS for agent.id={{ steps.set_download_context.output.agent_id }}
+                        domain={{ steps.set_download_context.output.domain }}
+                        file={{ steps.set_download_context.output.file_name }}
+                        — name ends with .local or .internal.
+
+              - name: remember_cursor
+                type: data.set
+                with:
+                  cursor_domain: |-
+                    {%- assign d = steps.set_download_context.output.domain | default: '' | downcase | strip -%}
+                    {%- if d contains '"' -%}{{ variables.cursor_domain }}
+                    {%- elsif d contains "\\" -%}{{ variables.cursor_domain }}
+                    {%- else -%}{{ d }}
+                    {%- endif -%}
+                  cursor_extension: |-
+                    {%- assign ext = steps.set_download_context.output.file_extension | default: '' | downcase | strip -%}
+                    {%- if ext contains '"' -%}{{ variables.cursor_extension }}
+                    {%- else -%}{{ ext }}
+                    {%- endif -%}
+                  cursor_safe: |-
+                    {%- assign d = steps.set_download_context.output.domain | default: '' | downcase | strip -%}
+                    {%- assign ext = steps.set_download_context.output.file_extension | default: '' | downcase | strip -%}
+                    {%- if d == '' -%}no
+                    {%- elsif d contains '"' -%}no
+                    {%- elsif d contains "\\" -%}no
+                    {%- elsif ext contains '"' -%}no
+                    {%- else -%}yes
+                    {%- endif -%}
+
+          - name: set_page_state
+            type: data.set
+            with:
+              keep_paging: |-
+                {%- assign n = steps.query_file_downloads.output.values | size | plus: 0 -%}
+                {%- assign cap = consts.max_rows_per_run | plus: 0 -%}
+                {%- if variables.cursor_safe == 'no' -%}no
+                {%- elsif n >= cap -%}yes
+                {%- else -%}no
+                {%- endif -%}
+        else:
+          - name: stop_paging
+            type: data.set
+            with:
+              keep_paging: "no"
+          - name: when_none_checked
+            type: if
+            condition: "variables.downloads_checked: 0"
+            steps:
+              - name: log_no_downloads
+                type: console
+                with:
+                  message: "No single-host sensitive browser downloads in the last {{ consts.lookback }}."
+  - name: log_done
+    type: console
+    with:
+      message: |
+        Sensitive file download from young domain finished.
+        execution.id={{ execution.id }}
+        downloads_checked={{ variables.downloads_checked }}
+        young_domains={{ variables.young_domains }}
+        cases_opened={{ variables.cases_opened }}
+        {% if variables.keep_paging == 'yes' %}paging stopped at the 25-page cap; later rows in this hour were not checked{% else %}window fully paged{% endif %}
