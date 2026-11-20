@@ -29,8 +29,8 @@ jobs:
       pull-requests: write
     steps:
       # No `ref`: checks out the default branch, not the PR.
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           pattern: validation-*
           path: reports
@@ -48,15 +48,32 @@ jobs:
             const report = fs.existsSync('report.md') ? fs.readFileSync('report.md', 'utf8') : '';
             const body = report ? `${marker}\n\n${report.trim()}` : '';
 
-            // `workflow_run.pull_requests` is empty for fork PRs, so look the PR up
-            // by commit. Only a PR still at this commit gets the comment, so a
-            // slow run for an old commit cannot overwrite a newer report.
-            const { head_sha } = context.payload.workflow_run;
-            const { data: candidates } = await github.rest.repos.listPullRequestsAssociatedWithCommit({
+            // `workflow_run.pull_requests` is empty for fork PRs, and looking the PR
+            // up by commit only searches this repo, which misses fork commits. Look
+            // it up by head `owner:branch` instead. Only a PR still at this commit
+            // gets the comment, so a slow run for an old commit cannot overwrite a
+            // newer report.
+            const { head_sha, head_branch, head_repository } = context.payload.workflow_run;
+            // The source fork may have been deleted before this event was delivered.
+            if (!head_repository) {
+              core.warning('The head repository is gone; skipping the pull request comment.');
+              return;
+            }
+            const { data: candidates } = await github.rest.pulls.list({
               ...context.repo,
-              commit_sha: head_sha,
+              state: 'open',
+              head: `${head_repository.owner.login}:${head_branch}`,
             });
-            const prs = candidates.filter((pr) => pr.state === 'open' && pr.head.sha === head_sha);
+            const prs = candidates.filter((pr) => pr.head.sha === head_sha);
+            // The run does not say which PR triggered it. A fork branch with several
+            // open PRs (e.g. to different base branches) would have each run
+            // overwrite the report of the others, so skip rather than guess.
+            if (prs.length > 1) {
+              core.warning(
+                `Several open pull requests match ${head_sha}: ${prs.map((pr) => `#${pr.number}`).join(', ')}; skipping the pull request comment.`
+              );
+              return;
+            }
 
             for (const pr of prs) {
               const issue = { ...context.repo, issue_number: pr.number };
