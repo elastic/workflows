@@ -30,6 +30,7 @@ The npm scripts `npm run validate` (bare) and `npm run validate:all`
 | `--variant <mode>` | Force a schema variant: `strict` or `template` | `auto` (per file) |
 | `--schema <path\|url>` | Explicit schema source: a bundle directory or an `http(s)://` base URL | — |
 | `--schema-cdn-url <url>` | CDN base URL fallback (or set `WORKFLOWS_SCHEMA_CDN_URL`) | — |
+| `--kibana-version <ver>` | Skip templates whose `template-metadata.availability` range excludes this Kibana version (or set `WORKFLOWS_KIBANA_VERSION`); files without a range are always validated | — |
 | `--json <path>` | Write a structured JSON report to this path | — |
 
 ## Schema source resolution
