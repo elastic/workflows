@@ -153,7 +153,10 @@ steps:
 
                 Alert: {{ variables.alert_id }}
                 Initial review-only DescribeNetworkInterfaces response:
-                {{ steps.describe_network_interface_for_review.output.data | json }}
+
+                ~~~xml
+                {{ steps.describe_network_interface_for_review.output.data }}
+                ~~~
               schema:
                 type: object
                 properties:
