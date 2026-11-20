@@ -57,147 +57,26 @@ steps:
   - name: build_targets
     type: data.parseJson
     source: |
+      {% assign raw_entries = "" | split: "" -%}
+      {% assign entries = "" | split: "" -%}
       {% assign targets = "" | split: "" -%}
-      {% assign seen = "" | split: "" -%}
       {% if event.alerts and event.alerts.size > 0 -%}
         {% for alert in event.alerts -%}
-          {% assign raw_trail = alert.aws.cloudtrail.flattened.request_parameters.name | default: "" | strip -%}
-          {% assign event_account = alert.aws.cloudtrail.recipient_account_id | default: "" | strip -%}
-          {% assign event_region = alert.cloud.region | default: "" | strip -%}
-          {% assign trail_name = raw_trail -%}
-          {% assign account_id = event_account -%}
-          {% assign region = event_region -%}
-          {% assign partition = "" -%}
-          {% assign valid = true -%}
-          {% assign invalid_reason = "" -%}
-          {% assign arn_parts = raw_trail | split: ":" -%}
-          {% if raw_trail == "" -%}
-            {% assign valid = false -%}
-            {% assign invalid_reason = "missing trail name or ARN" -%}
-          {% elsif arn_parts.size == 6 and arn_parts[0] == "arn" -%}
-            {% assign partition = arn_parts[1] -%}
-            {% assign arn_service = arn_parts[2] -%}
-            {% assign arn_region = arn_parts[3] -%}
-            {% assign arn_account = arn_parts[4] -%}
-            {% assign arn_resource_parts = arn_parts[5] | split: "/" -%}
-            {% assign arn_resource_type = arn_resource_parts | first -%}
-            {% assign trail_name = arn_resource_parts | last | strip -%}
-            {% assign account_id = arn_account -%}
-            {% assign region = arn_region -%}
-            {% if arn_service != "cloudtrail" or arn_resource_parts.size != 2 or arn_resource_type != "trail" or trail_name == "" or account_id == "" or region == "" -%}
-              {% assign valid = false -%}
-              {% assign invalid_reason = "malformed CloudTrail trail ARN" -%}
-            {% elsif event_account != "" and event_account != account_id -%}
-              {% assign valid = false -%}
-              {% assign invalid_reason = "aws.cloudtrail.recipient_account_id does not match the trail ARN" -%}
-            {% elsif event_region != "" and event_region != region -%}
-              {% assign valid = false -%}
-              {% assign invalid_reason = "cloud.region does not match the trail ARN" -%}
-            {% endif -%}
-          {% elsif raw_trail contains "arn:" -%}
-            {% assign valid = false -%}
-            {% assign invalid_reason = "malformed CloudTrail trail ARN" -%}
-          {% elsif account_id == "" or region == "" -%}
-            {% assign valid = false -%}
-            {% assign invalid_reason = "a bare trail name requires aws.cloudtrail.recipient_account_id and cloud.region" -%}
-          {% else -%}
-            {% assign region_prefix_3 = region | slice: 0, 3 -%}
-            {% assign region_prefix_7 = region | slice: 0, 7 -%}
-            {% assign region_prefix_8 = region | slice: 0, 8 -%}
-            {% if region_prefix_3 == "cn-" -%}
-              {% assign partition = "aws-cn" -%}
-            {% elsif region_prefix_7 == "us-gov-" -%}
-              {% assign partition = "aws-us-gov" -%}
-            {% elsif region_prefix_8 == "us-isob-" -%}
-              {% assign partition = "aws-iso-b" -%}
-            {% elsif region_prefix_8 == "eu-isoe-" -%}
-              {% assign partition = "aws-iso-e" -%}
-            {% elsif region_prefix_8 == "us-isof-" -%}
-              {% assign partition = "aws-iso-f" -%}
-            {% elsif region_prefix_7 == "us-iso-" -%}
-              {% assign partition = "aws-iso" -%}
-            {% else -%}
-              {% assign partition = "aws" -%}
-            {% endif -%}
-          {% endif -%}
-          {% capture trail_arn -%}arn:{{ partition }}:cloudtrail:{{ region }}:{{ account_id }}:trail/{{ trail_name }}{%- endcapture -%}
           {% assign alert_id = alert.kibana.alert.uuid | default: alert._id | default: "unknown" -%}
-          {% if valid -%}
-            {% unless seen contains trail_arn -%}
-              {% assign alert_ids = "" | split: "" -%}
-              {% for contributing_alert in event.alerts -%}
-                {% assign contributing_raw = contributing_alert.aws.cloudtrail.flattened.request_parameters.name | default: "" | strip -%}
-                {% assign contributing_account = contributing_alert.aws.cloudtrail.recipient_account_id | default: "" | strip -%}
-                {% assign contributing_region = contributing_alert.cloud.region | default: "" | strip -%}
-                {% assign contributing_name = contributing_raw -%}
-                {% assign contributing_partition = "" -%}
-                {% assign contributing_valid = true -%}
-                {% assign contributing_parts = contributing_raw | split: ":" -%}
-                {% if contributing_raw == "" -%}
-                  {% assign contributing_valid = false -%}
-                {% elsif contributing_parts.size == 6 and contributing_parts[0] == "arn" -%}
-                  {% assign contributing_partition = contributing_parts[1] -%}
-                  {% assign contributing_service = contributing_parts[2] -%}
-                  {% assign contributing_arn_region = contributing_parts[3] -%}
-                  {% assign contributing_arn_account = contributing_parts[4] -%}
-                  {% assign contributing_resource_parts = contributing_parts[5] | split: "/" -%}
-                  {% assign contributing_resource_type = contributing_resource_parts | first -%}
-                  {% assign contributing_name = contributing_resource_parts | last | strip -%}
-                  {% if contributing_service != "cloudtrail" or contributing_resource_parts.size != 2 or contributing_resource_type != "trail" or contributing_name == "" or contributing_arn_account == "" or contributing_arn_region == "" -%}
-                    {% assign contributing_valid = false -%}
-                  {% elsif contributing_account != "" and contributing_account != contributing_arn_account -%}
-                    {% assign contributing_valid = false -%}
-                  {% elsif contributing_region != "" and contributing_region != contributing_arn_region -%}
-                    {% assign contributing_valid = false -%}
-                  {% endif -%}
-                  {% assign contributing_account = contributing_arn_account -%}
-                  {% assign contributing_region = contributing_arn_region -%}
-                {% elsif contributing_raw contains "arn:" or contributing_account == "" or contributing_region == "" -%}
-                  {% assign contributing_valid = false -%}
-                {% else -%}
-                  {% assign contributing_prefix_3 = contributing_region | slice: 0, 3 -%}
-                  {% assign contributing_prefix_7 = contributing_region | slice: 0, 7 -%}
-                  {% assign contributing_prefix_8 = contributing_region | slice: 0, 8 -%}
-                  {% if contributing_prefix_3 == "cn-" -%}
-                    {% assign contributing_partition = "aws-cn" -%}
-                  {% elsif contributing_prefix_7 == "us-gov-" -%}
-                    {% assign contributing_partition = "aws-us-gov" -%}
-                  {% elsif contributing_prefix_8 == "us-isob-" -%}
-                    {% assign contributing_partition = "aws-iso-b" -%}
-                  {% elsif contributing_prefix_8 == "eu-isoe-" -%}
-                    {% assign contributing_partition = "aws-iso-e" -%}
-                  {% elsif contributing_prefix_8 == "us-isof-" -%}
-                    {% assign contributing_partition = "aws-iso-f" -%}
-                  {% elsif contributing_prefix_7 == "us-iso-" -%}
-                    {% assign contributing_partition = "aws-iso" -%}
-                  {% else -%}
-                    {% assign contributing_partition = "aws" -%}
-                  {% endif -%}
-                {% endif -%}
-                {% capture contributing_arn -%}arn:{{ contributing_partition }}:cloudtrail:{{ contributing_region }}:{{ contributing_account }}:trail/{{ contributing_name }}{%- endcapture -%}
-                {% if contributing_valid and contributing_arn == trail_arn -%}
-                  {% assign contributing_id = contributing_alert.kibana.alert.uuid | default: contributing_alert._id | default: "unknown" -%}
-                  {% assign alert_ids = alert_ids | push: contributing_id -%}
-                {% endif -%}
-              {% endfor -%}
-              {% capture target -%}{"valid":true,"trail_name":{{ trail_name | json }},"trail_arn":{{ trail_arn | json }},"account_id":{{ account_id | json }},"region":{{ region | json }},"alert_ids":{{ alert_ids | json }}}{%- endcapture -%}
-              {% assign targets = targets | push: target -%}
-              {% assign seen = seen | push: trail_arn -%}
-            {% endunless -%}
-          {% else -%}
-            {% capture invalid_key -%}invalid|{{ alert_id }}{%- endcapture -%}
-            {% capture target -%}{"valid":false,"trail_name":{{ trail_name | json }},"trail_arn":"","account_id":{{ account_id | json }},"region":{{ region | json }},"alert_ids":[{{ alert_id | json }}],"invalid_reason":{{ invalid_reason | json }}}{%- endcapture -%}
-            {% assign targets = targets | push: target -%}
-            {% assign seen = seen | push: invalid_key -%}
-          {% endif -%}
+          {% capture raw_entry_json -%}{"source":"alert","raw_trail":{{ alert.aws.cloudtrail.flattened.request_parameters.name | default: "" | strip | json }},"supplied_account":{{ alert.aws.cloudtrail.recipient_account_id | default: "" | strip | json }},"supplied_region":{{ alert.cloud.region | default: "" | strip | json }},"alert_id":{{ alert_id | json }}}{%- endcapture -%}
+          {% assign raw_entry = raw_entry_json | json_parse -%}
+          {% assign raw_entries = raw_entries | push: raw_entry -%}
         {% endfor -%}
       {% else -%}
-        {% assign raw_trail = inputs.trail_name | default: "" | strip -%}
-        {% assign supplied_account = inputs.account_id | default: "" | strip -%}
-        {% assign supplied_region = inputs.region | default: "" | strip -%}
+        {% capture raw_entry_json -%}{"source":"manual","raw_trail":{{ inputs.trail_name | default: "" | strip | json }},"supplied_account":{{ inputs.account_id | default: "" | strip | json }},"supplied_region":{{ inputs.region | default: "" | strip | json }},"alert_id":"manual"}{%- endcapture -%}
+        {% assign raw_entry = raw_entry_json | json_parse -%}
+        {% assign raw_entries = raw_entries | push: raw_entry -%}
+      {% endif -%}
+      {% for raw_entry in raw_entries -%}
+        {% assign raw_trail = raw_entry.raw_trail -%}
         {% assign trail_name = raw_trail -%}
-        {% assign account_id = supplied_account -%}
-        {% assign region = supplied_region -%}
+        {% assign account_id = raw_entry.supplied_account -%}
+        {% assign region = raw_entry.supplied_region -%}
         {% assign partition = "" -%}
         {% assign valid = true -%}
         {% assign invalid_reason = "" -%}
@@ -218,19 +97,31 @@ steps:
           {% if arn_service != "cloudtrail" or arn_resource_parts.size != 2 or arn_resource_type != "trail" or trail_name == "" or account_id == "" or region == "" -%}
             {% assign valid = false -%}
             {% assign invalid_reason = "malformed CloudTrail trail ARN" -%}
-          {% elsif supplied_account != "" and supplied_account != account_id -%}
+          {% elsif raw_entry.supplied_account != "" and raw_entry.supplied_account != account_id -%}
             {% assign valid = false -%}
-            {% assign invalid_reason = "manual account_id does not match the trail ARN" -%}
-          {% elsif supplied_region != "" and supplied_region != region -%}
+            {% if raw_entry.source == "alert" -%}
+              {% assign invalid_reason = "aws.cloudtrail.recipient_account_id does not match the trail ARN" -%}
+            {% else -%}
+              {% assign invalid_reason = "manual account_id does not match the trail ARN" -%}
+            {% endif -%}
+          {% elsif raw_entry.supplied_region != "" and raw_entry.supplied_region != region -%}
             {% assign valid = false -%}
-            {% assign invalid_reason = "manual region does not match the trail ARN" -%}
+            {% if raw_entry.source == "alert" -%}
+              {% assign invalid_reason = "cloud.region does not match the trail ARN" -%}
+            {% else -%}
+              {% assign invalid_reason = "manual region does not match the trail ARN" -%}
+            {% endif -%}
           {% endif -%}
         {% elsif raw_trail contains "arn:" -%}
           {% assign valid = false -%}
           {% assign invalid_reason = "malformed CloudTrail trail ARN" -%}
         {% elsif account_id == "" or region == "" -%}
           {% assign valid = false -%}
-          {% assign invalid_reason = "a bare trail name requires account_id and region" -%}
+          {% if raw_entry.source == "alert" -%}
+            {% assign invalid_reason = "a bare trail name requires aws.cloudtrail.recipient_account_id and cloud.region" -%}
+          {% else -%}
+            {% assign invalid_reason = "a bare trail name requires account_id and region" -%}
+          {% endif -%}
         {% else -%}
           {% assign region_prefix_3 = region | slice: 0, 3 -%}
           {% assign region_prefix_7 = region | slice: 0, 7 -%}
@@ -252,21 +143,36 @@ steps:
           {% endif -%}
         {% endif -%}
         {% capture trail_arn -%}arn:{{ partition }}:cloudtrail:{{ region }}:{{ account_id }}:trail/{{ trail_name }}{%- endcapture -%}
-        {% if valid -%}
-          {% capture target -%}{"valid":true,"trail_name":{{ trail_name | json }},"trail_arn":{{ trail_arn | json }},"account_id":{{ account_id | json }},"region":{{ region | json }},"alert_ids":["manual"]}{%- endcapture -%}
-        {% else -%}
-          {% capture target -%}{"valid":false,"trail_name":{{ trail_name | json }},"trail_arn":"","account_id":{{ account_id | json }},"region":{{ region | json }},"alert_ids":["manual"],"invalid_reason":{{ invalid_reason | json }}}{%- endcapture -%}
-        {% endif -%}
+        {% capture entry_json -%}{"valid":{{ valid }},"trail_name":{{ trail_name | json }},"trail_arn":{% if valid %}{{ trail_arn | json }}{% else %}""{% endif %},"account_id":{{ account_id | json }},"region":{{ region | json }},"alert_id":{{ raw_entry.alert_id | json }},"invalid_reason":{{ invalid_reason | json }}}{%- endcapture -%}
+        {% assign entry = entry_json | json_parse -%}
+        {% assign entries = entries | push: entry -%}
+      {% endfor -%}
+      {% assign valid_entries = entries | where: "valid", true -%}
+      {% assign trail_arns = valid_entries | map: "trail_arn" | uniq -%}
+      {% for trail_arn in trail_arns -%}
+        {% assign group = valid_entries | where: "trail_arn", trail_arn -%}
+        {% assign first_entry = group | first -%}
+        {% assign alert_ids = group | map: "alert_id" -%}
+        {% capture target_json -%}{"valid":true,"trail_name":{{ first_entry.trail_name | json }},"trail_arn":{{ trail_arn | json }},"account_id":{{ first_entry.account_id | json }},"region":{{ first_entry.region | json }},"alert_ids":{{ alert_ids | json }},"invalid_reason":""}{%- endcapture -%}
+        {% assign target = target_json | json_parse -%}
         {% assign targets = targets | push: target -%}
-      {% endif -%}
-      [{{ targets | join: "," }}]
+      {% endfor -%}
+      {% assign invalid_entries = entries | where: "valid", false -%}
+      {% for entry in invalid_entries -%}
+        {% capture target_json -%}{"valid":false,"trail_name":{{ entry.trail_name | json }},"trail_arn":"","account_id":{{ entry.account_id | json }},"region":{{ entry.region | json }},"alert_ids":[{{ entry.alert_id | json }}],"invalid_reason":{{ entry.invalid_reason | json }}}{%- endcapture -%}
+        {% assign target = target_json | json_parse -%}
+        {% assign targets = targets | push: target -%}
+      {% endfor -%}
+      {{ targets | json }}
 
-  # Verification failures are collected so later targets still receive their
-  # own approval and remediation attempt. The workflow fails after the loop.
-  - name: initialize_verification_failures
+  # Invalid targets and verification failures are collected so later targets
+  # still receive their own approval and remediation attempt. The workflow
+  # fails after the loop when either collection is non-empty.
+  - name: initialize_failure_tracking
     type: data.set
     with:
       verification_failures: ""
+      invalid_targets: ""
 
   - name: process_targets
     type: foreach
@@ -314,7 +220,10 @@ steps:
                 Region: {{ steps.set_target.output.region }}
                 Alerts: {{ steps.set_target.output.alert_ids }}
                 Pre-change GetTrailStatus response:
-                {{ steps.get_trail_status_before.output.data | json }}
+
+                ~~~json
+                {{ steps.get_trail_status_before.output.data | json: 2 }}
+                ~~~
               schema:
                 type: object
                 properties:
@@ -413,21 +322,28 @@ steps:
                 for alerts {{ steps.set_target.output.alert_ids }} because
                 the target could not be canonicalized safely:
                 {{ steps.set_target.output.invalid_reason }}.
+          - name: record_invalid_target
+            type: data.set
+            with:
+              invalid_targets: >-
+                {% if variables.invalid_targets == blank %}{{ steps.set_target.output.alert_ids }} ({{ steps.set_target.output.invalid_reason }}){% else %}{{ variables.invalid_targets }}, {{ steps.set_target.output.alert_ids }} ({{ steps.set_target.output.invalid_reason }}){% endif %}
 
-  - name: fail_after_all_targets_if_unverified
+  - name: fail_after_all_targets_on_recorded_failure
     type: if
-    condition: "${{ variables.verification_failures != blank }}"
+    condition: "${{ variables.verification_failures != blank or variables.invalid_targets != blank }}"
     steps:
       - name: log_verification_failure_summary
         type: console
         with:
-          message: >-
-            Outcome: verification_failed; all distinct CloudTrail targets were
-            processed, but logging was not verified for:
-            {{ variables.verification_failures }}.
+          message: |-
+            Outcome: failed; all CloudTrail targets were processed, but one or more targets were invalid or logging was not verified.
+            Unverified trails: {{ variables.verification_failures | default: '(none)' }}.
+            Invalid targets: {{ variables.invalid_targets | default: '(none)' }}.
       - name: fail_verification_summary
         type: workflow.fail
         with:
           message: >-
-            CloudTrail logging restoration was not verified for:
-            {{ variables.verification_failures }}.
+            CloudTrail logging restoration completed with failures. Unverified
+            trails: {{ variables.verification_failures | default: '(none)' }}.
+            Invalid targets:
+            {{ variables.invalid_targets | default: '(none)' }}.
