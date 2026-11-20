@@ -217,10 +217,16 @@ steps:
                     preserving concurrent changes is a hard requirement.
 
                     Initial review-only response:
-                    {{ steps.describe_network_interface_for_review.output.data | json }}
+
+                    ~~~xml
+                    {{ steps.describe_network_interface_for_review.output.data }}
+                    ~~~
 
                     State proposed for final approval:
-                    {{ steps.describe_network_interface_for_final_approval.output.data | json }}
+
+                    ~~~xml
+                    {{ steps.describe_network_interface_for_final_approval.output.data }}
+                    ~~~
 
                     Canonical security-group set proposed for final approval:
                     {{ steps.canonicalize_group_set_for_final_approval.output.canonical_group_set }}
