@@ -117,7 +117,11 @@ steps:
                 **Owner source:** {{ variables.expected_bucket_owner_source }}
                 Alert: {{ variables.alert_id }}
                 {% if steps.classify_pre_read.output.state == 'absent' %}Pre-change state: absent. S3 returned NoSuchPublicAccessBlockConfiguration, so no bucket-level configuration existed.{% else %}Pre-change state: returned. GetPublicAccessBlock response:
-                {{ steps.get_public_access_block_before.output.data }}{% endif %}
+
+                ~~~xml
+                {{ steps.get_public_access_block_before.output.data }}
+                ~~~
+                {% endif %}
               schema:
                 type: object
                 properties:
@@ -229,8 +233,7 @@ steps:
                 Region: {{ variables.region }}.
                 Expected bucket owner: {{ variables.expected_bucket_owner }}.
                 Alert: {{ variables.alert_id }}.
-                Error status: {{ steps.get_public_access_block_before.error.status | default: '(unknown)' }}.
-                Error: {{ steps.get_public_access_block_before.error.message | default: steps.get_public_access_block_before.error }}.
+                Error: {{ steps.get_public_access_block_before.error.message }}.
           - name: fail_pre_read
             type: workflow.fail
             with:
