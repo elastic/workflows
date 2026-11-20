@@ -243,8 +243,8 @@ steps:
                     with:
                       method: GET
                       url: "{{ consts.whois_base_url }}/{{ steps.set_download_context.output.whois_domain }}"
-                    headers:
-                      Accept: "application/json"
+                      headers:
+                        Accept: "application/json"
 
                   - name: read_whois_dates
                     type: data.set
