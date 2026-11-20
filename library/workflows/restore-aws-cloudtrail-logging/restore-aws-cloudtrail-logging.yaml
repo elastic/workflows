@@ -148,18 +148,19 @@ steps:
         {% assign entries = entries | push: entry -%}
       {% endfor -%}
       {% assign valid_entries = entries | where: "valid", true -%}
+      {% assign invalid_entries = entries | where: "valid", false -%}
+      {%- comment -%}Invalid targets come first so their diagnostics are recorded before any AWS request or approval wait.{%- endcomment -%}
+      {% for entry in invalid_entries -%}
+        {% capture target_json -%}{"valid":false,"trail_name":{{ entry.trail_name | json }},"trail_arn":"","account_id":{{ entry.account_id | json }},"region":{{ entry.region | json }},"alert_ids":[{{ entry.alert_id | json }}],"invalid_reason":{{ entry.invalid_reason | json }}}{%- endcapture -%}
+        {% assign target = target_json | json_parse -%}
+        {% assign targets = targets | push: target -%}
+      {% endfor -%}
       {% assign trail_arns = valid_entries | map: "trail_arn" | uniq -%}
       {% for trail_arn in trail_arns -%}
         {% assign group = valid_entries | where: "trail_arn", trail_arn -%}
         {% assign first_entry = group | first -%}
         {% assign alert_ids = group | map: "alert_id" -%}
         {% capture target_json -%}{"valid":true,"trail_name":{{ first_entry.trail_name | json }},"trail_arn":{{ trail_arn | json }},"account_id":{{ first_entry.account_id | json }},"region":{{ first_entry.region | json }},"alert_ids":{{ alert_ids | json }},"invalid_reason":""}{%- endcapture -%}
-        {% assign target = target_json | json_parse -%}
-        {% assign targets = targets | push: target -%}
-      {% endfor -%}
-      {% assign invalid_entries = entries | where: "valid", false -%}
-      {% for entry in invalid_entries -%}
-        {% capture target_json -%}{"valid":false,"trail_name":{{ entry.trail_name | json }},"trail_arn":"","account_id":{{ entry.account_id | json }},"region":{{ entry.region | json }},"alert_ids":[{{ entry.alert_id | json }}],"invalid_reason":{{ entry.invalid_reason | json }}}{%- endcapture -%}
         {% assign target = target_json | json_parse -%}
         {% assign targets = targets | push: target -%}
       {% endfor -%}
