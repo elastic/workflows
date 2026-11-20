@@ -8,14 +8,15 @@ template-metadata:
     UninstallString was written in the same window. Run this when an alert is
     a malicious Windows Installer detection, such as a behavior alert for
     msiexec.exe. It attempts to uninstall any package installed on that host
-    in the 5 minutes around the alert, not only a package named in the alert.
+    in the 5 minutes before the alert and the 5 minutes after it, not only a package named in the alert.
     Windows installs are not a frequent activity. agent.id and the alert time
     select the host and the window. msiexec.exe UninstallString registry
     events supply the product code, and Elastic Defend runs msiexec.exe /x
     for each code. The raw uninstall string is not executed. A legitimate
     install in that window is removed too. The workflow log and a new case
     name the Publisher and product from registry events with the same
-    process.entity_id. The case title starts with "MSI Cleanup workflow - "
+    process.entity_id. A case is also opened when the uninstall action is
+    not accepted. The case title starts with "MSI Cleanup workflow - "
     and the agent id.
   solutions: [security]
   categories: [response]
@@ -40,7 +41,7 @@ description: >
   UninstallString was written in the same window. Run this when the alert is
   a malicious Windows Installer detection, such as a behavior alert for
   msiexec.exe. It attempts to uninstall any package installed on that host
-  in the 5 minutes around the alert, not only a package named in the alert.
+  in the 5 minutes before the alert and the 5 minutes after it, not only a package named in the alert.
   Windows installs are not a frequent activity. Pass agent_id and alert_time
   to run it manually. The workflow reads agent.id and
   kibana.alert.original_time from the alert. It searches
@@ -51,7 +52,8 @@ description: >
   product codes are removed. A legitimate install in that window is removed
   too. Each submitted uninstall is logged with the Publisher, ProductName,
   and DisplayName from registry events that share the msiexec
-  process.entity_id, and a case is opened. The case title starts with
+  process.entity_id, and a case is opened. A case is also opened when the
+  uninstall action is not accepted. The case title starts with
   "MSI Cleanup workflow - " and the agent id.
 enabled: true
 tags:
@@ -213,21 +215,36 @@ steps:
                         {%- assign ready = 'no' -%}
                         {%- assign product_code = '' -%}
                         {%- assign reason = 'registry.data.strings has no MSI product code.' -%}
+                        {%- assign segments = guid_body | split: '-' -%}
+                        {%- assign seg_count = segments | size -%}
+                        {%- assign s0 = segments[0] | default: '' | size -%}
+                        {%- assign s1 = segments[1] | default: '' | size -%}
+                        {%- assign s2 = segments[2] | default: '' | size -%}
+                        {%- assign s3 = segments[3] | default: '' | size -%}
+                        {%- assign s4 = segments[4] | default: '' | size -%}
+                        {%- assign switch_ok = 'no' -%}
+                        {%- if lower contains '/x{' or lower contains '/i{' or lower contains '/x {' or lower contains '/i {' -%}
+                        {%- assign switch_ok = 'yes' -%}
+                        {%- endif -%}
                         {%- if lower contains 'msiexec' -%}
-                        {%- if guid_body.size == 36 -%}
-                        {%- if compact.size == 32 -%}
-                        {%- if hex_left == '' -%}
+                        {%- if switch_ok == 'yes' -%}
+                        {%- if after contains '}' -%}
+                        {%- if seg_count == 5 and s0 == 8 and s1 == 4 and s2 == 4 and s3 == 4 and s4 == 12 -%}
+                        {%- if compact.size == 32 and hex_left == '' -%}
                         {%- assign ready = 'yes' -%}
                         {%- assign product_code = '{' | append: guid_body | append: '}' -%}
                         {%- assign reason = '' -%}
                         {%- else -%}
-                        {%- assign reason = 'Product code is not a GUID.' -%}
+                        {%- assign reason = 'Product code is not an 8-4-4-4-12 GUID.' -%}
                         {%- endif -%}
                         {%- else -%}
-                        {%- assign reason = 'Product code is not a GUID.' -%}
+                        {%- assign reason = 'Product code is not an 8-4-4-4-12 GUID.' -%}
                         {%- endif -%}
                         {%- else -%}
-                        {%- assign reason = 'Product code is not a GUID.' -%}
+                        {%- assign reason = 'Product code is not an 8-4-4-4-12 GUID.' -%}
+                        {%- endif -%}
+                        {%- else -%}
+                        {%- assign reason = 'UninstallString has no /I or /X product code.' -%}
                         {%- endif -%}
                         {%- else -%}
                         {%- assign reason = 'UninstallString is not an msiexec command.' -%}
@@ -419,61 +436,77 @@ steps:
                             type: console
                             with:
                               message: "Uninstall submitted for {{ steps.read_product_code.output.product_code }} on agent {{ steps.set_alert_context.output.agent_id }}. DisplayName {{ steps.read_product_names.output.display_name | default: 'unknown' }}. ProductName {{ steps.read_product_names.output.product_name | default: 'unknown' }}. Publisher {{ steps.read_product_names.output.publisher | default: 'unknown' }}. process.entity_id {{ steps.read_entity_id.output.entity_id }}. Log C:\\Windows\\Temp\\msi-removal-{{ steps.read_product_code.output.log_id }}.log."
-                          - name: create_uninstall_case
-                            type: cases.createCase
-                            on-failure:
-                              continue: true
-                            with:
-                              title: "{{ steps.read_product_names.output.case_title }}"
-                              description: |
-                                MSI Cleanup workflow attempted to uninstall a recently installed package on this agent. The package is any MSI whose UninstallString was written in the search window, not only a package named in the alert.
-
-                                Agent id: {{ steps.set_alert_context.output.agent_id }}
-                                Product code: {{ steps.read_product_code.output.product_code }}
-                                DisplayName: {{ steps.read_product_names.output.display_name | default: 'unknown' }}
-                                ProductName: {{ steps.read_product_names.output.product_name | default: 'unknown' }}
-                                Publisher: {{ steps.read_product_names.output.publisher | default: 'unknown' }}
-                                process.entity_id: {{ steps.read_entity_id.output.entity_id }}
-                                Command: msiexec.exe /x {{ steps.read_product_code.output.product_code }} /qn /norestart /L*v C:\Windows\Temp\msi-removal-{{ steps.read_product_code.output.log_id }}.log
-                              owner: securitySolution
-                              severity: medium
-                              tags:
-                                - msi-cleanup
-                              settings:
-                                syncAlerts: false
-                          - name: note_source_alert
+                          - name: note_uninstall_submitted
                             type: data.set
                             with:
-                              attach: "{% assign id = event.alerts[0]._id | default: '' | append: '' | strip %}{% assign index = event.alerts[0]._index | default: '' | append: '' | strip %}{% if id != '' and index != '' %}yes{% else %}no{% endif %}"
-                              alert_id: "{{ event.alerts[0]._id | default: '' | append: '' | strip }}"
-                              alert_index: "{{ event.alerts[0]._index | default: '' | append: '' | strip }}"
-                              rule_id: "{{ event.alerts[0].kibana.alert.rule.uuid | default: event.rule.id | default: '' | append: '' | strip }}"
-                              rule_name: "{{ event.alerts[0].kibana.alert.rule.name | default: event.rule.name | default: '' | append: '' | strip }}"
-                          - name: when_case_and_alert
-                            type: if
-                            condition: "not steps.create_uninstall_case.error: * and steps.note_source_alert.output.attach: \"yes\""
-                            steps:
-                              - name: attach_source_alert
-                                type: cases.addAlerts
-                                on-failure:
-                                  continue: true
-                                with:
-                                  case_id: "{{ steps.create_uninstall_case.output.case.id }}"
-                                  alerts:
-                                    - alertId: "{{ steps.note_source_alert.output.alert_id }}"
-                                      index: "{{ steps.note_source_alert.output.alert_index }}"
-                                      rule:
-                                        id: "{{ steps.note_source_alert.output.rule_id }}"
-                                        name: "{{ steps.note_source_alert.output.rule_name }}"
-                          - name: log_case
-                            type: console
-                            with:
-                              message: "{% if steps.create_uninstall_case.error == blank %}Case opened: {{ steps.read_product_names.output.case_title }}.{% else %}Case was not opened for {{ steps.read_product_code.output.product_code }}. {{ steps.create_uninstall_case.error.message }}{% endif %}"
+                              outcome: submitted
+                              detail: ""
                         else:
                           - name: log_uninstall_failed
                             type: console
                             with:
                               message: "Uninstall was not submitted for {{ steps.read_product_code.output.product_code }}. {{ steps.uninstall_package.error.message }}"
+                          - name: note_uninstall_failed
+                            type: data.set
+                            with:
+                              outcome: failed
+                              detail: "{{ steps.uninstall_package.error.message | default: '' | append: '' }}"
+                      - name: create_uninstall_case
+                        type: cases.createCase
+                        on-failure:
+                          continue: true
+                        with:
+                          title: "{% assign label = steps.read_product_names.output.label | default: steps.read_product_code.output.product_code %}{% assign title = 'MSI Cleanup workflow - ' | append: steps.set_alert_context.output.agent_id %}{% if variables.outcome == 'failed' %}{% assign title = title | append: ' - uninstall failed' %}{% endif %}{% assign title = title | append: ' - ' | append: label %}{{ title | slice: 0, 160 }}"
+                          description: |
+                            {% if variables.outcome == 'failed' %}MSI Cleanup workflow could not submit the uninstall. The package may still be installed.
+                            {% else %}MSI Cleanup workflow submitted an uninstall for a recently installed package on this agent. Removal is not verified after Defend accepts the action.
+                            {% endif %}
+                            The package is any MSI whose UninstallString was written from 5 minutes before the alert to 5 minutes after it, not only a package named in the alert.
+
+                            Result: {{ variables.outcome }}
+                            {% if variables.outcome == 'failed' %}Error: {{ variables.detail }}
+                            {% endif %}
+                            Agent id: {{ steps.set_alert_context.output.agent_id }}
+                            Product code: {{ steps.read_product_code.output.product_code }}
+                            DisplayName: {{ steps.read_product_names.output.display_name | default: 'unknown' }}
+                            ProductName: {{ steps.read_product_names.output.product_name | default: 'unknown' }}
+                            Publisher: {{ steps.read_product_names.output.publisher | default: 'unknown' }}
+                            process.entity_id: {{ steps.read_entity_id.output.entity_id }}
+                            Command: msiexec.exe /x {{ steps.read_product_code.output.product_code }} /qn /norestart /L*v C:\Windows\Temp\msi-removal-{{ steps.read_product_code.output.log_id }}.log
+                          owner: securitySolution
+                          severity: medium
+                          tags:
+                            - msi-cleanup
+                          settings:
+                            syncAlerts: false
+                      - name: note_source_alert
+                        type: data.set
+                        with:
+                          attach: "{% assign id = event.alerts[0]._id | default: '' | append: '' | strip %}{% assign index = event.alerts[0]._index | default: '' | append: '' | strip %}{% if id != '' and index != '' %}yes{% else %}no{% endif %}"
+                          alert_id: "{{ event.alerts[0]._id | default: '' | append: '' | strip }}"
+                          alert_index: "{{ event.alerts[0]._index | default: '' | append: '' | strip }}"
+                          rule_id: "{{ event.alerts[0].kibana.alert.rule.uuid | default: event.rule.id | default: '' | append: '' | strip }}"
+                          rule_name: "{{ event.alerts[0].kibana.alert.rule.name | default: event.rule.name | default: '' | append: '' | strip }}"
+                      - name: when_case_and_alert
+                        type: if
+                        condition: "not steps.create_uninstall_case.error: * and steps.note_source_alert.output.attach: \"yes\""
+                        steps:
+                          - name: attach_source_alert
+                            type: cases.addAlerts
+                            on-failure:
+                              continue: true
+                            with:
+                              case_id: "{{ steps.create_uninstall_case.output.case.id }}"
+                              alerts:
+                                - alertId: "{{ steps.note_source_alert.output.alert_id }}"
+                                  index: "{{ steps.note_source_alert.output.alert_index }}"
+                                  rule:
+                                    id: "{{ steps.note_source_alert.output.rule_id }}"
+                                    name: "{{ steps.note_source_alert.output.rule_name }}"
+                      - name: log_case
+                        type: console
+                        with:
+                          message: "{% if steps.create_uninstall_case.error == blank %}Case opened ({{ variables.outcome }}): {{ steps.create_uninstall_case.output.case.title | default: steps.read_product_names.output.case_title }}.{% else %}Case was not opened for {{ steps.read_product_code.output.product_code }}. {{ steps.create_uninstall_case.error.message }}{% endif %}"
                   - name: when_skipped
                     type: if
                     condition: 'steps.decide_uninstall.output.go: "no"'
