@@ -385,6 +385,13 @@ steps:
                 Alert: {{ variables.alert_id }}.
                 DescribeNetworkInterfaces response:
                 {{ steps.describe_network_interface_for_review.output.data | json }}
+          - name: fail_vpc_mismatch
+            type: workflow.fail
+            with:
+              message: >-
+                Quarantine stopped before approval because network interface
+                {{ variables.network_interface_id }} was not verified in
+                configured isolation VPC {{ consts.isolation_vpc_id }}.
     else:
       - name: log_missing_target
         type: console
@@ -396,3 +403,9 @@ steps:
             aws.cloudtrail.flattened.request_parameters.networkInterfaceId, or
             manual network_interface_id was missing, or cloud.region/manual
             region was missing.
+      - name: fail_missing_target
+        type: workflow.fail
+        with:
+          message: >-
+            EC2 network-interface quarantine requires a network interface ID
+            and AWS Region.
