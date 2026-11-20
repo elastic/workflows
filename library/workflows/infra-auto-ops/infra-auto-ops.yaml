@@ -1,0 +1,430 @@
+template-metadata:
+  slug: infra-auto-ops
+  version: "1.2.0"
+  availability: ">=9.6.0"
+  name: "Infrastructure Auto-ops (no APM)"
+  description: >-
+    Inventory infra metric datasets without APM. Unsupported types get a Stream
+    shell + Observability gap Case; supported families get Stream + dashboard/SLO
+    + Universal alerts. Database Integration datasets are owned by
+    db-monitoring-auto-dashboards (SKIP).
+  solutions: [observability]
+  categories: [monitoring, case-management, ai-agent]
+  install:
+    form:
+      - name: agent-id
+        label: "Agent Builder agent ID"
+        description: >-
+          Agent Builder agent used for classify / Stream / Case / Universal alert steps.
+          Default agent is elastic-ai-agent.
+        inputType: text
+        required: true
+        default: "elastic-ai-agent"
+      - name: metrics-index
+        label: "Infrastructure metrics index pattern"
+        description: >-
+          Elasticsearch index / data stream pattern for host, K8s, and other infra metrics
+          (OTel hostmetrics / kubeletstats / etc.).
+        inputType: esIndex
+        required: true
+        default: "metrics-*"
+
+name: Infrastructure Auto-ops (no APM)
+description: >
+  Hourly (and on demand): inventory infra metric datasets (no APM), then the
+  default agent (elastic-ai-agent) classifies each type — for unsupported/unknown
+  types ensure a Stream shell + Observability gap Case; for supported families ensure
+  Stream + dashboard / SLO / Universal alerts. DB Integration datasets are skipped
+  (owned by db-monitoring-auto-dashboards).
+enabled: true
+tags:
+  - auto-ops
+  - infrastructure
+  - no-apm
+triggers:
+  - type: manual
+  - type: scheduled
+    with:
+      every: 1h
+settings:
+  # Agents are 20m + 15m; keep headroom above the sum so neither is killed mid-run.
+  timeout: 45m
+  concurrency:
+    key: "{{ workflow.id }}"
+    strategy: drop
+    max: 1
+consts:
+  agent_id: __install__.agent-id
+  metrics_index: __install__.metrics-index
+  # What Auto-ops can stand up assets for today (expand over time).
+  supported_families: |
+    host_system          # hostmetrics / system CPU·mem·disk·net
+    k8s_cluster          # kubeletstats / k8sclusterreceiver
+    process_runtime      # process CPU / memory
+    database_postgresql  # postgresql* / postgresqlreceiver
+    database_mysql       # mysql*
+    database_redis       # redis* / redisreceiver
+    database_sqlserver   # microsoft_sqlserver* / mssql* / sqlserverreceiver
+    database_mongodb     # mongodb*
+    database_oracle      # oracle*
+    database_db2         # db2*
+    web_nginx            # nginxreceiver
+    cloud_aws
+    cloud_azure
+    cloud_gcp
+  # Owned by workflow db-monitoring-auto-dashboards (Auto: DB boards) — never Case as infra gaps.
+  db_owned_dataset_prefixes: |
+    postgresql.
+    mysql.
+    redis.
+    microsoft_sqlserver.
+    mssql.
+    mongodb.
+    oracle.
+    db2.
+  # Prefer these OTel field names (avoid Metricbeat host.cpu.usage /
+  # system.cpu.total.norm.pct — unmapped or float/double ambiguous on metrics-*).
+  preferred_fields: |
+    metrics.system.cpu.utilization | system.cpu.utilization
+    metrics.system.memory.utilization | system.memory.utilization
+    metrics.k8s.container.restarts | k8s.container.restarts
+    metrics.process.cpu.utilization | process.cpu.utilization
+    host.name | k8s.pod.name | cloud.provider
+  catalog_alerts: |
+    Auto: Infra Host CPU High
+    Auto: Infra Host Memory High
+    Auto: Infra K8s Container Restart Spike
+
+steps:
+  - name: ensure_tag_auto
+    type: kibana.request
+    on-failure:
+      continue: true
+    with:
+      method: PUT
+      path: /api/tags/auto
+      headers:
+        Elastic-Api-Version: "2023-10-31"
+      body:
+        name: auto
+        description: Auto-ops generated assets
+        color: "#00BFB3"
+
+  - name: ensure_tag_infra
+    type: kibana.request
+    on-failure:
+      continue: true
+    with:
+      method: PUT
+      path: /api/tags/infrastructure
+      headers:
+        Elastic-Api-Version: "2023-10-31"
+      body:
+        name: infrastructure
+        description: Infrastructure monitoring Auto-ops
+        color: "#F04E98"
+
+  - name: list_streams
+    type: kibana.streams.list
+    on-failure:
+      continue: true
+
+  - name: detect_infra_datasets
+    type: elasticsearch.esql.query
+    on-failure:
+      continue: true
+    with:
+      format: json
+      query: |
+        SET unmapped_fields="nullify";
+        FROM {{ consts.metrics_index }}
+        | WHERE @timestamp > NOW() - 2 hours
+            AND data_stream.dataset IS NOT NULL
+        | STATS docs = COUNT(*), hosts = COUNT_DISTINCT(host.name) BY data_stream.dataset, data_stream.namespace
+        | SORT docs DESC
+        | LIMIT 40
+
+  # Cheap presence probe — only fields known to exist on OTel hostmetrics/kubelet
+  - name: detect_supported_signals
+    type: elasticsearch.esql.query
+    on-failure:
+      continue: true
+    with:
+      format: json
+      query: |
+        SET unmapped_fields="nullify";
+        FROM {{ consts.metrics_index }}
+        | WHERE @timestamp > NOW() - 2 hours
+        | STATS
+            host_cpu = COUNT(*) WHERE `metrics.system.cpu.utilization` IS NOT NULL OR system.cpu.utilization IS NOT NULL,
+            host_mem = COUNT(*) WHERE `metrics.system.memory.utilization` IS NOT NULL OR system.memory.utilization IS NOT NULL,
+            k8s_restarts = COUNT(*) WHERE `metrics.k8s.container.restarts` IS NOT NULL OR `k8s.container.restarts` IS NOT NULL,
+            process_cpu = COUNT(*) WHERE `metrics.process.cpu.utilization` IS NOT NULL OR process.cpu.utilization IS NOT NULL,
+            hosts = COUNT_DISTINCT(host.name),
+            pods = COUNT_DISTINCT(k8s.pod.name),
+            docs = COUNT(*)
+
+  - name: list_dashboards
+    type: kibana.request
+    on-failure:
+      continue: true
+    with:
+      method: GET
+      path: /api/dashboards
+      query:
+        page: "1"
+      headers:
+        Elastic-Api-Version: "2023-10-31"
+
+  - name: list_universal_rules
+    type: kibana.request
+    on-failure:
+      continue: true
+    with:
+      method: GET
+      path: /api/alerting/v2/rules
+      headers:
+        Elastic-Api-Version: "2023-10-31"
+
+  - name: list_slos
+    type: kibana.request
+    on-failure:
+      continue: true
+    with:
+      method: GET
+      path: /api/observability/slos
+      query:
+        perPage: "100"
+      headers:
+        Elastic-Api-Version: "2023-10-31"
+
+  - name: list_open_gap_cases
+    type: kibana.request
+    on-failure:
+      continue: true
+    with:
+      method: GET
+      path: /api/cases/_find
+      query:
+        owner: observability
+        status: open
+        tags: gap
+        perPage: "20"
+        page: "1"
+        sortField: createdAt
+        sortOrder: desc
+      headers:
+        Elastic-Api-Version: "2023-10-31"
+
+  # Default agent owns classify → Stream shell + gap Case OR Stream + assets
+  - name: agent_infra_auto_ops
+    type: ai.agent
+    agent-id: "{{ consts.agent_id }}"
+    with:
+      message: |
+        You are the **default Elastic AI Agent** running Infrastructure Auto-ops
+        (infra monitoring **without APM**).
+
+        ## Goal
+        For each live infra metric type:
+        1. **UNSUPPORTED / unknown** → **ensure a Stream shell** + open / refresh **one**
+           Observability **gap Case** (customer-facing catalog of uncovered types — not a
+           product ticket). Optionally attach a minimal gap dashboard to that Stream.
+        2. **SUPPORTED** → ensure a **Stream**, then gap-only create **dashboard + SLO** assets
+           (Universal alerts = next step).
+
+        ## Supported family catalog
+        ```
+        {{ consts.supported_families }}
+        ```
+
+        ## Preferred ES|QL fields (use these — do not invent Metricbeat paths)
+        Start every ES|QL base with `SET unmapped_fields="nullify";`.
+        ```
+        {{ consts.preferred_fields }}
+        ```
+
+        ## Live context
+        Streams:
+        ```
+        {{ steps.list_streams.output | json }}
+        ```
+
+        Datasets (2h):
+        ```
+        {{ steps.detect_infra_datasets.output | json }}
+        ```
+
+        Signal probe:
+        ```
+        {{ steps.detect_supported_signals.output | json }}
+        ```
+
+        Existing dashboards:
+        ```
+        {{ steps.list_dashboards.output | json }}
+        ```
+
+        Universal rules:
+        ```
+        {{ steps.list_universal_rules.output | json }}
+        ```
+
+        SLOs:
+        ```
+        {{ steps.list_slos.output | json }}
+        ```
+
+        Open gap Cases:
+        ```
+        {{ steps.list_open_gap_cases.output | json }}
+        ```
+
+        ## Stream naming
+        Classic name pattern: `metrics-<dataset>-<namespace>`
+        (e.g. `metrics-hostmetricsreceiver.otel-default`, `metrics-generic.prometheus-default`).
+        Note: Classic Streams are usually created by ingest when data lands — `PUT /api/streams/{name}`
+        updates them but often cannot create classic from scratch. If GET is 404:
+        - Prefer `POST /api/streams/{wiredParent}/_fork` when a wired metrics parent exists, OR
+        - Document in the Case that the classic shell will appear once data continues to land, OR
+        - `PUT /api/streams/{name}` if the API accepts a definition for this project.
+        Always `GET /api/streams/{name}` first; report ENSURED vs CREATED vs ALREADY_PRESENT.
+
+        ## Decision rules
+        - Map each `data_stream.dataset` → a supported family **or** UNSUPPORTED.
+        - Ignore pure APM/app datasets (`transaction*`, `service_*`, `apm.app*`) — infra-only.
+        - **DB-owned (SKIP — do not Case):** any dataset whose name starts with a prefix in:
+          ```
+          {{ consts.db_owned_dataset_prefixes }}
+          ```
+          These are covered by workflow **`db-monitoring-auto-dashboards`** (`auto-dbmon-*` boards).
+          Verdict = `SKIP_DB_OWNED`. Do **not** list them as infra gaps. Do **not** open/refresh
+          the unsupported-infra Case for them. If an open gap Case only lists DB-owned datasets
+          (or becomes empty after filtering) → **CLOSE** it with a short note that Auto: DB owns them.
+
+        ### UNSUPPORTED / unknown (Stream shell + gap Case)
+        For **each** unsupported dataset with docs > 0 (**after** excluding DB-owned + APM):
+        1. **Ensure Stream shell** named `metrics-<dataset>-<namespace>` (see Stream naming).
+           Tag / describe it as Auto-ops gap shell when the API allows.
+        2. At most ONE open Case with tags `auto-ops`, `infrastructure`, `gap`
+           (do **not** use `product-request` — this is an ops gap tracker, not a product ticket).
+           Title: `[Auto-ops] Unsupported infra metric types detected`
+           Description markdown table: dataset | docs | stream name | status (CREATED/ENSURED) | notes.
+           If Case already open → update description / one short comment with stream names; if gaps cleared → CLOSE.
+        3. Optional: minimal markdown dashboard `Auto: Infra Gap — <dataset>` linked/attached to the Stream
+           (not full Health Monitor quality). Skip Universal alerts for unsupported types.
+
+        ### SUPPORTED (Stream + full assets)
+        When samples > 0 and assets missing:
+        1. Ensure Stream `metrics-<dataset>-<namespace>` (same naming rules).
+        2. Dashboard quality bar = Observability Health Monitor style:
+           briefing + flow + scorecards + gradient trends.
+           Prefer `auto-infra-dashboard-health-monitor` / `Auto: Infra Health Monitor`.
+           Tags: `auto`, `auto-ops`, `infrastructure`.
+        3. Do **NOT** create Universal alerts here — `sync_infra_universal_alerts` owns that.
+        4. SLO `POST /api/observability/slos` — host CPU headroom, id `auto-infra-…`, gap-only.
+        5. Attach dashboard / SLO to the Stream when attachments API is available.
+
+        - Do **not** recreate healthy assets. Gap-only.
+        - Prefer kibana.request / Cases / Streams tools over inventing APIs.
+
+        ## Required end report
+        | dataset | family | verdict (SUPPORTED_ASSETS \| UNSUPPORTED_STREAM_CASE \| SKIP_DB_OWNED \| SKIP) | stream | stream_action | notes |
+        Then:
+        ## Verdict summary
+        CASES=… STREAMS_CREATED=… STREAMS_ENSURED=… DASHBOARDS=… SLO=… GAPS_REPORTED=…
+    timeout: 20m
+
+  # Dedicated Universal alert steward — only when a catalog rule is missing and its family has samples
+  - name: sync_infra_universal_alerts
+    type: ai.agent
+    agent-id: "{{ consts.agent_id }}"
+    if: '{% assign names = steps.list_universal_rules.output.items | map: "metadata" | map: "name" %}{% assign cpu_ok = names contains "Auto: Infra Host CPU High" %}{% assign mem_ok = names contains "Auto: Infra Host Memory High" %}{% assign k8s_ok = names contains "Auto: Infra K8s Container Restart Spike" %}{% if cpu_ok and mem_ok and k8s_ok %}steps.detect_supported_signals.output.values.0.0 > 999999999{% else %}steps.detect_supported_signals.output.values.0.0 > 0 or steps.detect_supported_signals.output.values.0.1 > 0 or steps.detect_supported_signals.output.values.0.2 > 0{% endif %}'
+    with:
+      message: |
+        You are the Infrastructure **Universal Alerting** steward (**no APM**).
+
+        Index pattern: `{{ consts.metrics_index }}`
+        API: prefer `PUT /api/alerting/v2/rules/{deterministic-id}` after GET 404
+        (gap-only; never overwrite tuned thresholds). Universal only — never Classic.
+
+        Signal probe:
+        {{ steps.detect_supported_signals.output | json }}
+
+        Existing Universal rules:
+        {{ steps.list_universal_rules.output | json }}
+
+        CANONICAL NAMES (exactly one Universal rule per name):
+        {{ consts.catalog_alerts }}
+
+        SHARED envelope (fill name/description/base/breach/grouping only):
+        ```json
+        {
+          "kind": "alert",
+          "metadata": {
+            "name": "<NAME>",
+            "description": "<DESC>",
+            "tags": ["infrastructure", "auto-ops", "universal", "infra"],
+            "routing_tags": ["infra"]
+          },
+          "schedule": { "every": "5m", "lookback": "15m" },
+          "time_field": "@timestamp",
+          "query": {
+            "base": "<BASE_ESQL>",
+            "breach": { "segment": "<BREACH_SEGMENT>" }
+          },
+          "grouping": { "fields": ["<FIELD>"] },
+          "recovery": { "strategy": "no_breach" },
+          "no_data": { "strategy": "ignore" }
+        }
+        ```
+
+        RULE BODIES (create ONLY if metadata.name absent; skip family if probe samples == 0).
+        Every base MUST start with `SET unmapped_fields="nullify";`.
+
+        1) Auto: Infra Host CPU High — id `auto-infra-host-cpu-high` — when host_cpu > 0
+        base:
+        SET unmapped_fields="nullify";
+        FROM {{ consts.metrics_index }}
+        | WHERE @timestamp >= ?_tstart AND @timestamp <= ?_tend
+            AND host.name IS NOT NULL
+            AND (`metrics.system.cpu.utilization` IS NOT NULL OR system.cpu.utilization IS NOT NULL)
+        | EVAL cpu = COALESCE(`metrics.system.cpu.utilization`, system.cpu.utilization)
+        | STATS max_cpu = MAX(cpu) BY host.name
+        | KEEP host.name, max_cpu
+        breach: `| WHERE max_cpu > 0.85`
+        grouping: host.name
+
+        2) Auto: Infra Host Memory High — id `auto-infra-host-memory-high` — when host_mem > 0
+        base:
+        SET unmapped_fields="nullify";
+        FROM {{ consts.metrics_index }}
+        | WHERE @timestamp >= ?_tstart AND @timestamp <= ?_tend
+            AND host.name IS NOT NULL
+            AND (`metrics.system.memory.utilization` IS NOT NULL OR system.memory.utilization IS NOT NULL)
+        | EVAL mem = COALESCE(`metrics.system.memory.utilization`, system.memory.utilization)
+        | STATS max_mem = MAX(mem) BY host.name
+        | KEEP host.name, max_mem
+        breach: `| WHERE max_mem > 0.90`
+        grouping: host.name
+
+        3) Auto: Infra K8s Container Restart Spike — id `auto-infra-k8s-restarts` — when k8s_restarts > 0
+        base:
+        SET unmapped_fields="nullify";
+        FROM {{ consts.metrics_index }}
+        | WHERE @timestamp >= ?_tstart AND @timestamp <= ?_tend
+            AND (`metrics.k8s.container.restarts` IS NOT NULL OR `k8s.container.restarts` IS NOT NULL)
+            AND k8s.pod.name IS NOT NULL
+        | EVAL r = COALESCE(`metrics.k8s.container.restarts`, `k8s.container.restarts`)
+        | STATS max_restarts = MAX(r) BY k8s.pod.name
+        | KEEP k8s.pod.name, max_restarts
+        breach: `| WHERE max_restarts > 5`
+        grouping: k8s.pod.name
+
+        HARD RULES:
+        1) Skip if Universal rule already has that metadata.name.
+        2) Skip family with zero samples in the probe.
+        3) Do NOT create Classic rules. Do NOT create dashboards/SLOs/Cases here.
+        4) Prefer kibana.request GET then PUT `/api/alerting/v2/rules/{id}` with the envelope above.
+        5) End table: name | action (kept|created|skipped) | reason.
+    timeout: 15m
