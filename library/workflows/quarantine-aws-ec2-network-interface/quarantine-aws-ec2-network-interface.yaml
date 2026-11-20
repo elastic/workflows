@@ -14,9 +14,11 @@ template-metadata:
     ACL deny rule for traffic crossing subnet boundaries or an OS-level network
     action when live sessions must be interrupted immediately. Same-subnet
     sessions require host-level action because network ACLs do not affect that
-    traffic. CloudTrail alerts require the AWS integration's request-parameter
-    retention mode to be All or Flattened. The AWS connector requires only
-    ec2:DescribeNetworkInterfaces and
+    traffic. The final re-read narrows but cannot eliminate the non-atomic gap
+    before security-group replacement; coordinate with other ENI writers when
+    preserving concurrent changes is a hard requirement. CloudTrail alerts
+    require the AWS integration's request-parameter retention mode to be All or
+    Flattened. The AWS connector requires only ec2:DescribeNetworkInterfaces and
     ec2:ModifyNetworkInterfaceAttribute.
   solutions: [security]
   categories: [response]
@@ -60,7 +62,10 @@ description: |
   established tracked connections terminate immediately. When immediate
   interruption of live sessions is required, a reviewed network ACL deny rule
   can block traffic crossing subnet boundaries. Same-subnet sessions do not
-  cross a network ACL and require an OS-level network action.
+  cross a network ACL and require an OS-level network action. The final
+  DescribeNetworkInterfaces read narrows but cannot eliminate the non-atomic
+  gap before ModifyNetworkInterfaceAttribute. Coordinate with other writers or
+  pause their automation when concurrent ENI changes must be preserved.
 
 consts:
   isolation_security_group_id: "__install__.isolation-security-group-id"
@@ -206,8 +211,10 @@ steps:
 
                     Compare the state originally reviewed with the refreshed state
                     below. This final confirmation is required even when they appear
-                    unchanged, preventing a stale approval from overwriting a newer
-                    security-group set.
+                    unchanged. A final re-read after approval narrows the stale-state
+                    window, but AWS does not provide an atomic compare-and-swap for
+                    this replacement. Coordinate with other ENI writers when
+                    preserving concurrent changes is a hard requirement.
 
                     Initial review-only response:
                     {{ steps.describe_network_interface_for_review.output.data | json }}
@@ -237,9 +244,10 @@ steps:
                     required:
                       - approved
 
-              # Re-read after final approval to close the stale-state window.
-              # The mutation remains nested behind exact canonical groupSet
-              # equality; a changed set is audited and fails the workflow.
+              # Re-read after final approval to narrow the stale-state window.
+              # The read and replacement are not atomic. The mutation remains
+              # nested behind exact canonical groupSet equality; a changed set
+              # is audited and fails the workflow.
               - name: apply_after_final_approval
                 type: if
                 condition: "${{ steps.confirm_current_state.output.response.approved == true }}"
@@ -312,6 +320,7 @@ steps:
                             Post-mutation response for security-group membership review:
                             {{ steps.describe_network_interface_after.output.data | json }}
                             Containment limitation: this read-back shows current ENI configuration; it does not prove that existing tracked connections have terminated.
+                            Concurrency limitation: the final read and replacement are not atomic. Coordinate with other ENI writers when preserving concurrent changes is required.
                     else:
                       - name: log_stale_state_abort
                         type: console
