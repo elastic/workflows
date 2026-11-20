@@ -11,10 +11,12 @@ template-metadata:
     workflow verifies that the target interface is in the configured isolation
     VPC before requesting approval. Security-group replacement does not
     guarantee immediate termination of established connections; use a network
-    ACL deny rule or an OS-level network action when live sessions must be
-    interrupted immediately. CloudTrail alerts require the AWS integration's
-    request-parameter retention mode to be All or Flattened. The AWS connector
-    requires only ec2:DescribeNetworkInterfaces and
+    ACL deny rule for traffic crossing subnet boundaries or an OS-level network
+    action when live sessions must be interrupted immediately. Same-subnet
+    sessions require host-level action because network ACLs do not affect that
+    traffic. CloudTrail alerts require the AWS integration's request-parameter
+    retention mode to be All or Flattened. The AWS connector requires only
+    ec2:DescribeNetworkInterfaces and
     ec2:ModifyNetworkInterfaceAttribute.
   solutions: [security]
   categories: [response]
@@ -56,8 +58,9 @@ description: |
 
   Security-group replacement affects new traffic but does not guarantee that
   established tracked connections terminate immediately. When immediate
-  interruption of live sessions is required, pair this workflow with a reviewed
-  network ACL deny rule or an OS-level network action.
+  interruption of live sessions is required, a reviewed network ACL deny rule
+  can block traffic crossing subnet boundaries. Same-subnet sessions do not
+  cross a network ACL and require an OS-level network action.
 
 consts:
   isolation_security_group_id: "__install__.isolation-security-group-id"
@@ -92,8 +95,9 @@ steps:
     type: if
     condition: "${{ variables.network_interface_id != blank and variables.region != blank }}"
     steps:
-      # Retain the raw pre-change response in execution history for rollback.
-      - name: describe_network_interface_before
+      # This first read is review-only. A later read immediately before the
+      # mutation is the rollback source.
+      - name: describe_network_interface_for_review
         type: aws.request
         connector-id: __install__.aws-connector
         with:
@@ -112,7 +116,7 @@ steps:
           target_in_isolation_vpc: >-
             {%- assign expected_vpc_element = '<vpcId>' | append:
             consts.isolation_vpc_id | append: '</vpcId>' -%}
-            {%- if steps.describe_network_interface_before.output.data contains
+            {%- if steps.describe_network_interface_for_review.output.data contains
             expected_vpc_element -%}true{%- else -%}false{%- endif -%}
 
       - name: quarantine_when_vpc_matches
@@ -133,18 +137,18 @@ steps:
                 WARNING: Approval will replace the complete ENI security-group set
                 with only isolation group {{ consts.isolation_security_group_id }}.
                 Existing security groups will be removed from the ENI. Use the
-                pre-change DescribeNetworkInterfaces response retained in this
-                execution history to restore the original complete set if rollback
-                is required.
+                initial DescribeNetworkInterfaces response below to review the
+                target. It is not rollback state; the workflow captures rollback
+                state immediately before any mutation.
                 Changing security groups does not guarantee that existing tracked
                 connections terminate immediately; they can remain active until
-                connection tracking expires or the connections are closed. Use a
-                network ACL deny rule or OS-level network action when live sessions
-                must be interrupted immediately.
+                connection tracking expires or the connections are closed. A
+                network ACL deny rule can block traffic crossing subnet boundaries,
+                but same-subnet sessions require an OS-level network action.
 
                 Alert: {{ variables.alert_id }}
-                Pre-change DescribeNetworkInterfaces response:
-                {{ steps.describe_network_interface_before.output.data | json }}
+                Initial review-only DescribeNetworkInterfaces response:
+                {{ steps.describe_network_interface_for_review.output.data | json }}
               schema:
                 type: object
                 properties:
@@ -158,13 +162,13 @@ steps:
                 required:
                   - approved
 
-          # Refresh after the initial approval so the final decision and
-          # rollback evidence use the latest security-group set.
+          # Refresh after initial approval so the analyst can approve the latest
+          # security-group set. This response is still review-only.
           - name: quarantine_when_approved
             type: if
             condition: "${{ steps.request_approval.output.response.approved == true }}"
             steps:
-              - name: describe_network_interface_before_mutation
+              - name: describe_network_interface_for_final_approval
                 type: aws.request
                 connector-id: __install__.aws-connector
                 with:
@@ -174,6 +178,23 @@ steps:
                     Action: DescribeNetworkInterfaces
                     Version: "2016-11-15"
                     NetworkInterfaceId.1: "{{ variables.network_interface_id }}"
+
+              # Canonicalize the reviewed groupSet by sorting its group IDs.
+              # This makes the later comparison independent of XML item order.
+              - name: canonicalize_group_set_for_final_approval
+                type: data.set
+                with:
+                  canonical_group_set: >-
+                    {%- assign group_set_xml =
+                    steps.describe_network_interface_for_final_approval.output.data
+                    | split: '<groupSet>' | last | split: '</groupSet>' | first -%}
+                    {%- assign group_items = group_set_xml | split: '<item>' |
+                    slice: 1, 1000 | sort -%}
+                    {%- for group_item in group_items -%}
+                    {%- assign group_id = group_item | split: '<groupId>' | last |
+                    split: '</groupId>' | first | strip -%}
+                    {%- unless group_id == blank -%}|{{ group_id }}{%- endunless -%}
+                    {%- endfor -%}
 
               - name: confirm_current_state
                 type: waitForInput
@@ -188,16 +209,21 @@ steps:
                     unchanged, preventing a stale approval from overwriting a newer
                     security-group set.
 
-                    Originally reviewed response:
-                    {{ steps.describe_network_interface_before.output.data | json }}
+                    Initial review-only response:
+                    {{ steps.describe_network_interface_for_review.output.data | json }}
 
-                    Latest response retained for rollback:
-                    {{ steps.describe_network_interface_before_mutation.output.data | json }}
+                    State proposed for final approval:
+                    {{ steps.describe_network_interface_for_final_approval.output.data | json }}
+
+                    Canonical security-group set proposed for final approval:
+                    {{ steps.canonicalize_group_set_for_final_approval.output.canonical_group_set }}
 
                     WARNING: The complete current security-group set will be replaced
                     with only {{ consts.isolation_security_group_id }}. Existing
                     tracked connections can remain active until connection tracking
-                    expires or the connections are closed.
+                    expires or the connections are closed. This response is not
+                    rollback state; the workflow reads the ENI again after approval
+                    and retains that immediate pre-mutation response for rollback.
                   schema:
                     type: object
                     properties:
@@ -211,25 +237,14 @@ steps:
                     required:
                       - approved
 
-              # ModifyNetworkInterfaceAttribute is the immediate action after
-              # final approval of the refreshed state.
+              # Re-read after final approval to close the stale-state window.
+              # The mutation remains nested behind exact canonical groupSet
+              # equality; a changed set is audited and fails the workflow.
               - name: apply_after_final_approval
                 type: if
                 condition: "${{ steps.confirm_current_state.output.response.approved == true }}"
                 steps:
-                  - name: replace_security_groups
-                    type: aws.request
-                    connector-id: __install__.aws-connector
-                    with:
-                      service: ec2
-                      region: "{{ variables.region }}"
-                      query:
-                        Action: ModifyNetworkInterfaceAttribute
-                        Version: "2016-11-15"
-                        NetworkInterfaceId: "{{ variables.network_interface_id }}"
-                        SecurityGroupId.1: "{{ consts.isolation_security_group_id }}"
-
-                  - name: describe_network_interface_after
+                  - name: describe_network_interface_rollback_source
                     type: aws.request
                     connector-id: __install__.aws-connector
                     with:
@@ -240,21 +255,85 @@ steps:
                         Version: "2016-11-15"
                         NetworkInterfaceId.1: "{{ variables.network_interface_id }}"
 
-                  - name: log_quarantine_requested
-                    type: console
+                  - name: canonicalize_immediate_group_set
+                    type: data.set
                     with:
-                      message: |-
-                        Outcome: replacement_requested; the complete security-group set on AWS EC2 network interface {{ variables.network_interface_id }} was requested to be replaced with isolation security group {{ consts.isolation_security_group_id }} in {{ variables.region }}.
-                        Alert: {{ variables.alert_id }}.
-                        Initial responder: {{ steps.request_approval.output.respondedBy }}.
-                        Initial notes: {{ steps.request_approval.output.response.notes | default: '(none)' }}.
-                        Final responder: {{ steps.confirm_current_state.output.respondedBy }}.
-                        Final notes: {{ steps.confirm_current_state.output.response.notes | default: '(none)' }}.
-                        Latest pre-mutation response retained for rollback:
-                        {{ steps.describe_network_interface_before_mutation.output.data | json }}
-                        Post-mutation response for security-group membership review:
-                        {{ steps.describe_network_interface_after.output.data | json }}
-                        Containment limitation: this read-back shows current ENI configuration; it does not prove that existing tracked connections have terminated.
+                      canonical_group_set: >-
+                        {%- assign group_set_xml =
+                        steps.describe_network_interface_rollback_source.output.data
+                        | split: '<groupSet>' | last | split: '</groupSet>' | first -%}
+                        {%- assign group_items = group_set_xml | split: '<item>' |
+                        slice: 1, 1000 | sort -%}
+                        {%- for group_item in group_items -%}
+                        {%- assign group_id = group_item | split: '<groupId>' | last |
+                        split: '</groupId>' | first | strip -%}
+                        {%- unless group_id == blank -%}|{{ group_id }}{%- endunless -%}
+                        {%- endfor -%}
+
+                  - name: mutate_only_when_group_set_is_unchanged
+                    type: if
+                    condition: "${{ steps.canonicalize_immediate_group_set.output.canonical_group_set != blank and steps.canonicalize_immediate_group_set.output.canonical_group_set == steps.canonicalize_group_set_for_final_approval.output.canonical_group_set }}"
+                    steps:
+                      - name: replace_security_groups
+                        type: aws.request
+                        connector-id: __install__.aws-connector
+                        with:
+                          service: ec2
+                          region: "{{ variables.region }}"
+                          query:
+                            Action: ModifyNetworkInterfaceAttribute
+                            Version: "2016-11-15"
+                            NetworkInterfaceId: "{{ variables.network_interface_id }}"
+                            SecurityGroupId.1: "{{ consts.isolation_security_group_id }}"
+
+                      - name: describe_network_interface_after
+                        type: aws.request
+                        connector-id: __install__.aws-connector
+                        with:
+                          service: ec2
+                          region: "{{ variables.region }}"
+                          query:
+                            Action: DescribeNetworkInterfaces
+                            Version: "2016-11-15"
+                            NetworkInterfaceId.1: "{{ variables.network_interface_id }}"
+
+                      - name: log_quarantine_requested
+                        type: console
+                        with:
+                          message: |-
+                            Outcome: replacement_requested; the complete security-group set on AWS EC2 network interface {{ variables.network_interface_id }} was requested to be replaced with isolation security group {{ consts.isolation_security_group_id }} in {{ variables.region }}.
+                            Alert: {{ variables.alert_id }}.
+                            Initial responder: {{ steps.request_approval.output.respondedBy }}.
+                            Initial notes: {{ steps.request_approval.output.response.notes | default: '(none)' }}.
+                            Final responder: {{ steps.confirm_current_state.output.respondedBy }}.
+                            Final notes: {{ steps.confirm_current_state.output.response.notes | default: '(none)' }}.
+                            Immediate pre-mutation response retained as rollback source:
+                            {{ steps.describe_network_interface_rollback_source.output.data | json }}
+                            Post-mutation response for security-group membership review:
+                            {{ steps.describe_network_interface_after.output.data | json }}
+                            Containment limitation: this read-back shows current ENI configuration; it does not prove that existing tracked connections have terminated.
+                    else:
+                      - name: log_stale_state_abort
+                        type: console
+                        with:
+                          message: |-
+                            Outcome: failed_closed; no ModifyNetworkInterfaceAttribute request was made because the ENI security-group set changed after final approval or could not be canonicalized.
+                            Network interface: {{ variables.network_interface_id }}.
+                            Region: {{ variables.region }}.
+                            Alert: {{ variables.alert_id }}.
+                            Approved canonical group set: {{ steps.canonicalize_group_set_for_final_approval.output.canonical_group_set }}.
+                            Immediate canonical group set: {{ steps.canonicalize_immediate_group_set.output.canonical_group_set }}.
+                            Immediate pre-mutation response retained as rollback source:
+                            {{ steps.describe_network_interface_rollback_source.output.data | json }}
+
+                      - name: fail_stale_state
+                        type: workflow.fail
+                        with:
+                          message: >-
+                            Quarantine failed closed because the ENI security-group
+                            set changed after final approval or could not be
+                            canonicalized; no
+                            ModifyNetworkInterfaceAttribute request was made.
                 else:
                   - name: log_final_confirmation_rejected
                     type: console
@@ -267,7 +346,7 @@ steps:
                         Final responder: {{ steps.confirm_current_state.output.respondedBy }}.
                         Final notes: {{ steps.confirm_current_state.output.response.notes | default: '(none)' }}.
                         Refreshed response:
-                        {{ steps.describe_network_interface_before_mutation.output.data | json }}
+                        {{ steps.describe_network_interface_for_final_approval.output.data | json }}
             else:
               - name: log_initial_approval_rejected
                 type: console
@@ -290,13 +369,14 @@ steps:
                 Expected VPC: {{ consts.isolation_vpc_id }}.
                 Alert: {{ variables.alert_id }}.
                 DescribeNetworkInterfaces response:
-                {{ steps.describe_network_interface_before.output.data | json }}
+                {{ steps.describe_network_interface_for_review.output.data | json }}
     else:
       - name: log_missing_target
         type: console
         with:
           message: >-
-            AWS EC2 network-interface quarantine skipped because
+            Outcome: no_change; no ModifyNetworkInterfaceAttribute request was
+            made because
             aws.vpcflow.interface_id,
             aws.cloudtrail.flattened.request_parameters.networkInterfaceId, or
             manual network_interface_id was missing, or cloud.region/manual
