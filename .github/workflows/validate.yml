@@ -29,11 +29,9 @@ jobs:
             schema_url: https://workflows.elastic.co/schema/v1/serverless
             blocking: true
           - name: release
-            # Bump the version to the latest released Kibana minor. The release
-            # schema can lag templates targeting a newer stack (see
-            # `availability`), so this line reports without blocking.
+            # Bump the version to the latest released Kibana minor.
             schema_url: https://workflows.elastic.co/schema/v1/9.6.0/release
-            blocking: false
+            blocking: true
     name: validate (${{ matrix.name }})
     continue-on-error: ${{ !matrix.blocking }}
     steps:
