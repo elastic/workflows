@@ -1,0 +1,458 @@
+template-metadata:
+  slug: sentinelone-contain-malicious-endpoint
+  version: "1.0.0"
+  availability: ">=9.5.0"
+  name: "SentinelOne Contain Malicious Endpoint"
+  description: >-
+    Isolate an endpoint that SentinelOne reports as infected, but only after an
+    analyst approves. The workflow runs on a security alert, finds the endpoint
+    by host name, checks for a malicious, unresolved threat, opens or reuses a
+    Kibana case, waits for approval, isolates the endpoint, confirms the network
+    status, marks the threats true positive with a note in SentinelOne and
+    records the result on the alert and the case. You need a SentinelOne (v2)
+    connector with permission to view endpoints and threats, to disconnect
+    endpoints and to update threats.
+  solutions: [security]
+  categories: [response]
+  install:
+    form:
+      - name: sentinelone-connector
+        label: "SentinelOne (v2) connector"
+        description: "The SentinelOne connector used to find the endpoint, read its threats and isolate it."
+        inputType: connector
+        connectorType: .sentinelone2
+        required: true
+
+version: '1'
+name: SentinelOne isolate malicious endpoint with approval
+description: >-
+  When SentinelOne reports a malicious, unresolved threat on the endpoint of an
+  alert (or of a host name given on a manual run), open a Kibana case (or reuse
+  the endpoint's open one, so repeated alerts share one case), ask an
+  analyst to approve, isolate the endpoint, read its network status back until
+  it is disconnected, and record the outcome. On confirmed isolation the threats
+  are marked true positive and in progress with a note in SentinelOne, the alert
+  receives sentinelone.containment and a Timeline note, and the case is updated
+  with the remediation status. A rejection, an unconfirmed isolation and every
+  skipped run are written to the case or the console. The endpoint is isolated
+  only after approval, only when exactly one endpoint matches the host name and
+  only when it is not already disconnected or being disconnected. If two runs for
+  one host are approved together, the second skips the isolation and can fail at the
+  verdict step, because the first run has already applied it.
+tags:
+  - sentinelone
+  - edr
+  - containment
+  - response
+  - hitl
+enabled: true
+
+settings:
+  # Runs unattended until an analyst answers: 4h approval wait + 5 min status checks.
+  timeout: "5h"
+
+triggers:
+  - type: manual
+    inputs:
+      - name: hostname
+        type: string
+        required: false
+        description: Host name of the endpoint (manual runs). On alert runs host.name is used.
+      - name: alert_index
+        type: string
+        required: false
+        description: Alert index to write results to (manual runs, with alert_id).
+      - name: alert_id
+        type: string
+        required: false
+        description: Alert document ID to write results to (manual runs, with alert_index).
+  # NOTE: On alert triggers this workflow reads event.alerts[0], the FIRST alert
+  # of the batch. Enable "Run per alert" on the rule action so every alert is handled.
+  - type: alert
+
+steps:
+
+  # Host name and target alert: from the alert, falling back to the manual inputs.
+  - name: resolve_target
+    type: data.set
+    with:
+      hostname: "{{ event.alerts[0].host.name | default: inputs.hostname | default: '' }}"
+      target_index: "{{ event.alerts[0]._index | default: inputs.alert_index | default: '' }}"
+      target_id: "{{ event.alerts[0]._id | default: inputs.alert_id | default: '' }}"
+
+  # Exact host name match. limit 2 is enough to tell "one" from "several"; an empty
+  # host name is stopped by the agent_found condition below.
+  - name: find_agent
+    type: sentinelone2.getAgents
+    connector-id: __install__.sentinelone-connector
+    with:
+      computerName: "{{ variables.hostname }}"
+      limit: 2
+    on-failure:
+      retry:
+        max-attempts: 2
+        delay: 3s
+
+  # Act only on one unambiguous endpoint: never isolate an arbitrary host.
+  - name: agent_found
+    type: if
+    condition: "${{ variables.hostname != '' and steps.find_agent.output.pagination.totalItems == 1 }}"
+    steps:
+
+      # Malicious threats that are still unresolved on this endpoint.
+      - name: find_threats
+        type: sentinelone2.getThreats
+        connector-id: __install__.sentinelone-connector
+        with:
+          agentIds:
+            - "{{ steps.find_agent.output.data[0].id }}"
+          confidenceLevels:
+            - malicious
+          incidentStatuses:
+            - unresolved
+          limit: 100
+        on-failure:
+          retry:
+            max-attempts: 2
+            delay: 3s
+
+      # Isolation is only considered when there is a threat to contain and the
+      # endpoint is not already disconnected or being disconnected (repeated alerts do not isolate twice).
+      - name: should_contain
+        type: if
+        condition: "${{ steps.find_threats.output.pagination.totalItems > 0 and steps.find_agent.output.data[0].networkStatus != 'disconnected' and steps.find_agent.output.data[0].networkStatus != 'disconnecting' }}"
+        steps:
+
+          # One case per endpoint: a repeated alert (or a re-run) for the same agent
+          # reuses its open or in-progress case, found by the agent tag, instead of
+          # opening another. A failed lookup falls back to a new case.
+          - name: find_open_case
+            type: cases.findCases
+            with:
+              owner: securitySolution
+              tags: "sentinelone-agent:{{ steps.find_agent.output.data[0].id }}"
+              status:
+                - open
+                - in-progress
+              sortField: createdAt
+              sortOrder: desc
+              perPage: 1
+            on-failure:
+              continue: true
+
+          - name: open_case_found
+            type: if
+            condition: "${{ steps.find_open_case.output.total > 0 }}"
+            steps:
+              - name: reuse_case
+                type: data.set
+                with:
+                  case_id: "{{ steps.find_open_case.output.cases[0].id }}"
+            else:
+              - name: create_case
+                type: cases.createCase
+                with:
+                  title: "SentinelOne containment: {{ variables.hostname }}"
+                  description: |-
+                    SentinelOne reports {{ steps.find_threats.output.pagination.totalItems }} malicious, unresolved threat(s) on **{{ variables.hostname }}**.
+
+                    **Remediation status:** Pending approval
+                  owner: securitySolution
+                  severity: high
+                  tags:
+                    - sentinelone
+                    - containment
+                    - "remediation:pending-approval"
+                    - "sentinelone-agent:{{ steps.find_agent.output.data[0].id }}"
+                  settings:
+                    syncAlerts: false
+
+              - name: new_case
+                type: data.set
+                with:
+                  case_id: "{{ steps.create_case.output.case.id }}"
+
+          - name: case_has_alert
+            type: if
+            condition: "${{ variables.target_id != '' }}"
+            steps:
+              - name: attach_alert
+                type: cases.addAlerts
+                with:
+                  case_id: "{{ variables.case_id }}"
+                  alerts:
+                    - alertId: "{{ variables.target_id }}"
+                      index: "{{ variables.target_index }}"
+            else:
+              - name: log_no_alert
+                type: console
+                with:
+                  message: "Manual run without an alert target: no alert is attached to the case."
+
+          # The analyst decides. The step only pauses, so the `if` below is what
+          # keeps a rejection from isolating the endpoint.
+          - name: approve_isolation
+            type: waitForApproval
+            timeout: 4h
+            with:
+              message: |-
+                Isolate {{ variables.hostname }} in SentinelOne?
+
+                {{ steps.find_threats.output.pagination.totalItems }} malicious, unresolved threat(s) were found on this endpoint.
+                Approving disconnects the endpoint from the network (it keeps talking to the SentinelOne console).
+                Case: {{ variables.case_id }}
+              approveLabel: "Isolate endpoint"
+              rejectLabel: "Do not isolate"
+
+          - name: approval_given
+            type: if
+            condition: "${{ steps.approve_isolation.output.response.approved == true }}"
+            steps:
+
+              # Another run (a repeated alert) may have isolated the endpoint while this
+              # run waited for the approval: read the status again and only isolate when
+              # it is neither disconnected nor disconnecting. The check below then
+              # confirms the isolation as usual.
+              - name: recheck_agent
+                type: sentinelone2.getAgents
+                connector-id: __install__.sentinelone-connector
+                with:
+                  ids:
+                    - "{{ steps.find_agent.output.data[0].id }}"
+                on-failure:
+                  retry:
+                    max-attempts: 2
+                    delay: 3s
+
+              - name: not_yet_isolated
+                type: if
+                condition: "${{ steps.recheck_agent.output.data[0].networkStatus != 'disconnected' and steps.recheck_agent.output.data[0].networkStatus != 'disconnecting' }}"
+                steps:
+
+                  # State change: no workflow retry. The connector retries only throttled
+                  # requests SentinelOne did not process.
+                  - name: isolate
+                    type: sentinelone2.isolateHost
+                    connector-id: __install__.sentinelone-connector
+                    with:
+                      agentIds:
+                        - "{{ steps.find_agent.output.data[0].id }}"
+                    on-failure:
+                      continue: false
+
+              - name: init_poll
+                type: data.set
+                with:
+                  isolation_status: "pending"
+                  checks: 0
+
+              # Isolation is asynchronous: read the network status back every 30 s,
+              # at most 10 times (5 minutes).
+              - name: wait_for_isolation
+                type: while
+                condition: "${{ variables.isolation_status != 'disconnected' and variables.checks < 10 }}"
+                max-iterations: 10
+                steps:
+                  - name: pause
+                    type: wait
+                    with:
+                      duration: 30s
+                  - name: read_status
+                    type: sentinelone2.getAgents
+                    connector-id: __install__.sentinelone-connector
+                    with:
+                      ids:
+                        - "{{ steps.find_agent.output.data[0].id }}"
+                    on-failure:
+                      retry:
+                        max-attempts: 2
+                        delay: 3s
+                  - name: count_check
+                    type: data.set
+                    with:
+                      isolation_status: "{{ steps.read_status.output.data[0].networkStatus | default: 'unknown' }}"
+                      checks: "${{ variables.checks | plus: 1 }}"
+
+              - name: isolation_confirmed
+                type: if
+                condition: "${{ variables.isolation_status == 'disconnected' }}"
+                steps:
+
+                  # Threat records in SentinelOne: verdict, status and a note.
+                  - name: set_verdict
+                    type: sentinelone2.updateThreatVerdict
+                    connector-id: __install__.sentinelone-connector
+                    with:
+                      threatIds: "${{ steps.find_threats.output.data | map: 'id' }}"
+                      analystVerdict: true_positive
+                    on-failure:
+                      continue: false
+
+                  - name: set_status
+                    type: sentinelone2.updateThreatStatus
+                    connector-id: __install__.sentinelone-connector
+                    with:
+                      threatIds: "${{ steps.find_threats.output.data | map: 'id' }}"
+                      incidentStatus: in_progress
+                    on-failure:
+                      continue: false
+
+                  - name: add_threat_note
+                    type: sentinelone2.addThreatNote
+                    connector-id: __install__.sentinelone-connector
+                    with:
+                      threatIds: "${{ steps.find_threats.output.data | map: 'id' }}"
+                      text: "Host {{ variables.hostname }} isolated by the Elastic workflow '{{ workflow.name }}' after approval by {{ steps.approve_isolation.output.respondedBy | default: 'an analyst' }}."
+                    on-failure:
+                      continue: false
+
+                  # Alert write-back, only when the run has an alert target.
+                  - name: write_containment
+                    type: elasticsearch.update
+                    if: "${{ variables.target_id != '' }}"
+                    with:
+                      index: "{{ variables.target_index }}"
+                      id: "{{ variables.target_id }}"
+                      refresh: wait_for
+                      retry_on_conflict: 3
+                      doc:
+                        sentinelone:
+                          containment:
+                            agent_id: "{{ steps.find_agent.output.data[0].id }}"
+                            agent_name: "{{ variables.hostname }}"
+                            network_status: "{{ variables.isolation_status }}"
+                            approved_by: "{{ steps.approve_isolation.output.respondedBy | default: '' }}"
+                            isolated_at: "{{ steps.approve_isolation.output.respondedAt | default: '' }}"
+                            case_id: "{{ variables.case_id }}"
+
+                  # One note per alert: a re-run finds this workflow's own note by its
+                  # heading (the marker) and replaces it instead of adding a second one.
+                  - name: alert_note
+                    type: if
+                    condition: "${{ variables.target_id != '' }}"
+                    steps:
+                      - name: find_existing_note
+                        type: kibana.request
+                        with:
+                          method: GET
+                          path: /api/note
+                          query:
+                            documentIds: "{{ variables.target_id }}"
+                        on-failure:
+                          continue: true
+
+                      - name: prepare_note
+                        type: data.set
+                        with:
+                          existing_note_id: |-
+                            {%- assign marker = '## SentinelOne endpoint isolated' -%}
+                            {%- assign found = '' -%}
+                            {%- for n in steps.find_existing_note.output.notes -%}
+                              {%- if found == '' and n.note contains marker -%}{%- assign found = n.noteId -%}{%- endif -%}
+                            {%- endfor -%}
+                            {{ found }}
+                          note_text: |-
+                            ## SentinelOne endpoint isolated - `{{ variables.hostname }}`
+
+                            _Managed by this workflow: replaced on every run. Add your own analysis in a separate note._
+
+                            The endpoint reports `{{ variables.isolation_status }}` after approval by {{ steps.approve_isolation.output.respondedBy | default: 'an analyst' }}.
+                            Threats marked true positive and in progress in SentinelOne. Case: `{{ variables.case_id }}`.
+
+                      - name: note_exists
+                        type: if
+                        condition: "${{ variables.existing_note_id != blank }}"
+                        steps:
+                          - name: update_alert_note
+                            type: kibana.request
+                            with:
+                              method: PATCH
+                              path: /api/note
+                              body:
+                                noteId: "{{ variables.existing_note_id }}"
+                                note:
+                                  timelineId: ""
+                                  eventId: "{{ variables.target_id }}"
+                                  note: "{{ variables.note_text }}"
+                        else:
+                          - name: add_alert_note
+                            type: kibana.request
+                            with:
+                              method: PATCH
+                              path: /api/note
+                              body:
+                                note:
+                                  timelineId: ""
+                                  eventId: "{{ variables.target_id }}"
+                                  note: "{{ variables.note_text }}"
+
+                  - name: case_isolated
+                    type: cases.updateCase
+                    with:
+                      case_id: "{{ variables.case_id }}"
+                      updates:
+                        status: in-progress
+                        tags:
+                          - sentinelone
+                          - containment
+                          - "remediation:isolated"
+                          - "sentinelone-agent:{{ steps.find_agent.output.data[0].id }}"
+                        description: |-
+                          SentinelOne reported malicious, unresolved threat(s) on **{{ variables.hostname }}**.
+
+                          **Remediation status:** Isolated (network status `{{ variables.isolation_status }}`, approved by {{ steps.approve_isolation.output.respondedBy | default: 'an analyst' }})
+
+                          Last updated by [{{ workflow.name }}:{{ execution.id }}]({{ execution.url }}).
+                else:
+                  - name: case_not_confirmed
+                    type: cases.updateCase
+                    with:
+                      case_id: "{{ variables.case_id }}"
+                      updates:
+                        tags:
+                          - sentinelone
+                          - containment
+                          - "remediation:not-confirmed"
+                          - "sentinelone-agent:{{ steps.find_agent.output.data[0].id }}"
+                        description: |-
+                          SentinelOne reported malicious, unresolved threat(s) on **{{ variables.hostname }}**.
+
+                          **Remediation status:** Isolation requested, not confirmed after 5 minutes (last network status `{{ variables.isolation_status }}`). Check the endpoint in SentinelOne.
+
+                          Last updated by [{{ workflow.name }}:{{ execution.id }}]({{ execution.url }}).
+                  - name: log_not_confirmed
+                    type: console
+                    with:
+                      message: "Isolation of {{ variables.hostname }} was requested but not confirmed after 5 minutes."
+            else:
+              - name: case_rejected
+                type: cases.updateCase
+                with:
+                  case_id: "{{ variables.case_id }}"
+                  updates:
+                    status: closed
+                    tags:
+                      - sentinelone
+                      - containment
+                      - "remediation:rejected"
+                      - "sentinelone-agent:{{ steps.find_agent.output.data[0].id }}"
+                    description: |-
+                      SentinelOne reported malicious, unresolved threat(s) on **{{ variables.hostname }}**.
+
+                      **Remediation status:** Rejected by the analyst; the endpoint was not isolated.
+
+                      Last updated by [{{ workflow.name }}:{{ execution.id }}]({{ execution.url }}).
+              - name: log_rejected
+                type: console
+                with:
+                  message: "The analyst rejected the isolation of {{ variables.hostname }}."
+        else:
+          - name: log_skip
+            type: console
+            with:
+              message: "No isolation for {{ variables.hostname }}: no malicious, unresolved threat, or the endpoint is already disconnected or being disconnected."
+    else:
+      - name: log_no_agent
+        type: console
+        with:
+          message: "No isolation: no endpoint, or more than one, matched the host name '{{ variables.hostname }}'."

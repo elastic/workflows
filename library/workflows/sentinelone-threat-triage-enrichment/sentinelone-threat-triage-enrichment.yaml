@@ -1,0 +1,321 @@
+template-metadata:
+  slug: sentinelone-threat-triage-enrichment
+  version: "1.0.0"
+  availability: ">=9.5.0"
+  name: "SentinelOne Endpoint Threat Triage"
+  description: >-
+    Triage the endpoint behind a security alert with SentinelOne. Finds the
+    host, lists its recent threats with the latest threat's verdict and
+    analyst notes, checks the file reputation, and records a summary,
+    a tag and a Timeline note on the alert. Needs a SentinelOne connector.
+  solutions: [security]
+  categories: [enrichment]
+  install:
+    form:
+      - name: sentinelone-connector
+        label: "SentinelOne connector"
+        description: >-
+          The SentinelOne connector used to look up the endpoint, its threats
+          and the file reputation. If you don't have one yet, click "Create new"
+          and configure it with your SentinelOne console URL and API token.
+        inputType: connector
+        connectorType: .sentinelone2
+        required: true
+
+version: '1'
+name: SentinelOne Endpoint Threat Triage
+description: >-
+  Look up the endpoint (host name or IP address) and file hash of an alert in
+  SentinelOne, collect its recent threats, the latest threat's details and
+  analyst notes and the file reputation, and write a triage summary to
+  sentinelone.triage on the alert with the sentinelone-triaged tag and a
+  Timeline note. Read-only: no response action is taken.
+enabled: true
+
+tags:
+  - security
+  - edr
+  - sentinelone
+  - triage
+
+settings:
+  timeout: "10m"
+
+consts:
+  empty_arr: []
+
+# For the alert trigger, set "Run per alert" on the rule action.
+triggers:
+  - type: alert
+  - type: manual
+    inputs:
+      - name: hostname
+        type: string
+        required: false
+        description: >-
+          Host name to look up. Leave blank when running against an alert,
+          host.name is read from the alert instead.
+      - name: ip
+        type: string
+        required: false
+        description: >-
+          Internal IP address to look up when no host name is known.
+      - name: file_hash
+        type: string
+        required: false
+        description: >-
+          File SHA1 (40 hex characters) to look up. Leave blank when running
+          against an alert, file.hash.sha1 is read from the alert instead.
+      - name: alert_index
+        type: string
+        required: false
+        description: >-
+          Concrete alert index to annotate (with alert_id). Filled in
+          automatically when the workflow is started from the alert table.
+      - name: alert_id
+        type: string
+        required: false
+        description: >-
+          Alert document _id to annotate (with alert_index). Filled in
+          automatically when the workflow is started from the alert table.
+
+steps:
+  # Entity from the alert first, manual inputs as the fallback.
+  - name: resolve_target
+    type: data.set
+    with:
+      target_index: "{{ event.alerts[0]._index | default: inputs.alert_index }}"
+      target_id: "{{ event.alerts[0]._id | default: inputs.alert_id }}"
+      hostname: "{{ event.alerts[0].host.name | default: inputs.hostname }}"
+      ip: "{{ event.alerts[0].host.ip | join: ',' | split: ',' | first | default: inputs.ip }}"
+      file_hash: "{{ event.alerts[0].file.hash.sha1 | default: event.alerts[0].process.hash.sha1 | default: inputs.file_hash }}"
+
+  - name: has_entity
+    type: if
+    condition: "${{ variables.hostname != blank or variables.ip != blank or variables.file_hash != blank }}"
+    steps:
+
+      - name: host_known
+        type: if
+        condition: "${{ variables.hostname != blank or variables.ip != blank }}"
+        steps:
+          # Exact host name when known, otherwise the internal IP (contains match).
+          - name: find_agent
+            type: sentinelone2.getAgents
+            connector-id: __install__.sentinelone-connector
+            with:
+              computerName: "{{ variables.hostname }}"
+              ip: "{{ variables.ip }}"
+              limit: 1
+            on-failure:
+              retry:
+                max-attempts: 2
+                delay: 2s
+
+      # The threat filter is built as JSON so that exactly one filter is sent:
+      # the agent when one was found, otherwise a valid SHA1. With neither,
+      # the lookup is skipped (an unfiltered search would list every threat).
+      - name: build_threat_query
+        type: data.parseJson
+        source: |-
+          {%- assign agent_id = steps.find_agent.output.data[0].id | default: '' -%}
+          {%- assign sha = variables.file_hash | default: '' -%}
+          {%- if agent_id != '' -%}{"agentIds":["{{ agent_id }}"],"contentHashes":[]}
+          {%- elsif sha.size == 40 -%}{"agentIds":[],"contentHashes":["{{ sha }}"]}
+          {%- else -%}{"agentIds":[],"contentHashes":[]}{%- endif -%}
+
+      - name: find_threats
+        type: sentinelone2.getThreats
+        if: "${{ steps.build_threat_query.output.agentIds.size > 0 or steps.build_threat_query.output.contentHashes.size > 0 }}"
+        connector-id: __install__.sentinelone-connector
+        with:
+          agentIds: "${{ steps.build_threat_query.output.agentIds }}"
+          contentHashes: "${{ steps.build_threat_query.output.contentHashes }}"
+          sortBy: createdAt
+          sortOrder: desc
+          limit: 10
+        on-failure:
+          retry:
+            max-attempts: 2
+            delay: 2s
+
+      - name: threats_found
+        type: if
+        condition: "${{ steps.find_threats.output.data.size > 0 }}"
+        steps:
+          - name: get_threat_details
+            type: sentinelone2.getThreatDetails
+            connector-id: __install__.sentinelone-connector
+            with:
+              ids:
+                - "{{ steps.find_threats.output.data[0].id }}"
+            on-failure:
+              retry:
+                max-attempts: 2
+                delay: 2s
+
+          - name: get_threat_notes
+            type: sentinelone2.getThreatNotes
+            connector-id: __install__.sentinelone-connector
+            with:
+              threatId: "{{ steps.find_threats.output.data[0].id }}"
+              limit: 10
+            on-failure:
+              continue: true
+        else:
+          - name: log_no_threats
+            type: console
+            with:
+              message: "SentinelOne reports no threat for host '{{ variables.hostname }}' / IP '{{ variables.ip }}' / hash '{{ variables.file_hash }}'."
+
+      - name: hash_known
+        type: if
+        condition: "${{ variables.file_hash != blank and variables.file_hash.size == 40 }}"
+        steps:
+          - name: hash_reputation
+            type: sentinelone2.getHashReputation
+            connector-id: __install__.sentinelone-connector
+            with:
+              hash: "{{ variables.file_hash }}"
+            on-failure:
+              continue: true
+        else:
+          - name: log_no_hash
+            type: console
+            with:
+              message: "No SHA1 file hash was available (alert field file.hash.sha1 or input file_hash); the file reputation was not checked."
+
+      # Verdict fields are read from the latest threat (sorted by createdAt desc).
+      - name: build_summary
+        type: data.set
+        with:
+          agent_found: "{{ steps.find_agent.output.data.size | default: 0 | plus: 0 | at_most: 1 }}"
+          agent_name: "{{ steps.find_agent.output.data[0].computerName | default: variables.hostname | default: 'unknown' }}"
+          network_status: "{{ steps.find_agent.output.data[0].networkStatus | default: 'unknown' }}"
+          infected: "{{ steps.find_agent.output.data[0].infected | default: 'unknown', allow_false: true }}"
+          threat_count: "{{ steps.find_threats.output.pagination.totalItems | default: 0 }}"
+          threat_id: "{{ steps.find_threats.output.data[0].id | default: '' }}"
+          threat_name: "{{ steps.get_threat_details.output.data[0].threatInfo.threatName | default: 'none' }}"
+          confidence: "{%- assign levels = steps.find_threats.output.data | map: 'threatInfo' | map: 'confidenceLevel' -%}{%- if levels contains 'malicious' -%}malicious{%- elsif levels contains 'suspicious' -%}suspicious{%- else -%}none{%- endif -%}"
+          verdict: "{{ steps.get_threat_details.output.data[0].threatInfo.analystVerdict | default: 'none' }}"
+          mitigation_status: "{{ steps.get_threat_details.output.data[0].threatInfo.mitigationStatus | default: 'none' }}"
+          incident_status: "{{ steps.get_threat_details.output.data[0].threatInfo.incidentStatus | default: 'none' }}"
+          notes_status: "{%- if steps.get_threat_notes.error != blank -%}unavailable{%- elsif steps.get_threat_details.output != blank -%}{{ steps.get_threat_notes.output.pagination.totalItems | default: 0 }}{%- else -%}none{%- endif -%}"
+          file_reputation: "{%- if steps.hash_reputation.error != blank -%}unavailable{%- else -%}{{ steps.hash_reputation.output.data.verdict | default: 'not checked' }}{%- endif -%}"
+
+      - name: alert_known
+        type: if
+        condition: "${{ variables.target_index != blank and variables.target_id != blank }}"
+        steps:
+          - name: write_triage
+            type: elasticsearch.update
+            with:
+              index: "{{ variables.target_index }}"
+              id: "{{ variables.target_id }}"
+              refresh: wait_for
+              retry_on_conflict: 3
+              doc:
+                sentinelone:
+                  triage:
+                    endpoint: "{{ variables.agent_name }}"
+                    network_status: "{{ variables.network_status }}"
+                    infected: "{{ variables.infected }}"
+                    threat_count: "{{ variables.threat_count }}"
+                    threat_id: "{{ variables.threat_id }}"
+                    threat_name: "{{ variables.threat_name }}"
+                    confidence: "{{ variables.confidence }}"
+                    verdict: "{{ variables.verdict }}"
+                    mitigation_status: "{{ variables.mitigation_status }}"
+                    incident_status: "{{ variables.incident_status }}"
+                    notes: "{{ variables.notes_status }}"
+                    file_reputation: "{{ variables.file_reputation }}"
+            on-failure:
+              retry:
+                max-attempts: 2
+                delay: 2s
+
+          - name: tag_alert
+            type: security.setAlertTags
+            with:
+              alert_ids: "{{ variables.target_id }}"
+              tags_to_add:
+                - "sentinelone-triaged"
+              tags_to_remove: []
+            on-failure:
+              retry:
+                max-attempts: 3
+                delay: 2s
+
+          # One note per alert: a re-run finds this workflow's own note by its
+          # heading (the marker) and replaces it instead of adding a second one.
+          - name: find_existing_note
+            type: kibana.request
+            with:
+              method: GET
+              path: /api/note
+              query:
+                documentIds: "{{ variables.target_id }}"
+            on-failure:
+              continue: true
+
+          - name: prepare_note
+            type: data.set
+            with:
+              existing_note_id: |-
+                {%- assign marker = '## SentinelOne triage' -%}
+                {%- assign found = '' -%}
+                {%- for n in steps.find_existing_note.output.notes -%}
+                  {%- if found == '' and n.note contains marker -%}{%- assign found = n.noteId -%}{%- endif -%}
+                {%- endfor -%}
+                {{ found }}
+              note_text: |-
+                ## SentinelOne triage
+
+                _Managed by this workflow: replaced on every run. Add your own analysis in a separate note._
+
+                **Endpoint:** `{{ variables.agent_name }}` (network status: {{ variables.network_status }}, infected: {{ variables.infected }})
+                **Threats found:** {{ variables.threat_count }}; highest confidence: `{{ variables.confidence }}`
+                **Latest threat:** {{ variables.threat_name }} (analyst verdict: `{{ variables.verdict }}`, mitigation: `{{ variables.mitigation_status }}`, incident: `{{ variables.incident_status }}`)
+                **Analyst notes on the threat:** {{ variables.notes_status }}
+                **File reputation:** `{{ variables.file_reputation }}`
+
+          - name: note_exists
+            type: if
+            condition: "${{ variables.existing_note_id != blank }}"
+            steps:
+              - name: update_alert_note
+                type: kibana.request
+                with:
+                  method: PATCH
+                  path: /api/note
+                  body:
+                    noteId: "{{ variables.existing_note_id }}"
+                    note:
+                      timelineId: ""
+                      eventId: "{{ variables.target_id }}"
+                      note: "{{ variables.note_text }}"
+                on-failure:
+                  continue: true
+            else:
+              - name: add_alert_note
+                type: kibana.request
+                with:
+                  method: PATCH
+                  path: /api/note
+                  body:
+                    note:
+                      timelineId: ""
+                      eventId: "{{ variables.target_id }}"
+                      note: "{{ variables.note_text }}"
+                on-failure:
+                  continue: true
+        else:
+          - name: log_summary
+            type: console
+            with:
+              message: "SentinelOne triage for {{ variables.agent_name }}: {{ variables.threat_count }} threat(s), confidence {{ variables.confidence }}, verdict {{ variables.verdict }}, mitigation {{ variables.mitigation_status }}, file reputation {{ variables.file_reputation }}."
+    else:
+      - name: log_no_entity
+        type: console
+        with:
+          message: "The alert has no host name, IP address or file SHA1 (host.name, host.ip, file.hash.sha1) and none was given as input; nothing was looked up."

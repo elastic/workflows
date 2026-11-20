@@ -1,0 +1,343 @@
+template-metadata:
+  slug: sentinelone-threat-mitigation-with-approval
+  version: "1.0.0"
+  availability: ">=9.5.0"
+  name: "SentinelOne Mitigate or Roll Back Threat with Approval"
+  description: >-
+    Apply a SentinelOne mitigation (kill, quarantine, remediate) or a ransomware
+    rollback to a threat after an analyst approves it. The threat is read
+    first, the mitigation status is read back afterwards, and the result is
+    recorded as a note on the threat, on the alert and as an alert tag.
+    Requires a SentinelOne (v2) connector whose API token can mitigate threats.
+  solutions: [security]
+  categories: [response]
+  install:
+    form:
+      - name: sentinelone-connector
+        label: "SentinelOne (v2) connector"
+        description: "The SentinelOne connector used to read and mitigate threats."
+        inputType: connector
+        connectorType: .sentinelone2
+        required: true
+      - name: default-mitigation
+        label: "Mitigation for alert-triggered runs"
+        description: "Mitigation requested when the workflow runs from an alert. Manual runs choose their own."
+        inputType: select
+        options:
+          - { value: quarantine, label: "Quarantine" }
+          - { value: kill, label: "Kill" }
+          - { value: remediate, label: "Remediate" }
+          - { value: rollback-remediation, label: "Rollback remediation (Windows)" }
+        required: true
+        default: quarantine
+
+version: '1'
+name: SentinelOne Mitigate or Roll Back Threat with Approval
+description: >-
+  Applies a SentinelOne mitigation (kill, quarantine, remediate, un-quarantine)
+  or a ransomware rollback to one threat, only after an analyst approves.
+  The threat ID comes from the alert (sentinel_one.threat.id) or the manual
+  input; the mitigation comes from the manual input, or the default
+  for alert-triggered runs. The threat is read first and skipped when it is
+  already mitigated, and a rejection changes nothing. After an approval the
+  workflow runs the mitigation, waits 30 seconds, reads the mitigation status
+  back, adds a note on the threat in SentinelOne naming this workflow and the
+  approver, writes sentinelone.mitigation on the alert, adds a Timeline note
+  and tags the alert. The write-back needs an alert (alert trigger, or
+  alert_index plus alert_id on a manual run); otherwise only the SentinelOne
+  side is updated.
+tags:
+  - sentinelone
+  - edr
+  - response
+  - security
+enabled: true
+
+settings:
+  timeout: "24h"
+
+consts:
+  # Mitigation used when the run comes from an alert (manual runs pass inputs.mitigation).
+  default_mitigation: __install__.default-mitigation
+
+triggers:
+  # Rule action: enable "Run per alert". The alert carries the SentinelOne threat ID.
+  - type: alert
+  - type: manual
+    inputs:
+      - name: threat_id
+        type: string
+        required: false
+        description: >-
+          SentinelOne threat ID (manual runs). Leave blank for alert runs, the
+          ID is read from sentinel_one.threat.id.
+      - name: mitigation
+        type: string
+        required: false
+        description: >-
+          kill, quarantine, remediate, un-quarantine or rollback-remediation
+          (manual runs). Blank uses the default for alert runs.
+      - name: alert_index
+        type: string
+        required: false
+        description: >-
+          Alert index to write results to (manual runs, with alert_id).
+      - name: alert_id
+        type: string
+        required: false
+        description: >-
+          Alert document ID to write results to (manual runs, with alert_index).
+
+steps:
+
+  # Threat ID, requested mitigation and target alert. The alert wins over the
+  # manual inputs, as in the other response workflows.
+  - name: resolve_target
+    type: data.set
+    with:
+      target_index: "{{ event.alerts[0]._index | default: inputs.alert_index }}"
+      target_id: "{{ event.alerts[0]._id | default: inputs.alert_id }}"
+      threat_id: "{{ event.alerts[0]['sentinel_one.threat.id'] | default: event.alerts[0].sentinel_one.threat.id | default: inputs.threat_id | strip }}"
+      mitigation: "{{ inputs.mitigation | default: consts.default_mitigation }}"
+
+  # Act only when a threat is named. mitigateThreat and rollbackThreat refuse
+  # an empty id list, so nothing can ever apply to every threat.
+  - name: threat_known
+    type: if
+    condition: "${{ variables.threat_id != blank }}"
+    steps:
+
+      # Current state, kept to show "before" and to skip threats already mitigated.
+      - name: get_threat
+        type: sentinelone2.getThreatDetails
+        connector-id: __install__.sentinelone-connector
+        with:
+          ids:
+            - "{{ variables.threat_id }}"
+        on-failure:
+          retry:
+            max-attempts: 2
+            delay: 2s
+
+      # Skip when the threat is unknown, or already mitigated and the request is a
+      # mitigation. Un-quarantine and rollback are meant for mitigated threats.
+      - name: needs_mitigation
+        type: if
+        condition: "${{ steps.get_threat.output.data[0].id != blank and (steps.get_threat.output.data[0].threatInfo.mitigationStatus != 'mitigated' or variables.mitigation == 'un-quarantine' or variables.mitigation == 'rollback-remediation') }}"
+        steps:
+
+          # The run pauses here until an analyst answers. The answer is under
+          # output.response, so the gate below reads response.approved.
+          - name: approve_mitigation
+            type: waitForApproval
+            timeout: 24h
+            with:
+              message: |
+                Approve "{{ variables.mitigation }}" on SentinelOne threat {{ variables.threat_id }}?
+                Threat: {{ steps.get_threat.output.data[0].threatInfo.threatName | default: 'unknown' }}
+                Endpoint: {{ steps.get_threat.output.data[0].agentRealtimeInfo.agentComputerName | default: 'unknown' }}
+                Current mitigation status: {{ steps.get_threat.output.data[0].threatInfo.mitigationStatus | default: 'unknown' }}
+                Kill and remediate cannot be undone.
+              approveLabel: "Apply {{ variables.mitigation }}"
+              rejectLabel: "Do nothing"
+
+          # Only an approval runs the state-changing steps below.
+          - name: approval_given
+            type: if
+            condition: "${{ steps.approve_mitigation.output.response.approved == true }}"
+            steps:
+
+              - name: is_rollback
+                type: if
+                condition: "${{ variables.mitigation == 'rollback-remediation' }}"
+                steps:
+                  # Ransomware rollback (Windows). No workflow retry: a repeat could act twice.
+                  - name: rollback
+                    type: sentinelone2.rollbackThreat
+                    connector-id: __install__.sentinelone-connector
+                    with:
+                      threatIds:
+                        - "{{ variables.threat_id }}"
+                    on-failure:
+                      continue: false
+                else:
+                  # kill, quarantine, remediate or un-quarantine, for the explicit threat ID.
+                  - name: mitigate
+                    type: sentinelone2.mitigateThreat
+                    connector-id: __install__.sentinelone-connector
+                    with:
+                      action: "{{ variables.mitigation }}"
+                      threatIds:
+                        - "{{ variables.threat_id }}"
+                    on-failure:
+                      continue: false
+
+              # SentinelOne applies mitigations asynchronously.
+              - name: pause
+                type: wait
+                with:
+                  duration: 30s
+
+              # Fresh read: proves the new state instead of trusting the acknowledgment.
+              - name: read_back
+                type: sentinelone2.getThreatDetails
+                connector-id: __install__.sentinelone-connector
+                with:
+                  ids:
+                    - "{{ variables.threat_id }}"
+                on-failure:
+                  retry:
+                    max-attempts: 2
+                    delay: 2s
+
+              # Confirmed only when the read-back shows the expected state: mitigated
+              # for kill, quarantine, remediate and rollback, no longer mitigated for
+              # un-quarantine. Gates the alert tag and is shown in the note.
+              - name: check_read_back
+                type: data.set
+                with:
+                  confirmed: >-
+                    {%- assign after = steps.read_back.output.data[0].threatInfo.mitigationStatus | default: 'unknown' -%}
+                    {%- if variables.mitigation == 'un-quarantine' -%}{%- if after != 'mitigated' and after != 'unknown' -%}true{%- else -%}false{%- endif -%}
+                    {%- elsif after == 'mitigated' -%}true{%- else -%}false{%- endif -%}
+
+              # Audit trail inside SentinelOne.
+              - name: add_threat_note
+                type: sentinelone2.addThreatNote
+                connector-id: __install__.sentinelone-connector
+                with:
+                  threatIds:
+                    - "{{ variables.threat_id }}"
+                  text: "{{ variables.mitigation }} applied by Elastic workflow {{ workflow.name }} after approval by {{ steps.approve_mitigation.output.respondedBy | default: 'an analyst' }}"
+                on-failure:
+                  continue: false
+
+              - name: write_mitigation
+                type: elasticsearch.update
+                if: "${{ variables.target_index != blank and variables.target_id != blank }}"
+                with:
+                  index: "{{ variables.target_index }}"
+                  id: "{{ variables.target_id }}"
+                  refresh: wait_for
+                  retry_on_conflict: 3
+                  doc:
+                    sentinelone:
+                      mitigation:
+                        threat_id: "{{ variables.threat_id }}"
+                        action: "{{ variables.mitigation }}"
+                        status_before: "{{ steps.get_threat.output.data[0].threatInfo.mitigationStatus | default: 'unknown' }}"
+                        status_after: "{{ steps.read_back.output.data[0].threatInfo.mitigationStatus | default: 'unknown' }}"
+                        approved_by: "{{ steps.approve_mitigation.output.respondedBy | default: 'unknown' }}"
+                        approved_at: "{{ steps.approve_mitigation.output.respondedAt | default: 'unknown' }}"
+                        confirmed: "{{ variables.confirmed }}"
+
+              # One note per alert: a re-run finds this workflow's own note by its
+              # heading (the marker) and replaces it instead of adding a second one.
+              - name: alert_note
+                type: if
+                condition: "${{ variables.target_id != blank }}"
+                steps:
+                  - name: find_existing_note
+                    type: kibana.request
+                    with:
+                      method: GET
+                      path: /api/note
+                      query:
+                        documentIds: "{{ variables.target_id }}"
+                    on-failure:
+                      continue: true
+
+                  - name: prepare_note
+                    type: data.set
+                    with:
+                      existing_note_id: |-
+                        {%- assign marker = '## SentinelOne mitigation' -%}
+                        {%- assign found = '' -%}
+                        {%- for n in steps.find_existing_note.output.notes -%}
+                          {%- if found == '' and n.note contains marker -%}{%- assign found = n.noteId -%}{%- endif -%}
+                        {%- endfor -%}
+                        {{ found }}
+                      note_text: |-
+                        ## SentinelOne mitigation - `{{ variables.mitigation }}`
+
+                        _Managed by this workflow: replaced on every run. Add your own analysis in a separate note._
+
+                        Threat `{{ variables.threat_id }}` ({{ steps.get_threat.output.data[0].threatInfo.threatName | default: 'unknown' }}) on {{ steps.get_threat.output.data[0].agentRealtimeInfo.agentComputerName | default: 'unknown' }}.
+
+                        **Mitigation status:** `{{ steps.get_threat.output.data[0].threatInfo.mitigationStatus | default: 'unknown' }}` -> `{{ steps.read_back.output.data[0].threatInfo.mitigationStatus | default: 'unknown' }}`
+                        **Confirmed by the read-back:** {% if variables.confirmed == 'true' %}yes{% else %}no, check the threat in SentinelOne{% endif %}
+                        **Approved by:** {{ steps.approve_mitigation.output.respondedBy | default: 'unknown' }}
+
+                  - name: note_exists
+                    type: if
+                    condition: "${{ variables.existing_note_id != blank }}"
+                    steps:
+                      - name: update_alert_note
+                        type: kibana.request
+                        with:
+                          method: PATCH
+                          path: /api/note
+                          body:
+                            noteId: "{{ variables.existing_note_id }}"
+                            note:
+                              timelineId: ""
+                              eventId: "{{ variables.target_id }}"
+                              note: "{{ variables.note_text }}"
+                        on-failure:
+                          continue: true
+                    else:
+                      - name: add_alert_note
+                        type: kibana.request
+                        with:
+                          method: PATCH
+                          path: /api/note
+                          body:
+                            note:
+                              timelineId: ""
+                              eventId: "{{ variables.target_id }}"
+                              note: "{{ variables.note_text }}"
+                        on-failure:
+                          continue: true
+
+              # The tag follows the read-back: "mitigated" only when it is confirmed.
+              - name: tag_alert
+                type: security.setAlertTags
+                if: "${{ variables.target_id != blank and variables.confirmed == 'true' }}"
+                with:
+                  alert_ids: "{{ variables.target_id }}"
+                  tags_to_add:
+                    - "sentinelone:mitigated"
+                  tags_to_remove:
+                    - "sentinelone:mitigation-unconfirmed"
+                on-failure:
+                  retry:
+                    max-attempts: 3
+                    delay: 2s
+
+              - name: tag_unconfirmed
+                type: security.setAlertTags
+                if: "${{ variables.target_id != blank and variables.confirmed != 'true' }}"
+                with:
+                  alert_ids: "{{ variables.target_id }}"
+                  tags_to_add:
+                    - "sentinelone:mitigation-unconfirmed"
+                  tags_to_remove: []
+                on-failure:
+                  retry:
+                    max-attempts: 3
+                    delay: 2s
+            else:
+              - name: log_rejected
+                type: console
+                with:
+                  message: "SentinelOne threat {{ variables.threat_id }}: the analyst rejected '{{ variables.mitigation }}'; nothing was changed."
+        else:
+          - name: log_skip
+            type: console
+            with:
+              message: "SentinelOne threat {{ variables.threat_id }}: mitigation '{{ variables.mitigation }}' skipped (threat not found, or already mitigated)."
+    else:
+      - name: log_no_threat
+        type: console
+        with:
+          message: "No SentinelOne threat ID was available (alert field sentinel_one.threat.id or input threat_id); nothing was done."
