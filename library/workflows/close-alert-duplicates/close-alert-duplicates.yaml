@@ -11,7 +11,8 @@ template-metadata:
     file.path. Registry alerts group by process.executable and registry.path.
     Alerts with a process executable and a DNS question name group by those
     two fields. Other process alerts group by executable, parent executable,
-    and command line. Each closed alert is marked duplicate and tagged with
+    and command line. Every pattern also requires the same event.action
+    values. Each closed alert is marked duplicate and tagged with
     the id of the alert that stayed open.
   solutions: [security]
   categories: [response]
@@ -24,6 +25,8 @@ template-metadata:
 #   registry: process.executable plus registry.path
 #   dns: process.executable plus dns.question.name
 #   process: process.executable, process.parent.executable, process.command_line
+# event.action is multi-valued. Every pattern also requires the same action
+# set. The group key is the sorted unique actions joined with "|".
 # The alert left open is the alert this run was started from, when there is
 # one. Otherwise it is the oldest acknowledged or in-progress alert in the
 # group, or the oldest open alert when every member is still open. That alert
@@ -40,8 +43,10 @@ description: >
   alerts match on process.executable and file.path. Registry alerts match on
   process.executable and registry.path. Alerts with process.executable and
   dns.question.name match on those fields. Remaining process alerts match on
-  process.executable, process.parent.executable, and process.command_line. A run started from an alert closes only duplicates of
-  that alert. Other groups are closed only when consts.close_all_groups is yes.
+  process.executable, process.parent.executable, and process.command_line.
+  Every pattern also requires the same event.action values. A run started
+  from an alert closes only duplicates of that alert. Other groups are closed
+  only when consts.close_all_groups is yes.
   The close reason is duplicate. Closed alerts are tagged Duplicate and
   duplicate-of:<original alert uuid>.
 enabled: true
@@ -145,7 +150,8 @@ steps:
                 source_ip = TO_STRING(MV_FIRST(source.ip)),
                 user_id = MV_FIRST(user.id),
                 status = MV_FIRST(kibana.alert.workflow_status),
-                alert_id = MV_FIRST(kibana.alert.uuid)
+                alert_id = MV_FIRST(kibana.alert.uuid),
+                event_action = COALESCE(MV_CONCAT(MV_SORT(MV_DEDUPE(event.action)), "|"), "")
             | EVAL pattern = CASE(
                 kibana.alert.rule.tags == "Domain: Cloud" AND source_ip IS NOT NULL AND source_ip != "" AND user_id IS NOT NULL AND user_id != "" AND rule_name IS NOT NULL AND rule_name != "",
                 "cloud",
@@ -172,7 +178,7 @@ steps:
                 selected_present = MAX(is_selected),
                 open_ids = VALUES(alert_id) WHERE status == "open",
                 latest = MAX(@timestamp)
-              BY pattern, rule_name, key_a, key_b, key_c
+              BY pattern, rule_name, key_a, key_b, key_c, event_action
             | WHERE alert_count > 1
             | EVAL original_id = CASE(selected_present > 0, "{{ steps.set_selected_alert.output.alert_id }}", original_id)
             | WHERE key_a IS NOT NULL AND key_a != ""
