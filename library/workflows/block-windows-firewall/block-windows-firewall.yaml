@@ -1,0 +1,407 @@
+template-metadata:
+  slug: block-windows-firewall
+  version: "1.0.0"
+  availability: ">=9.5.0"
+  name: "Block IP or Domain on Windows Firewall"
+  description: >-
+    Block an IP or domain on the Windows firewall with netsh, through the
+    Elastic Defend execute response action. Run it from a security alert and
+    it reads agent.id and dns.question.name (or source.ip / destination.ip
+    when the alert has no domain). Manual inputs override the alert. Requires
+    Elastic Defend on Windows with the Execute response action allowed.
+  solutions: [security]
+  categories: [response]
+
+name: Block IP or Domain on Windows Firewall
+description: >
+  Requires Elastic Defend on Windows and permission to submit the Execute
+  response action. Run it from a security alert to block that alert's domain
+  or IP on the alerting Windows endpoint. The workflow reads agent.id and
+  dns.question.name from the alert, and uses source.ip or destination.ip when
+  the alert has no domain. An address that matches host.ip is skipped. 
+  Fill the manual inputs only to override the alert or to run without one. 
+  netsh advfirewall adds inbound and outbound block rules. 
+  A domain is resolved on the endpoint first, so a later DNS change is
+  not picked up until the workflow runs again. Re-running replaces rules that
+  use the same name.
+enabled: true
+tags:
+  - security
+  - elastic-defend
+  - response
+  - windows-firewall
+
+triggers:
+  - type: alert
+  - type: manual
+    inputs:
+      - name: source_ip
+        type: string
+        required: false
+        default: ""
+        description: >-
+          IPv4 or IPv6 address to block. Leave empty to use the alert's
+          source.ip or destination.ip when the alert has no domain.
+      - name: domain
+        type: string
+        required: false
+        default: ""
+        description: >-
+          Domain name to resolve on the endpoint and block. Leave empty to
+          use the alert's dns.question.name or destination.domain.
+      - name: agent_ids
+        type: string
+        required: false
+        default: ""
+        description: >-
+          Comma-separated Elastic Agent IDs. Leave empty to use the alert's
+          agent.id.
+
+settings:
+  timeout: 20m
+  concurrency:
+    key: "{{ workflow.id }}"
+    strategy: drop
+    max: 1
+
+consts:
+  # Rule names look like Elastic-Block-<ip-or-domain>-in and -out.
+  # Letters, numbers, and hyphens only.
+  rule_prefix: Elastic-Block
+  # Caps how many agent IDs one manual run will update.
+  max_agents: 25
+  execute_timeout_seconds: 120
+
+steps:
+  # Alert values fill any input left blank. A typed input overrides the alert.
+  # A domain wins over an IP when both are present on the alert, so a DNS
+  # alert blocks dns.question.name rather than the resolver address.
+  # source.ip and destination.ip are skipped when they match host.ip.
+  - name: set_alert_context
+    type: data.set
+    with:
+      source_ip: >-
+        {%- assign manual = inputs.source_ip | default: '' | strip -%}
+        {%- if manual == '<your_input>' -%}{%- assign manual = '' -%}{%- endif -%}
+        {%- assign domain_manual = inputs.domain | default: '' | strip -%}
+        {%- if domain_manual == '<your_input>' -%}{%- assign domain_manual = '' -%}{%- endif -%}
+        {%- assign alert_domain = event.alerts[0].dns.question.name | default: '' | append: '' | strip -%}
+        {%- if alert_domain == '' -%}{%- assign alert_domain = event.alerts[0].destination.domain | default: '' | append: '' | strip -%}{%- endif -%}
+        {%- if alert_domain contains ',' -%}{%- assign alert_domain = alert_domain | split: ',' | first | strip -%}{%- endif -%}
+        {%- if manual != '' -%}
+        {{ manual }}
+        {%- elsif domain_manual != '' or alert_domain != '' -%}
+        {%- else -%}
+        {%- assign host_list = event.alerts[0].host.ip | join: ',' | downcase | replace: ' ', '' -%}
+        {%- assign host_hay = ',' | append: host_list | append: ',' -%}
+        {%- assign chosen = '' -%}
+        {%- assign source_parts = event.alerts[0].source.ip | join: ',' | downcase | replace: ' ', '' | strip | split: ',' -%}
+        {%- assign c = source_parts[0] | default: '' | strip -%}
+        {%- assign needle = ',' | append: c | append: ',' -%}
+        {%- assign is_host = false -%}
+        {%- if c != '' and host_hay contains needle -%}{%- assign is_host = true -%}{%- endif -%}
+        {%- if chosen == '' and c != '' and is_host == false -%}{%- assign chosen = c -%}{%- endif -%}
+        {%- assign c = source_parts[1] | default: '' | strip -%}
+        {%- assign needle = ',' | append: c | append: ',' -%}
+        {%- assign is_host = false -%}
+        {%- if c != '' and host_hay contains needle -%}{%- assign is_host = true -%}{%- endif -%}
+        {%- if chosen == '' and c != '' and is_host == false -%}{%- assign chosen = c -%}{%- endif -%}
+        {%- assign c = source_parts[2] | default: '' | strip -%}
+        {%- assign needle = ',' | append: c | append: ',' -%}
+        {%- assign is_host = false -%}
+        {%- if c != '' and host_hay contains needle -%}{%- assign is_host = true -%}{%- endif -%}
+        {%- if chosen == '' and c != '' and is_host == false -%}{%- assign chosen = c -%}{%- endif -%}
+        {%- assign c = source_parts[3] | default: '' | strip -%}
+        {%- assign needle = ',' | append: c | append: ',' -%}
+        {%- assign is_host = false -%}
+        {%- if c != '' and host_hay contains needle -%}{%- assign is_host = true -%}{%- endif -%}
+        {%- if chosen == '' and c != '' and is_host == false -%}{%- assign chosen = c -%}{%- endif -%}
+        {%- assign dest_parts = event.alerts[0].destination.ip | join: ',' | downcase | replace: ' ', '' | strip | split: ',' -%}
+        {%- assign c = dest_parts[0] | default: '' | strip -%}
+        {%- assign needle = ',' | append: c | append: ',' -%}
+        {%- assign is_host = false -%}
+        {%- if c != '' and host_hay contains needle -%}{%- assign is_host = true -%}{%- endif -%}
+        {%- if chosen == '' and c != '' and is_host == false -%}{%- assign chosen = c -%}{%- endif -%}
+        {%- assign c = dest_parts[1] | default: '' | strip -%}
+        {%- assign needle = ',' | append: c | append: ',' -%}
+        {%- assign is_host = false -%}
+        {%- if c != '' and host_hay contains needle -%}{%- assign is_host = true -%}{%- endif -%}
+        {%- if chosen == '' and c != '' and is_host == false -%}{%- assign chosen = c -%}{%- endif -%}
+        {%- assign c = dest_parts[2] | default: '' | strip -%}
+        {%- assign needle = ',' | append: c | append: ',' -%}
+        {%- assign is_host = false -%}
+        {%- if c != '' and host_hay contains needle -%}{%- assign is_host = true -%}{%- endif -%}
+        {%- if chosen == '' and c != '' and is_host == false -%}{%- assign chosen = c -%}{%- endif -%}
+        {%- assign c = dest_parts[3] | default: '' | strip -%}
+        {%- assign needle = ',' | append: c | append: ',' -%}
+        {%- assign is_host = false -%}
+        {%- if c != '' and host_hay contains needle -%}{%- assign is_host = true -%}{%- endif -%}
+        {%- if chosen == '' and c != '' and is_host == false -%}{%- assign chosen = c -%}{%- endif -%}
+        {%- if chosen == '' -%}
+        {%- assign chosen = event.alerts[0].dns.resolved_ip | join: ',' | strip -%}
+        {%- if chosen contains ',' -%}{%- assign chosen = chosen | split: ',' | first | strip -%}{%- endif -%}
+        {%- endif -%}
+        {{ chosen }}
+        {%- endif -%}
+      domain: >-
+        {%- assign manual = inputs.domain | default: '' | strip -%}
+        {%- if manual == '<your_input>' -%}{%- assign manual = '' -%}{%- endif -%}
+        {%- assign manual_ip = inputs.source_ip | default: '' | strip -%}
+        {%- if manual_ip == '<your_input>' -%}{%- assign manual_ip = '' -%}{%- endif -%}
+        {%- if manual != '' -%}
+        {{ manual }}
+        {%- elsif manual_ip != '' -%}
+        {%- else -%}
+        {%- assign alert_domain = event.alerts[0].dns.question.name | default: '' | append: '' | strip -%}
+        {%- if alert_domain == '' -%}{%- assign alert_domain = event.alerts[0].destination.domain | default: '' | append: '' | strip -%}{%- endif -%}
+        {%- if alert_domain contains ',' -%}{%- assign alert_domain = alert_domain | split: ',' | first | strip -%}{%- endif -%}
+        {{ alert_domain }}
+        {%- endif -%}
+      agent_ids: >-
+        {%- assign manual = inputs.agent_ids | default: '' | strip -%}
+        {%- if manual == '<your_input>' -%}{%- assign manual = '' -%}{%- endif -%}
+        {%- if manual != '' -%}
+        {{ manual }}
+        {%- else -%}
+        {%- assign alert_agent = event.alerts[0].agent.id | default: '' | append: '' | strip -%}
+        {%- if alert_agent == '' -%}{%- assign alert_agent = event.alerts[0].elastic.agent.id | default: '' | append: '' | strip -%}{%- endif -%}
+        {{ alert_agent }}
+        {%- endif -%}
+
+  # Charset checks reject shell metacharacters before any command is built.
+  # A source IP may contain only digits, hex, dots, and colons. A domain may
+  # contain only letters, digits, dots, and hyphens.
+  - name: normalize_inputs
+    type: data.set
+    with:
+      source_ip: "{{ steps.set_alert_context.output.source_ip | default: '' | strip | downcase }}"
+      domain: "{{ steps.set_alert_context.output.domain | default: '' | strip | downcase }}"
+      agent_ids: "{{ steps.set_alert_context.output.agent_ids | default: '' | strip | downcase | replace: ' ', '' }}"
+      source_ip_non_digits: "{% assign v = steps.set_alert_context.output.source_ip | default: '' | strip | downcase %}{{ v | remove: '0' | remove: '1' | remove: '2' | remove: '3' | remove: '4' | remove: '5' | remove: '6' | remove: '7' | remove: '8' | remove: '9' | remove: '.' }}"
+      source_ip_invalid_chars: "{% assign v = steps.set_alert_context.output.source_ip | default: '' | strip | downcase %}{{ v | remove: '0' | remove: '1' | remove: '2' | remove: '3' | remove: '4' | remove: '5' | remove: '6' | remove: '7' | remove: '8' | remove: '9' | remove: 'a' | remove: 'b' | remove: 'c' | remove: 'd' | remove: 'e' | remove: 'f' | remove: '.' | remove: ':' }}"
+      domain_invalid_chars: "{% assign v = steps.set_alert_context.output.domain | default: '' | strip | downcase %}{{ v | remove: '0' | remove: '1' | remove: '2' | remove: '3' | remove: '4' | remove: '5' | remove: '6' | remove: '7' | remove: '8' | remove: '9' | remove: 'a' | remove: 'b' | remove: 'c' | remove: 'd' | remove: 'e' | remove: 'f' | remove: 'g' | remove: 'h' | remove: 'i' | remove: 'j' | remove: 'k' | remove: 'l' | remove: 'm' | remove: 'n' | remove: 'o' | remove: 'p' | remove: 'q' | remove: 'r' | remove: 's' | remove: 't' | remove: 'u' | remove: 'v' | remove: 'w' | remove: 'x' | remove: 'y' | remove: 'z' | remove: '.' | remove: '-' }}"
+      domain_letters: "{% assign v = steps.set_alert_context.output.domain | default: '' | strip | downcase %}{{ v | remove: '0' | remove: '1' | remove: '2' | remove: '3' | remove: '4' | remove: '5' | remove: '6' | remove: '7' | remove: '8' | remove: '9' | remove: '.' | remove: '-' }}"
+      agent_invalid_chars: "{% assign v = steps.set_alert_context.output.agent_ids | default: '' | strip | downcase | replace: ' ', '' %}{{ v | remove: '0' | remove: '1' | remove: '2' | remove: '3' | remove: '4' | remove: '5' | remove: '6' | remove: '7' | remove: '8' | remove: '9' | remove: 'a' | remove: 'b' | remove: 'c' | remove: 'd' | remove: 'e' | remove: 'f' | remove: '-' | remove: ',' }}"
+
+  # decision is kind|ready|reason. Split below so the checks exist once.
+  - name: decide_block
+    type: data.set
+    with:
+      decision: >-
+        {%- assign ip = steps.normalize_inputs.output.source_ip -%}
+        {%- assign domain = steps.normalize_inputs.output.domain -%}
+        {%- assign agents = steps.normalize_inputs.output.agent_ids -%}
+        {%- assign agent_count = agents | split: ',' | size -%}
+        {%- assign agent_edge = agents | slice: 0, 1 -%}
+        {%- assign agent_tail = agents | slice: -1, 1 -%}
+        {%- assign octets = ip | split: '.' -%}
+        {%- assign o0 = octets[0] | plus: 0 -%}
+        {%- assign o1 = octets[1] | plus: 0 -%}
+        {%- assign o2 = octets[2] | plus: 0 -%}
+        {%- assign o3 = octets[3] | plus: 0 -%}
+        {%- assign ipv4 = false -%}
+        {%- if ip != '' and steps.normalize_inputs.output.source_ip_non_digits == '' and octets.size == 4 and octets[0] != blank and octets[1] != blank and octets[2] != blank and octets[3] != blank and o0 >= 0 and o0 <= 255 and o1 >= 0 and o1 <= 255 and o2 >= 0 and o2 <= 255 and o3 >= 0 and o3 <= 255 -%}
+        {%- assign ipv4 = true -%}
+        {%- endif -%}
+        {%- assign ip_has_colon = false -%}
+        {%- if ip contains ':' -%}{%- assign ip_has_colon = true -%}{%- endif -%}
+        {%- assign ip_has_dot = false -%}
+        {%- if ip contains '.' -%}{%- assign ip_has_dot = true -%}{%- endif -%}
+        {%- assign ipv6 = false -%}
+        {%- if ip != '' and steps.normalize_inputs.output.source_ip_invalid_chars == '' and ip_has_colon and ip_has_dot == false -%}
+        {%- assign ipv6 = true -%}
+        {%- endif -%}
+        {%- assign domain_edge = domain | slice: 0, 1 -%}
+        {%- assign domain_tail = domain | slice: -1, 1 -%}
+        {%- assign domain_has_dot = false -%}
+        {%- if domain contains '.' -%}{%- assign domain_has_dot = true -%}{%- endif -%}
+        {%- assign domain_bad_shape = false -%}
+        {%- if domain contains '..' -%}{%- assign domain_bad_shape = true -%}{%- endif -%}
+        {%- if domain contains '.-' -%}{%- assign domain_bad_shape = true -%}{%- endif -%}
+        {%- if domain contains '-.' -%}{%- assign domain_bad_shape = true -%}{%- endif -%}
+        {%- assign domain_ok = false -%}
+        {%- if domain != '' and steps.normalize_inputs.output.domain_invalid_chars == '' and steps.normalize_inputs.output.domain_letters != '' and domain_has_dot and domain_bad_shape == false and domain_edge != '.' and domain_edge != '-' and domain_tail != '.' and domain_tail != '-' and domain.size <= 253 -%}
+        {%- assign domain_ok = true -%}
+        {%- endif -%}
+        {%- assign agents_double = false -%}
+        {%- if agents contains ',,' -%}{%- assign agents_double = true -%}{%- endif -%}
+        {%- assign agents_ok = false -%}
+        {%- if agents != '' and steps.normalize_inputs.output.agent_invalid_chars == '' and agents_double == false and agent_edge != ',' and agent_tail != ',' and agent_count > 0 and agent_count <= consts.max_agents -%}
+        {%- assign agents_ok = true -%}
+        {%- endif -%}
+        {%- assign kind = 'invalid' -%}
+        {%- if ip != '' and domain != '' -%}
+        {%- elsif ipv4 or ipv6 -%}
+        {%- assign kind = 'ip' -%}
+        {%- elsif domain_ok -%}
+        {%- assign kind = 'domain' -%}
+        {%- endif -%}
+        {%- assign target_ok = false -%}
+        {%- if domain == '' -%}
+        {%- if ipv4 or ipv6 -%}{%- assign target_ok = true -%}{%- endif -%}
+        {%- elsif ip == '' -%}
+        {%- if domain_ok -%}{%- assign target_ok = true -%}{%- endif -%}
+        {%- endif -%}
+        {%- assign ready = 'no' -%}
+        {%- if target_ok and agents_ok -%}{%- assign ready = 'yes' -%}{%- endif -%}
+        {%- assign reason = '' -%}
+        {%- if ip != '' and domain != '' -%}
+        {%- assign reason = 'Enter a source IP or a domain, not both.' -%}
+        {%- elsif ip == '' and domain == '' -%}
+        {%- assign reason = 'Enter a source IP or a domain.' -%}
+        {%- elsif ip != '' and steps.normalize_inputs.output.source_ip_invalid_chars != '' -%}
+        {%- assign reason = 'source_ip contains characters that cannot be passed to netsh.' -%}
+        {%- elsif domain != '' and steps.normalize_inputs.output.domain_invalid_chars != '' -%}
+        {%- assign reason = 'domain contains characters that cannot be passed to netsh.' -%}
+        {%- elsif agents == '' or steps.normalize_inputs.output.agent_invalid_chars != '' or agents_double or agent_edge == ',' or agent_tail == ',' -%}
+        {%- assign reason = 'agent_ids must be comma-separated Elastic Agent IDs.' -%}
+        {%- elsif agent_count > consts.max_agents -%}
+        {%- assign reason = 'Too many agent IDs. The maximum for one run is ' | append: consts.max_agents | append: '.' -%}
+        {%- elsif ip != '' and ipv4 == false and ipv6 == false -%}
+        {%- assign reason = 'source_ip must be one IPv4 or IPv6 address.' -%}
+        {%- elsif domain != '' and domain_ok == false -%}
+        {%- assign reason = 'domain must be a hostname such as example.com.' -%}
+        {%- endif -%}
+        {{- kind -}}|{{- ready -}}|{{- reason -}}
+
+  - name: classify_block
+    type: data.set
+    with:
+      kind: "{% assign parts = steps.decide_block.output.decision | split: '|' %}{{ parts[0] }}"
+      ready: "{% assign parts = steps.decide_block.output.decision | split: '|' %}{{ parts[1] }}"
+      reject_reason: "{% assign parts = steps.decide_block.output.decision | split: '|' %}{{ parts[2] }}"
+
+  # IP: one cmd.exe chain of netsh delete-then-add, so a second run replaces
+  # the same rule names. Domain: Windows PowerShell resolves A and AAAA on
+  # the endpoint, then calls netsh for each address. netsh is the command
+  # that changes the firewall in both cases.
+  - name: build_command
+    type: data.set
+    with:
+      command: >-
+        {%- assign kind = steps.classify_block.output.kind | strip -%}
+        {%- if steps.classify_block.output.ready != 'yes' -%}
+        {%- elsif kind == 'ip' -%}
+        {%- assign target = steps.normalize_inputs.output.source_ip -%}
+        {%- assign label = target | replace: ':', '-' | truncate: 180, '' -%}
+        {%- assign rule_in = consts.rule_prefix | append: '-' | append: label | append: '-in' -%}
+        {%- assign rule_out = consts.rule_prefix | append: '-' | append: label | append: '-out' -%}
+        cmd.exe /c "netsh advfirewall firewall delete rule name={{ rule_in }} & netsh advfirewall firewall add rule name={{ rule_in }} dir=in action=block remoteip={{ target }} enable=yes profile=any & netsh advfirewall firewall delete rule name={{ rule_out }} & netsh advfirewall firewall add rule name={{ rule_out }} dir=out action=block remoteip={{ target }} enable=yes profile=any & echo FIREWALL_RULES_SET"
+        {%- else -%}
+        {%- assign target = steps.normalize_inputs.output.domain -%}
+        powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "$n='{{ target }}'; $prefix='{{ consts.rule_prefix }}'; $ips=@(Resolve-DnsName -Name $n -Type A -ErrorAction SilentlyContinue | Where-Object { $_.IPAddress } | Select-Object -ExpandProperty IPAddress); $ips6=@(Resolve-DnsName -Name $n -Type AAAA -ErrorAction SilentlyContinue | Where-Object { $_.IPAddress } | Select-Object -ExpandProperty IPAddress); $all=@($ips+$ips6 | Where-Object { $_ } | Select-Object -Unique); if(-not $all){ Write-Output 'NO_ADDRESSES'; exit 2 }; foreach($ip in $all){ $safe=($n + '-' + ($ip -replace ':','-')); if($safe.Length -gt 180){ $safe=$safe.Substring(0,180) }; $in=($prefix + '-' + $safe + '-in'); $out=($prefix + '-' + $safe + '-out'); & netsh.exe advfirewall firewall delete rule name=$in | Out-Null; & netsh.exe advfirewall firewall add rule name=$in dir=in action=block remoteip=$ip enable=yes profile=any | Out-Null; if($LASTEXITCODE -ne 0){ Write-Output ('ADD_FAILED ' + $ip + ' in'); exit 3 }; & netsh.exe advfirewall firewall delete rule name=$out | Out-Null; & netsh.exe advfirewall firewall add rule name=$out dir=out action=block remoteip=$ip enable=yes profile=any | Out-Null; if($LASTEXITCODE -ne 0){ Write-Output ('ADD_FAILED ' + $ip + ' out'); exit 3 }; Write-Output ('BLOCKED ' + $ip) }; Write-Output 'FIREWALL_RULES_SET'"
+        {%- endif -%}
+
+  - name: log_request
+    type: console
+    with:
+      message: >-
+        Block Windows Firewall — kind={{ steps.classify_block.output.kind | strip }}
+        ready={{ steps.classify_block.output.ready | strip }}
+        source_ip={{ steps.normalize_inputs.output.source_ip }}
+        domain={{ steps.normalize_inputs.output.domain }}
+        agents={{ steps.normalize_inputs.output.agent_ids }}
+        {% if steps.classify_block.output.ready != 'yes' %}rejected={{ steps.classify_block.output.reject_reason | strip }}{% endif %}
+
+  - name: when_ready
+    type: if
+    condition: "steps.classify_block.output.ready: yes"
+    steps:
+      # ROW/SPLIT turns the comma-separated input into one row per agent
+      # without a Liquid for-loop, which the workflow editor rejects.
+      - name: list_agents
+        type: elasticsearch.esql.query
+        on-failure:
+          continue: true
+        with:
+          query: |
+            ROW agents = "{{ steps.normalize_inputs.output.agent_ids }}"
+            | EVAL agent_id = MV_DEDUPE(SPLIT(agents, ","))
+            | MV_EXPAND agent_id
+            | WHERE agent_id IS NOT NULL AND LENGTH(agent_id) > 0
+            | KEEP agent_id
+            | LIMIT {{ consts.max_agents }}
+
+      - name: when_agents_found
+        type: if
+        condition: "not steps.list_agents.error: * and steps.list_agents.output.values.length > 0"
+        steps:
+          - name: per_agent
+            type: foreach
+            foreach: "{{ steps.list_agents.output.values }}"
+            on-failure:
+              continue: true
+            steps:
+              - name: submit_block
+                type: kibana.request
+                on-failure:
+                  continue: true
+                with:
+                  method: POST
+                  path: /api/endpoint/action/execute
+                  headers:
+                    kbn-xsrf: "true"
+                  body:
+                    agent_type: endpoint
+                    endpoint_ids:
+                      - "{{ foreach.item[0] }}"
+                    comment: "Workflow Block Windows Firewall — block {{ steps.normalize_inputs.output.source_ip }}{{ steps.normalize_inputs.output.domain }} inbound and outbound."
+                    parameters:
+                      command: "{{ steps.build_command.output.command }}"
+                      timeout: 120
+
+              - name: remember_action
+                type: data.set
+                with:
+                  action_id: "{{ steps.submit_block.output.data.id | default: '' }}"
+                  action_done: "{% if steps.submit_block.error or steps.submit_block.output.data.id == blank %}true{% else %}false{% endif %}"
+
+              - name: poll_action
+                type: while
+                condition: 'variables.action_id: * and not variables.action_id: "" and not variables.action_done: true'
+                max-iterations:
+                  limit: 12
+                  on-limit: continue
+                steps:
+                  - name: wait_for_action
+                    type: wait
+                    with:
+                      duration: 5s
+
+                  - name: fetch_action
+                    type: kibana.request
+                    on-failure:
+                      continue: true
+                    with:
+                      method: GET
+                      path: "/api/endpoint/action/{{ variables.action_id }}"
+                      headers:
+                        kbn-xsrf: "true"
+
+                  - name: mark_action_done
+                    type: data.set
+                    with:
+                      action_done: "{% if steps.fetch_action.output.data.isCompleted %}true{% else %}false{% endif %}"
+
+              - name: log_action_result
+                type: console
+                with:
+                  message: >-
+                    {%- assign eid = foreach.item[0] -%}
+                    {%- assign d = steps.fetch_action.output.data -%}
+                    agent_id={{ eid }}
+                    action_id={{ variables.action_id | default: "not submitted" }}
+                    {%- if steps.submit_block.error %} submit_error={{ steps.submit_block.error.message }}
+                    {%- elsif d.isCompleted %} completed=true success={{ d.wasSuccessful }} stdout={{ d.outputs[eid].content.stdout }} stderr={{ d.outputs[eid].content.stderr }}
+                    {%- else %} completed=false. Check Security → Endpoints → Response actions history.
+                    {%- endif %}
+        else:
+          - name: log_no_agents
+            type: console
+            with:
+              message: "{% if steps.list_agents.error %}Could not read agent_ids: {{ steps.list_agents.error.message }}{% else %}No agent IDs to target.{% endif %}"
+    else:
+      - name: log_rejected
+        type: console
+        with:
+          message: "Block not submitted. {{ steps.classify_block.output.reject_reason | strip }}"
