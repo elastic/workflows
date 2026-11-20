@@ -10,6 +10,10 @@
   },
   "scripts": {
     "build:catalog": "node scripts/build-catalog.mjs",
+    "validate": "node scripts/validate-workflows.mjs",
+    "validate:templates": "node scripts/validate-workflows.mjs library/workflows --recursive --variant template",
+    "validate:examples": "node scripts/validate-workflows.mjs examples --recursive --variant strict",
+    "validate:all": "npm run validate:templates && npm run validate:examples",
     "lint": "eslint .",
     "lint:fix": "eslint . --fix",
     "format": "prettier --write .",
@@ -21,9 +25,13 @@
   },
   "devDependencies": {
     "@eslint/js": "10.0.1",
-    "eslint": "10.13.0",
+    "ajv": "8.20.0",
+    "ajv-formats": "3.0.1",
+    "eslint": "10.14.0",
     "eslint-config-prettier": "10.1.8",
-    "globals": "17.13.0",
-    "prettier": "3.9.10"
+    "globals": "17.14.0",
+    "liquidjs": "10.30.1",
+    "prettier": "3.10.1",
+    "yaml": "2.9.1"
   }
 }
