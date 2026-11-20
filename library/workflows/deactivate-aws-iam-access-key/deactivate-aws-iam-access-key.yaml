@@ -90,7 +90,7 @@ steps:
             required:
               - approved
 
-      # The only mutation is gated on an explicit boolean approval.
+      # The mutation and bounded verification polling are gated on approval.
       - name: deactivate_when_approved
         type: if
         condition: "${{ steps.request_approval.output.response.approved == true }}"
@@ -107,39 +107,46 @@ steps:
                 AccessKeyId: "{{ variables.access_key_id }}"
                 Status: Inactive
 
-      # Read after the approval branch so an approved mutation is always verified.
-      - name: list_access_keys_after
-        type: aws.request
-        connector-id: __install__.aws-connector
-        with:
-          service: iam
-          query:
-            Action: ListAccessKeys
-            Version: "2010-05-08"
-            UserName: "{{ variables.user_name }}"
+          # IAM is eventually consistent. Retry only the verification read,
+          # matching the target key and status in the parsed response array.
+          - name: verify_access_key
+            type: while
+            condition: "${{ variables.verification_state != 'inactive' }}"
+            max-iterations:
+              limit: 3
+              on-limit: continue
+            steps:
+              - name: verification_backoff
+                type: wait
+                with:
+                  duration: 2s
 
-      # Match the exact key/status pair in IAM's AccessKeyMetadata XML.
-      - name: classify_verification
-        type: data.set
-        with:
-          state: >-
-            {% assign key_element = '<AccessKeyId>' | append: variables.access_key_id | append: '</AccessKeyId>' -%}
-            {% assign state = 'missing' -%}
-            {% assign members = steps.list_access_keys_after.output.data | split: '<member>' -%}
-            {% for member in members -%}
-              {% if member contains key_element -%}
-                {% if member contains '<Status>Inactive</Status>' -%}{% assign state = 'inactive' -%}{% else -%}{% assign state = 'not_inactive' -%}{% endif -%}
-              {% endif -%}
-            {% endfor -%}
-            {{ state }}
+              - name: list_access_keys_after
+                type: aws.request
+                connector-id: __install__.aws-connector
+                with:
+                  service: iam
+                  query:
+                    Action: ListAccessKeys
+                    Version: "2010-05-08"
+                    UserName: "{{ variables.user_name }}"
 
-      - name: log_audit_result
-        type: if
-        condition: "${{ steps.request_approval.output.response.approved == true }}"
-        steps:
+              - name: classify_verification
+                type: data.set
+                with:
+                  verification_state: >-
+                    {% assign state = 'missing' -%}
+                    {% assign keys = steps.list_access_keys_after.output.data.ListAccessKeysResponse.ListAccessKeysResult.AccessKeyMetadata -%}
+                    {% for key in keys -%}
+                      {% if key.AccessKeyId == variables.access_key_id -%}
+                        {% if key.Status == 'Inactive' -%}{% assign state = 'inactive' -%}{% else -%}{% assign state = 'not_inactive' -%}{% endif -%}
+                      {% endif -%}
+                    {% endfor -%}
+                    {{ state }}
+
           - name: classify_approved_result
             type: if
-            condition: "${{ steps.classify_verification.output.state == 'inactive' }}"
+            condition: "${{ variables.verification_state == 'inactive' }}"
             steps:
               - name: log_verified_deactivation
                 type: console
@@ -160,13 +167,21 @@ steps:
                     Outcome: verification_failed; UpdateAccessKey was approved, but the exact access key was not confirmed Inactive in the follow-up ListAccessKeys response.
                     User: {{ variables.user_name }}.
                     Access key: {{ variables.access_key_id }}.
-                    Observed verification state: {{ steps.classify_verification.output.state }}.
+                    Observed verification state: {{ variables.verification_state }}.
                     Alert: {{ variables.alert_id }}.
                     Approved: {{ steps.request_approval.output.response.approved }}.
                     Responder: {{ steps.request_approval.output.respondedBy }}.
                     Notes: {{ steps.request_approval.output.response.notes | default: '(none)' }}.
                     Verification ListAccessKeys response:
                     {{ steps.list_access_keys_after.output.data | json }}
+              - name: fail_failed_verification
+                type: workflow.fail
+                with:
+                  message: >-
+                    AWS IAM access key {{ variables.access_key_id }} for user
+                    {{ variables.user_name }} was not verified Inactive after
+                    three ListAccessKeys attempts.
+                  reason: access_key_not_verified_inactive
         else:
           - name: log_rejected_result
             type: console
@@ -178,8 +193,8 @@ steps:
                 Approved: {{ steps.request_approval.output.response.approved }}.
                 Responder: {{ steps.request_approval.output.respondedBy }}.
                 Notes: {{ steps.request_approval.output.response.notes | default: '(none)' }}.
-                Follow-up ListAccessKeys response:
-                {{ steps.list_access_keys_after.output.data | json }}
+                Pre-approval ListAccessKeys response:
+                {{ steps.list_access_keys_before.output.data | json }}
     else:
       - name: log_missing_target
         type: console
