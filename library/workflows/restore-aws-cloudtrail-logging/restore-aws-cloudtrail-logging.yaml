@@ -1,0 +1,350 @@
+template-metadata:
+  slug: restore-aws-cloudtrail-logging
+  version: "1.0.0"
+  availability: ">=9.7.0"
+  name: "Restore AWS CloudTrail Logging"
+  description: >-
+    Restore logging for an AWS CloudTrail trail from a security alert or manual
+    input. Reads the current trail status, requires explicit analyst approval,
+    requests logging to start, and reads the trail status again for
+    verification. Alert-driven runs require the AWS integration's
+    request-parameter retention mode to be All or Flattened. The AWS connector
+    requires only cloudtrail:GetTrailStatus and cloudtrail:StartLogging.
+  solutions: [security]
+  categories: [response]
+  install:
+    form:
+      - name: aws-connector
+        label: "AWS connector"
+        description: >-
+          AWS connector with permission to read status and start logging for
+          the CloudTrail trails this workflow may remediate.
+        inputType: connector
+        connectorType: .aws
+        required: true
+
+name: Restore AWS CloudTrail Logging
+description: |
+  Resolve an account-qualified CloudTrail trail ARN from an alert or manual
+  input, inspect its current logging status, request analyst approval, request
+  logging to start, and verify the resulting status. Alert-driven runs require
+  the AWS integration's request-parameter retention mode to be All or
+  Flattened; Keyword retains the trail name only as an unparsed string.
+
+triggers:
+  - type: alert
+  - type: manual
+    inputs:
+      - name: trail_name
+        type: string
+        description: Name or ARN of the CloudTrail trail whose logging should be restored.
+        required: true
+        default: ""
+      - name: account_id
+        type: string
+        description: AWS account ID. Required for a bare trail name; if an ARN is supplied, this must be empty or match the ARN.
+        required: false
+        default: ""
+      - name: region
+        type: string
+        description: AWS region containing the CloudTrail trail. If an ARN is supplied, this must match the ARN.
+        required: true
+        default: ""
+
+steps:
+  # Canonical ARNs are the target identity used for deduplication, approval,
+  # and every AWS request. Invalid targets remain visible but cannot reach AWS.
+  - name: build_targets
+    type: data.parseJson
+    source: |
+      {% assign raw_entries = "" | split: "" -%}
+      {% assign entries = "" | split: "" -%}
+      {% assign targets = "" | split: "" -%}
+      {% if event.alerts and event.alerts.size > 0 -%}
+        {% for alert in event.alerts -%}
+          {% assign alert_id = alert.kibana.alert.uuid | default: alert._id | default: "unknown" -%}
+          {% capture raw_entry_json -%}{"source":"alert","raw_trail":{{ alert.aws.cloudtrail.flattened.request_parameters.name | default: "" | strip | json }},"supplied_account":{{ alert.aws.cloudtrail.recipient_account_id | default: "" | strip | json }},"supplied_region":{{ alert.cloud.region | default: "" | strip | json }},"alert_id":{{ alert_id | json }}}{%- endcapture -%}
+          {% assign raw_entry = raw_entry_json | json_parse -%}
+          {% assign raw_entries = raw_entries | push: raw_entry -%}
+        {% endfor -%}
+      {% else -%}
+        {% capture raw_entry_json -%}{"source":"manual","raw_trail":{{ inputs.trail_name | default: "" | strip | json }},"supplied_account":{{ inputs.account_id | default: "" | strip | json }},"supplied_region":{{ inputs.region | default: "" | strip | json }},"alert_id":"manual"}{%- endcapture -%}
+        {% assign raw_entry = raw_entry_json | json_parse -%}
+        {% assign raw_entries = raw_entries | push: raw_entry -%}
+      {% endif -%}
+      {% for raw_entry in raw_entries -%}
+        {% assign raw_trail = raw_entry.raw_trail -%}
+        {% assign trail_name = raw_trail -%}
+        {% assign account_id = raw_entry.supplied_account -%}
+        {% assign region = raw_entry.supplied_region -%}
+        {% assign partition = "" -%}
+        {% assign valid = true -%}
+        {% assign invalid_reason = "" -%}
+        {% assign arn_parts = raw_trail | split: ":" -%}
+        {% if raw_trail == "" -%}
+          {% assign valid = false -%}
+          {% assign invalid_reason = "missing trail name or ARN" -%}
+        {% elsif arn_parts.size == 6 and arn_parts[0] == "arn" -%}
+          {% assign partition = arn_parts[1] -%}
+          {% assign arn_service = arn_parts[2] -%}
+          {% assign arn_region = arn_parts[3] -%}
+          {% assign arn_account = arn_parts[4] -%}
+          {% assign arn_resource_parts = arn_parts[5] | split: "/" -%}
+          {% assign arn_resource_type = arn_resource_parts | first -%}
+          {% assign trail_name = arn_resource_parts | last | strip -%}
+          {% assign account_id = arn_account -%}
+          {% assign region = arn_region -%}
+          {% if arn_service != "cloudtrail" or arn_resource_parts.size != 2 or arn_resource_type != "trail" or trail_name == "" or account_id == "" or region == "" -%}
+            {% assign valid = false -%}
+            {% assign invalid_reason = "malformed CloudTrail trail ARN" -%}
+          {% elsif raw_entry.supplied_account != "" and raw_entry.supplied_account != account_id -%}
+            {% assign valid = false -%}
+            {% if raw_entry.source == "alert" -%}
+              {% assign invalid_reason = "aws.cloudtrail.recipient_account_id does not match the trail ARN" -%}
+            {% else -%}
+              {% assign invalid_reason = "manual account_id does not match the trail ARN" -%}
+            {% endif -%}
+          {% elsif raw_entry.supplied_region != "" and raw_entry.supplied_region != region -%}
+            {% assign valid = false -%}
+            {% if raw_entry.source == "alert" -%}
+              {% assign invalid_reason = "cloud.region does not match the trail ARN" -%}
+            {% else -%}
+              {% assign invalid_reason = "manual region does not match the trail ARN" -%}
+            {% endif -%}
+          {% endif -%}
+        {% elsif raw_trail contains "arn:" -%}
+          {% assign valid = false -%}
+          {% assign invalid_reason = "malformed CloudTrail trail ARN" -%}
+        {% elsif account_id == "" or region == "" -%}
+          {% assign valid = false -%}
+          {% if raw_entry.source == "alert" -%}
+            {% assign invalid_reason = "a bare trail name requires aws.cloudtrail.recipient_account_id and cloud.region" -%}
+          {% else -%}
+            {% assign invalid_reason = "a bare trail name requires account_id and region" -%}
+          {% endif -%}
+        {% else -%}
+          {% assign region_prefix_3 = region | slice: 0, 3 -%}
+          {% assign region_prefix_7 = region | slice: 0, 7 -%}
+          {% assign region_prefix_8 = region | slice: 0, 8 -%}
+          {% if region_prefix_3 == "cn-" -%}
+            {% assign partition = "aws-cn" -%}
+          {% elsif region_prefix_7 == "us-gov-" -%}
+            {% assign partition = "aws-us-gov" -%}
+          {% elsif region_prefix_8 == "us-isob-" -%}
+            {% assign partition = "aws-iso-b" -%}
+          {% elsif region_prefix_8 == "eu-isoe-" -%}
+            {% assign partition = "aws-iso-e" -%}
+          {% elsif region_prefix_8 == "us-isof-" -%}
+            {% assign partition = "aws-iso-f" -%}
+          {% elsif region_prefix_7 == "us-iso-" -%}
+            {% assign partition = "aws-iso" -%}
+          {% else -%}
+            {% assign partition = "aws" -%}
+          {% endif -%}
+        {% endif -%}
+        {% capture trail_arn -%}arn:{{ partition }}:cloudtrail:{{ region }}:{{ account_id }}:trail/{{ trail_name }}{%- endcapture -%}
+        {% capture entry_json -%}{"valid":{{ valid }},"trail_name":{{ trail_name | json }},"trail_arn":{% if valid %}{{ trail_arn | json }}{% else %}""{% endif %},"account_id":{{ account_id | json }},"region":{{ region | json }},"alert_id":{{ raw_entry.alert_id | json }},"invalid_reason":{{ invalid_reason | json }}}{%- endcapture -%}
+        {% assign entry = entry_json | json_parse -%}
+        {% assign entries = entries | push: entry -%}
+      {% endfor -%}
+      {% assign valid_entries = entries | where: "valid", true -%}
+      {% assign invalid_entries = entries | where: "valid", false -%}
+      {%- comment -%}Invalid targets come first so their diagnostics are recorded before any AWS request or approval wait.{%- endcomment -%}
+      {% for entry in invalid_entries -%}
+        {% capture target_json -%}{"valid":false,"trail_name":{{ entry.trail_name | json }},"trail_arn":"","account_id":{{ entry.account_id | json }},"region":{{ entry.region | json }},"alert_ids":[{{ entry.alert_id | json }}],"invalid_reason":{{ entry.invalid_reason | json }}}{%- endcapture -%}
+        {% assign target = target_json | json_parse -%}
+        {% assign targets = targets | push: target -%}
+      {% endfor -%}
+      {% assign trail_arns = valid_entries | map: "trail_arn" | uniq -%}
+      {% for trail_arn in trail_arns -%}
+        {% assign group = valid_entries | where: "trail_arn", trail_arn -%}
+        {% assign first_entry = group | first -%}
+        {% assign alert_ids = group | map: "alert_id" -%}
+        {% capture target_json -%}{"valid":true,"trail_name":{{ first_entry.trail_name | json }},"trail_arn":{{ trail_arn | json }},"account_id":{{ first_entry.account_id | json }},"region":{{ first_entry.region | json }},"alert_ids":{{ alert_ids | json }},"invalid_reason":""}{%- endcapture -%}
+        {% assign target = target_json | json_parse -%}
+        {% assign targets = targets | push: target -%}
+      {% endfor -%}
+      {{ targets | json }}
+
+  # Invalid targets and verification failures are collected so later targets
+  # still receive their own approval and remediation attempt. The workflow
+  # fails after the loop when either collection is non-empty.
+  - name: initialize_failure_tracking
+    type: data.set
+    with:
+      verification_failures: ""
+      invalid_targets: ""
+
+  - name: process_targets
+    type: foreach
+    foreach: "${{ steps.build_targets.output }}"
+    steps:
+      - name: set_target
+        type: data.set
+        with:
+          trail_name: "{{ foreach.item.trail_name }}"
+          trail_arn: "{{ foreach.item.trail_arn }}"
+          account_id: "{{ foreach.item.account_id }}"
+          region: "{{ foreach.item.region }}"
+          alert_ids: "{{ foreach.item.alert_ids | join: ', ' }}"
+          valid: "${{ foreach.item.valid }}"
+          invalid_reason: "{{ foreach.item.invalid_reason | default: '' }}"
+
+      # Invalid targets fail closed. Verification failures are accumulated,
+      # while AWS request and approval errors remain fail-fast.
+      - name: validate_target
+        type: if
+        condition: "${{ steps.set_target.output.valid == true }}"
+        steps:
+          - name: get_trail_status_before
+            type: aws.request
+            connector-id: __install__.aws-connector
+            with:
+              service: cloudtrail
+              region: "{{ steps.set_target.output.region }}"
+              method: POST
+              headers:
+                Content-Type: application/x-amz-json-1.1
+                X-Amz-Target: CloudTrail_20131101.GetTrailStatus
+              body:
+                Name: "{{ steps.set_target.output.trail_arn }}"
+
+          - name: request_approval
+            type: waitForInput
+            timeout: 1h
+            with:
+              message: |-
+                Approve a request to start logging for AWS CloudTrail trail
+                {{ steps.set_target.output.trail_arn }}?
+
+                Account: {{ steps.set_target.output.account_id }}
+                Region: {{ steps.set_target.output.region }}
+                Alerts: {{ steps.set_target.output.alert_ids }}
+                Pre-change GetTrailStatus response:
+
+                ~~~json
+                {{ steps.get_trail_status_before.output.data | json: 2 }}
+                ~~~
+              schema:
+                type: object
+                properties:
+                  approved:
+                    type: boolean
+                    title: Start logging for this trail
+                    default: false
+                  notes:
+                    type: string
+                    title: Analyst notes
+                required:
+                  - approved
+
+          # The mutation and verification read use this foreach iteration's
+          # approval output, so one target's decision cannot authorize another.
+          - name: start_logging_when_approved
+            type: if
+            condition: "${{ steps.request_approval.output.response.approved == true }}"
+            steps:
+              - name: start_logging
+                type: aws.request
+                connector-id: __install__.aws-connector
+                with:
+                  service: cloudtrail
+                  region: "{{ steps.set_target.output.region }}"
+                  method: POST
+                  headers:
+                    Content-Type: application/x-amz-json-1.1
+                    X-Amz-Target: CloudTrail_20131101.StartLogging
+                  body:
+                    Name: "{{ steps.set_target.output.trail_arn }}"
+
+              - name: get_trail_status_after
+                type: aws.request
+                connector-id: __install__.aws-connector
+                with:
+                  service: cloudtrail
+                  region: "{{ steps.set_target.output.region }}"
+                  method: POST
+                  headers:
+                    Content-Type: application/x-amz-json-1.1
+                    X-Amz-Target: CloudTrail_20131101.GetTrailStatus
+                  body:
+                    Name: "{{ steps.set_target.output.trail_arn }}"
+
+              - name: verify_logging_restored
+                type: if
+                condition: "${{ steps.get_trail_status_after.output.data.IsLogging == true }}"
+                steps:
+                  - name: log_verified_audit_result
+                    type: console
+                    with:
+                      message: |-
+                        Outcome: verified; GetTrailStatus confirmed IsLogging=true for AWS CloudTrail trail {{ steps.set_target.output.trail_arn }}.
+                        Alerts: {{ steps.set_target.output.alert_ids }}.
+                        Responder: {{ steps.request_approval.output.respondedBy }}.
+                        Notes: {{ steps.request_approval.output.response.notes | default: '(none)' }}.
+                        Pre-change response: {{ steps.get_trail_status_before.output.data | json }}.
+                        Follow-up response: {{ steps.get_trail_status_after.output.data | json }}.
+                else:
+                  - name: log_failed_verification
+                    type: console
+                    with:
+                      message: |-
+                        Outcome: verification_failed; StartLogging completed, but GetTrailStatus did not confirm IsLogging=true.
+                        Trail: {{ steps.set_target.output.trail_arn }}.
+                        Region: {{ steps.set_target.output.region }}.
+                        Alerts: {{ steps.set_target.output.alert_ids }}.
+                        Responder: {{ steps.request_approval.output.respondedBy }}.
+                        Notes: {{ steps.request_approval.output.response.notes | default: '(none)' }}.
+                        Pre-change response: {{ steps.get_trail_status_before.output.data | json }}.
+                        Follow-up response: {{ steps.get_trail_status_after.output.data | json }}.
+                  - name: record_failed_verification
+                    type: data.set
+                    with:
+                      verification_failures: >-
+                        {% if variables.verification_failures == blank %}{{ steps.set_target.output.trail_arn }}{% else %}{{ variables.verification_failures }}, {{ steps.set_target.output.trail_arn }}{% endif %}
+            else:
+              - name: log_rejected_audit_result
+                type: console
+                with:
+                  message: |-
+                    Outcome: no_change; no StartLogging request was made because restoration was rejected.
+                    Trail: {{ steps.set_target.output.trail_arn }}.
+                    Region: {{ steps.set_target.output.region }}.
+                    Alerts: {{ steps.set_target.output.alert_ids }}.
+                    Responder: {{ steps.request_approval.output.respondedBy }}.
+                    Notes: {{ steps.request_approval.output.response.notes | default: '(none)' }}.
+                    Current GetTrailStatus response: {{ steps.get_trail_status_before.output.data | json }}.
+        else:
+          - name: log_missing_target
+            type: console
+            with:
+              message: >-
+                Outcome: no_change; CloudTrail logging restoration was skipped
+                for alerts {{ steps.set_target.output.alert_ids }} because
+                the target could not be canonicalized safely:
+                {{ steps.set_target.output.invalid_reason }}.
+          - name: record_invalid_target
+            type: data.set
+            with:
+              invalid_targets: >-
+                {% if variables.invalid_targets == blank %}{{ steps.set_target.output.alert_ids }} ({{ steps.set_target.output.invalid_reason }}){% else %}{{ variables.invalid_targets }}, {{ steps.set_target.output.alert_ids }} ({{ steps.set_target.output.invalid_reason }}){% endif %}
+
+  - name: fail_after_all_targets_on_recorded_failure
+    type: if
+    condition: "${{ variables.verification_failures != blank or variables.invalid_targets != blank }}"
+    steps:
+      - name: log_verification_failure_summary
+        type: console
+        with:
+          message: |-
+            Outcome: failed; all CloudTrail targets were processed, but one or more targets were invalid or logging was not verified.
+            Unverified trails: {{ variables.verification_failures | default: '(none)' }}.
+            Invalid targets: {{ variables.invalid_targets | default: '(none)' }}.
+      - name: fail_verification_summary
+        type: workflow.fail
+        with:
+          message: >-
+            CloudTrail logging restoration completed with failures. Unverified
+            trails: {{ variables.verification_failures | default: '(none)' }}.
+            Invalid targets:
+            {{ variables.invalid_targets | default: '(none)' }}.
