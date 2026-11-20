@@ -4,16 +4,19 @@ template-metadata:
   availability: ">=9.5.0"
   name: "Uninstall Recent MSI After Malicious Installer Alert"
   description: >-
-    Run this when an alert is a malicious Windows Installer detection, such
-    as a behavior alert for msiexec.exe. It attempts to uninstall any package
-    installed on that host in the 10 minutes around the alert, not only a
-    package named in the alert. agent.id and the alert time select the host
-    and the window. msiexec.exe UninstallString registry events supply the
-    product code, and Elastic Defend runs msiexec.exe /x for each code. The
-    raw uninstall string is not executed. A legitimate install in that window
-    is removed too. The workflow log and a new case name the Publisher and
-    product from registry events with the same process.entity_id. The case
-    title starts with "MSI Cleanup workflow - " and the agent id.
+    Warning: this action may uninstall an unrelated installer whose
+    UninstallString was written in the same window. Run this when an alert is
+    a malicious Windows Installer detection, such as a behavior alert for
+    msiexec.exe. It attempts to uninstall any package installed on that host
+    in the 5 minutes around the alert, not only a package named in the alert.
+    Windows installs are not a frequent activity. agent.id and the alert time
+    select the host and the window. msiexec.exe UninstallString registry
+    events supply the product code, and Elastic Defend runs msiexec.exe /x
+    for each code. The raw uninstall string is not executed. A legitimate
+    install in that window is removed too. The workflow log and a new case
+    name the Publisher and product from registry events with the same
+    process.entity_id. The case title starts with "MSI Cleanup workflow - "
+    and the agent id.
   solutions: [security]
   categories: [response]
 
@@ -33,20 +36,23 @@ template-metadata:
 # distinct product codes are removed, newest first.
 name: Uninstall Recent MSI After Malicious Installer Alert
 description: >
-  Run this when the alert is a malicious Windows Installer detection, such as
-  a behavior alert for msiexec.exe. It attempts to uninstall any package
-  installed on that host in the 10 minutes around the alert, not only a
-  package named in the alert. Pass agent_id and alert_time to run it manually.
-  The workflow reads agent.id and kibana.alert.original_time from the alert.
-  It searches logs-endpoint.events.registry-* on that agent for msiexec.exe
-  writing UninstallString. The product code is taken from
-  registry.data.strings. Elastic Defend response actions then run
-  msiexec.exe /x {GUID} /qn /norestart. The raw UninstallString is not
-  executed. At most 3 distinct product codes are removed. A legitimate
-  install in that window is removed too. Each submitted uninstall is logged
-  with the Publisher, ProductName, and DisplayName from registry events that
-  share the msiexec process.entity_id, and a case is opened. The case title
-  starts with "MSI Cleanup workflow - " and the agent id.
+  Warning: this action may uninstall an unrelated installer whose
+  UninstallString was written in the same window. Run this when the alert is
+  a malicious Windows Installer detection, such as a behavior alert for
+  msiexec.exe. It attempts to uninstall any package installed on that host
+  in the 5 minutes around the alert, not only a package named in the alert.
+  Windows installs are not a frequent activity. Pass agent_id and alert_time
+  to run it manually. The workflow reads agent.id and
+  kibana.alert.original_time from the alert. It searches
+  logs-endpoint.events.registry-* on that agent for msiexec.exe writing
+  UninstallString. The product code is taken from registry.data.strings.
+  Elastic Defend response actions then run msiexec.exe /x {GUID} /qn
+  /norestart. The raw UninstallString is not executed. At most 3 distinct
+  product codes are removed. A legitimate install in that window is removed
+  too. Each submitted uninstall is logged with the Publisher, ProductName,
+  and DisplayName from registry events that share the msiexec
+  process.entity_id, and a case is opened. The case title starts with
+  "MSI Cleanup workflow - " and the agent id.
 enabled: true
 tags:
   - security
@@ -69,7 +75,7 @@ triggers:
         required: false
         default: ""
         description: >-
-          ISO-8601 time to center the 10 minute registry search on. Leave
+          ISO-8601 time to center the 5 minute registry search on. Leave
           empty to use kibana.alert.original_time from the alert.
 
 settings:
@@ -81,7 +87,7 @@ settings:
 
 consts:
   registry_index: "logs-endpoint.events.registry-*"
-  lookaround_minutes: "10"
+  lookaround_minutes: "5"
   max_packages: "3"
 
 steps:
