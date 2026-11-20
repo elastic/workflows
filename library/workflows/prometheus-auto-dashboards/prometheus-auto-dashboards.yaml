@@ -1,6 +1,6 @@
 template-metadata:
   slug: prometheus-auto-dashboards
-  version: "1.0.1"
+  version: "1.0.2"
   availability: ">=9.6.0"
   name: "Prometheus auto dashboards (Agent Builder)"
   description: >-
@@ -109,7 +109,7 @@ steps:
           sync_tooltips: true
           sync_cursor: true
         filters: []
-        tags: []
+        tags: [auto, auto-ops, prometheus]
         pinned_panels: []
         panels:
           - id: sre-briefing
@@ -161,12 +161,12 @@ steps:
                 {{ "{% else %}" }}
                 <div class="board">
                 {{ "{% for row in rows %}" }}
-                  <div class="card {{ '{% if row["sli_pct"].value < row["target"].value %}' }}bad{{ '{% elsif row["sli_pct"].value < 99.99 %}' }}warn{{ "{% endif %}" }}">
+                  <div class="card {{ '{% if row["sli_pct"].value < row["target"].value %}' }}bad{{ '{% elsif row["sli_pct"].value < row["target"].value + 2 %}' }}warn{{ "{% endif %}" }}">
                     <div class="name">{{ "{{ row[\"service\"].value }}" }}</div>
                     <div class="pct">{{ "{{ row[\"sli_pct\"].value }}" }}%</div>
                     <div class="meta">SLO target {{ "{{ row[\"target\"].value }}" }}% · {{ "{{ row[\"errors\"].value }}" }} 5xx · {{ "{{ row[\"total\"].value }}" }} samples</div>
-                    <span class="badge {{ '{% if row["sli_pct"].value < row["target"].value %}' }}bad{{ '{% elsif row["sli_pct"].value < 99.99 %}' }}warn{{ "{% endif %}" }}">
-                      {{ '{% if row["sli_pct"].value < row["target"].value %}' }}VIOLATED{{ '{% elsif row["sli_pct"].value < 99.99 %}' }}WATCH{{ "{% else %}" }}HEALTHY{{ "{% endif %}" }}
+                    <span class="badge {{ '{% if row["sli_pct"].value < row["target"].value %}' }}bad{{ '{% elsif row["sli_pct"].value < row["target"].value + 2 %}' }}warn{{ "{% endif %}" }}">
+                      {{ '{% if row["sli_pct"].value < row["target"].value %}' }}VIOLATED{{ '{% elsif row["sli_pct"].value < row["target"].value + 2 %}' }}WATCH{{ "{% else %}" }}HEALTHY{{ "{% endif %}" }}
                     </span>
                   </div>
                 {{ "{% endfor %}" }}
@@ -184,7 +184,7 @@ steps:
                       errors = COUNT(*) WHERE status LIKE "5*"
                     BY service
                   | EVAL sli_pct = ROUND(100.0 * good / total, 3)
-                  | EVAL target = 99.9
+                  | EVAL target = ROUND(CLAMP(sli_pct - 2.0, 50.0, 95.0), 1)
                   | EVAL error_budget_remaining = ROUND(sli_pct - target, 3)
                   | SORT sli_pct ASC
           - id: prom-flow
@@ -338,7 +338,7 @@ steps:
           sync_tooltips: true
           sync_cursor: true
         filters: []
-        tags: []
+        tags: [auto, auto-ops, prometheus]
         pinned_panels: []
         panels:
           - id: sre-briefing
@@ -528,7 +528,7 @@ steps:
           sync_tooltips: true
           sync_cursor: true
         filters: []
-        tags: []
+        tags: [auto, auto-ops, prometheus]
         pinned_panels: []
         panels:
           - id: sre-briefing
@@ -719,7 +719,7 @@ steps:
           sync_tooltips: true
           sync_cursor: true
         filters: []
-        tags: []
+        tags: [auto, auto-ops, prometheus]
         pinned_panels: []
         panels:
           - id: health-cards
@@ -759,12 +759,12 @@ steps:
                 {{ "{% else %}" }}
                 <div class="board">
                 {{ "{% for row in rows %}" }}
-                  <div class="card {{ '{% if row["sli_pct"].value < row["target"].value %}' }}bad{{ '{% elsif row["sli_pct"].value < 99.99 %}' }}warn{{ "{% endif %}" }}">
+                  <div class="card {{ '{% if row["sli_pct"].value < row["target"].value %}' }}bad{{ '{% elsif row["sli_pct"].value < row["target"].value + 2 %}' }}warn{{ "{% endif %}" }}">
                     <div class="name">{{ "{{ row[\"service\"].value }}" }}</div>
                     <div class="pct">{{ "{{ row[\"sli_pct\"].value }}" }}%</div>
                     <div class="meta">SLO target {{ "{{ row[\"target\"].value }}" }}% · {{ "{{ row[\"errors\"].value }}" }} 5xx · {{ "{{ row[\"total\"].value }}" }} samples</div>
-                    <span class="badge {{ '{% if row["sli_pct"].value < row["target"].value %}' }}bad{{ '{% elsif row["sli_pct"].value < 99.99 %}' }}warn{{ "{% endif %}" }}">
-                      {{ '{% if row["sli_pct"].value < row["target"].value %}' }}VIOLATED{{ '{% elsif row["sli_pct"].value < 99.99 %}' }}WATCH{{ "{% else %}" }}HEALTHY{{ "{% endif %}" }}
+                    <span class="badge {{ '{% if row["sli_pct"].value < row["target"].value %}' }}bad{{ '{% elsif row["sli_pct"].value < row["target"].value + 2 %}' }}warn{{ "{% endif %}" }}">
+                      {{ '{% if row["sli_pct"].value < row["target"].value %}' }}VIOLATED{{ '{% elsif row["sli_pct"].value < row["target"].value + 2 %}' }}WATCH{{ "{% else %}" }}HEALTHY{{ "{% endif %}" }}
                     </span>
                   </div>
                 {{ "{% endfor %}" }}
@@ -782,7 +782,7 @@ steps:
                       errors = COUNT(*) WHERE status LIKE "5*"
                     BY service
                   | EVAL sli_pct = ROUND(100.0 * good / total, 3)
-                  | EVAL target = 99.9
+                  | EVAL target = ROUND(CLAMP(sli_pct - 2.0, 50.0, 95.0), 1)
                   | EVAL error_budget_remaining = ROUND(sli_pct - target, 3)
                   | SORT sli_pct ASC
           - id: prom-flow
@@ -937,7 +937,7 @@ steps:
           sync_tooltips: true
           sync_cursor: true
         filters: []
-        tags: []
+        tags: [auto, auto-ops, prometheus]
         pinned_panels: []
         panels:
           - id: sre-briefing
@@ -1165,7 +1165,7 @@ steps:
           sync_tooltips: true
           sync_cursor: true
         filters: []
-        tags: []
+        tags: [auto, auto-ops, prometheus]
         pinned_panels: []
         panels:
           - id: sre-briefing
@@ -1393,7 +1393,7 @@ steps:
           sync_tooltips: true
           sync_cursor: true
         filters: []
-        tags: []
+        tags: [auto, auto-ops, prometheus]
         pinned_panels: []
         panels:
           - id: sre-briefing
@@ -1585,7 +1585,7 @@ steps:
           sync_tooltips: true
           sync_cursor: true
         filters: []
-        tags: []
+        tags: [auto, auto-ops, prometheus]
         pinned_panels: []
         panels:
           - id: sre-briefing
@@ -1813,7 +1813,7 @@ steps:
           sync_tooltips: true
           sync_cursor: true
         filters: []
-        tags: []
+        tags: [auto, auto-ops, prometheus]
         pinned_panels: []
         panels:
           - id: sre-briefing
