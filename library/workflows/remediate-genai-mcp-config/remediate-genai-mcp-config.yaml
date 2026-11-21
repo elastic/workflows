@@ -210,6 +210,12 @@ steps:
                               os.chmod(tmp, st.st_mode)
                               try: os.chown(tmp, st.st_uid, st.st_gid)
                               except PermissionError: pass
+                              try:
+                                import subprocess
+                                acl=subprocess.check_output(['getfacl','-p','--absolute-names',path], stderr=subprocess.DEVNULL)
+                                subprocess.run(['setfacl','--set-file=-',tmp], input=acl, check=False)
+                              except Exception:
+                                pass
                               os.replace(tmp,path)
                             except:
                               try: os.unlink(tmp)
