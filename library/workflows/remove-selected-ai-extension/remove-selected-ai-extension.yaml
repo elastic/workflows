@@ -34,7 +34,7 @@ tags:
 settings:
   timeout: 15m
   concurrency:
-    key: "{{ workflow.id }}-ext-{{ inputs.extension_id | default: event.alerts[0].gen_ai.extension.id | default: '' | downcase }}-{{ inputs.editor | default: event.alerts[0].gen_ai.editor.name | default: event.alerts[0].gen_ai.tool.name | default: '' | downcase }}-{{ inputs.profile | default: event.alerts[0].gen_ai.editor.profile | default: 'default' | downcase }}-{{ inputs.agent_id | default: event.alerts[0].agent.id | default: event.alerts[0].elastic.agent.id | default: 'none' }}"
+    key: "{{ workflow.id }}-ext-{{ inputs.extension_id | default: event.alerts[0].gen_ai.extension.id | default: '' | downcase | base64_encode }}|{{ inputs.editor | default: event.alerts[0].gen_ai.editor.name | default: event.alerts[0].gen_ai.tool.name | default: '' | downcase | base64_encode }}|{{ inputs.profile | default: event.alerts[0].gen_ai.editor.profile | default: 'default' | base64_encode }}|{{ inputs.agent_id | default: event.alerts[0].agent.id | default: event.alerts[0].elastic.agent.id | default: 'none' | base64_encode }}"
     strategy: drop
     max: 1
 consts:
