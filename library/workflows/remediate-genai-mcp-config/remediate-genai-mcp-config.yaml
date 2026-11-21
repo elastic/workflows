@@ -1,0 +1,196 @@
+template-metadata:
+  slug: remediate-genai-mcp-config
+  version: "1.0.0"
+  availability: ">=9.5.0"
+  name: "Remediate GenAI MCP Config"
+  description: >-
+        Remove or disable one verified malicious MCP or GenAI config entry, or
+        quarantine a dedicated malicious config file, while preserving unrelated
+        settings. Uses Defend execute. Audit by default.
+  solutions: [security]
+  categories: [response]
+  install:
+    form:
+      - name: enable-enforce
+        label: "Enforce config edit or quarantine"
+        description: >-
+          When true, apply the selected mode (remove_entry or quarantine_file) on
+          the verified path.
+        inputType: boolean
+        required: true
+        default: false
+
+name: Remediate GenAI MCP Config
+description: >-
+  Remove or disable one verified malicious MCP/config entry, or quarantine a
+  dedicated malicious config artifact. Preserve unrelated settings. Audit by
+  default; enforce uses Defend execute with format-aware adapters.
+enabled: true
+tags:
+  - security
+  - elastic-defend
+  - hunting
+  - response
+  - genai
+settings:
+  timeout: 15m
+  concurrency:
+    key: "{{ workflow.id }}-{{ inputs.agent_id | default: '' }}-{{ event.alerts[0].agent.id | default: event.alerts[0].elastic.agent.id | default: '' }}"
+    strategy: drop
+    max: 1
+consts:
+  enable_enforce: __install__.enable-enforce
+  quarantine_dir_linux: /var/tmp/elastic-genai-quarantine
+  quarantine_dir_macos: /var/tmp/elastic-genai-quarantine
+  quarantine_dir_windows: C:\ProgramData\Elastic\GenAIQuarantine
+  action_poll_limit: 36
+triggers:
+  - type: alert
+  - type: manual
+    inputs:
+      - name: agent_id
+        type: string
+        required: true
+      - name: file_path
+        type: string
+        required: true
+        description: Absolute path to mcp.json / client config
+      - name: os_type
+        type: string
+        required: true
+      - name: entry_key
+        type: string
+        required: true
+        description: Exact MCP server / entry key to remove
+      - name: entry_identity
+        type: string
+        required: false
+        default: ""
+        description: Expected command or URL identity (optional guard)
+      - name: mode
+        type: string
+        required: false
+        default: remove_entry
+        description: remove_entry | quarantine_file
+steps:
+  - name: set_context
+    type: data.set
+    with:
+      agent_id: "{% if event.alerts[0].agent.id != '' and event.alerts[0].agent.id != null %}{{ event.alerts[0].agent.id }}{% elsif event.alerts[0].elastic.agent.id != '' and event.alerts[0].elastic.agent.id != null %}{{ event.alerts[0].elastic.agent.id }}{% else %}{{ inputs.agent_id }}{% endif %}"
+      file_path: "{% if event.alerts[0].file.path != '' and event.alerts[0].file.path != null %}{{ event.alerts[0].file.path }}{% else %}{{ inputs.file_path }}{% endif %}"
+      os_type: "{% if event.alerts[0].host.os.type != '' and event.alerts[0].host.os.type != null %}{{ event.alerts[0].host.os.type | downcase }}{% else %}{{ inputs.os_type | downcase }}{% endif %}"
+      entry_key: "{{ inputs.entry_key }}"
+      entry_identity: "{% if inputs.entry_identity != '' %}{{ inputs.entry_identity }}{% else %}{% endif %}"
+      mode: "{% if inputs.mode != '' and inputs.mode != null %}{{ inputs.mode }}{% else %}remove_entry{% endif %}"
+      host_name: "{% if event.alerts[0].host.name != '' and event.alerts[0].host.name != null %}{{ event.alerts[0].host.name }}{% else %}{% endif %}"
+      alert_id: "{% if event.alerts[0].kibana.alert.uuid != '' and event.alerts[0].kibana.alert.uuid != null %}{{ event.alerts[0].kibana.alert.uuid }}{% elsif event.alerts[0]._id != '' and event.alerts[0]._id != null %}{{ event.alerts[0]._id }}{% else %}{% endif %}"
+      run_mode: "{% if event.alerts[0]._id != '' and event.alerts[0]._id != null %}alert{% else %}manual{% endif %}"
+  - name: validate
+    type: if
+    condition: 'steps.set_context.output.agent_id: "" OR steps.set_context.output.file_path: "" OR steps.set_context.output.entry_key: "" OR (not steps.set_context.output.os_type: "linux" AND not steps.set_context.output.os_type: "macos" AND not steps.set_context.output.os_type: "windows")'
+    steps:
+      - name: log_skip
+        type: console
+        with:
+          message: "skipped - need agent_id, file_path, entry_key, os_type. outcome=skipped"
+    else:
+      - name: decide_enforce
+        type: data.set
+        with:
+          enforce: "{% if consts.enable_enforce %}true{% else %}false{% endif %}"
+          qdir: "{% if steps.set_context.output.os_type == 'windows' %}{{ consts.quarantine_dir_windows }}{% elsif steps.set_context.output.os_type == 'macos' %}{{ consts.quarantine_dir_macos }}{% else %}{{ consts.quarantine_dir_linux }}{% endif %}"
+      - name: audit_path
+        type: if
+        condition: 'steps.decide_enforce.output.enforce: "false"'
+        steps:
+          - name: log_audit
+            type: console
+            with:
+              message: "audited - would {{ steps.set_context.output.mode }} key={{ steps.set_context.output.entry_key }} path={{ steps.set_context.output.file_path }} agent={{ steps.set_context.output.agent_id }} identity={{ steps.set_context.output.entry_identity }} outcome=audited"
+        else:
+          - name: set_cmd
+            type: data.set
+            with:
+              command: |-
+                {%- assign p = steps.set_context.output.file_path -%}
+                {%- assign k = steps.set_context.output.entry_key -%}
+                {%- assign ident = steps.set_context.output.entry_identity -%}
+                {%- assign mode = steps.set_context.output.mode -%}
+                {%- assign q = steps.decide_enforce.output.qdir -%}
+                {%- if mode == 'quarantine_file' -%}
+                {%- if steps.set_context.output.os_type == 'windows' -%}
+                powershell.exe -NoProfile -NonInteractive -Command "$ErrorActionPreference='Stop'; $p='{{ p | replace: "'", "''" }}'; $q='{{ q | replace: "'", "''" }}'; if($p -notmatch '^[A-Za-z]:\\' -or $p.Contains('..')){exit 42}; New-Item -ItemType Directory -Force -Path $q | Out-Null; $dest=Join-Path $q ([IO.Path]::GetFileName($p)+'.'+[guid]::NewGuid().ToString('N')); Move-Item -LiteralPath $p -Destination $dest -Force; Write-Output $dest"
+                {%- else -%}
+                p='{{ p | replace: "'", "'\\''" }}'; q='{{ q | replace: "'", "'\\''" }}'; case "$p" in /*) ;; *) exit 42 ;; esac; case "$p" in *..*) exit 42 ;; esac; mkdir -p "$q" || exit 43; dest="$q/$(basename "$p").$(date +%s).$$"; mv "$p" "$dest" || exit 44; printf '%s\n' "$dest"
+                {%- endif -%}
+                {%- else -%}
+                {%- if steps.set_context.output.os_type == 'windows' -%}
+                powershell.exe -NoProfile -NonInteractive -Command "$ErrorActionPreference='Stop'; $p='{{ p | replace: "'", "''" }}'; $k='{{ k | replace: "'", "''" }}'; $ident='{{ ident | replace: "'", "''" }}'; if($p -notmatch '^[A-Za-z]:\\' -or $p.Contains('..') -or [string]::IsNullOrWhiteSpace($k)){exit 42}; $raw=Get-Content -LiteralPath $p -Raw; $j=$raw | ConvertFrom-Json; if(-not $j.mcpServers -or -not $j.mcpServers.PSObject.Properties.Name.Contains($k)){exit 45}; $entry=$j.mcpServers.$k; if($ident -and $entry.command -ne $ident -and $entry.url -ne $ident -and ($entry.args -join ' ') -ne $ident){exit 46}; $j.mcpServers.PSObject.Properties.Remove($k); $j | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $p -Encoding utf8; Write-Output \"removed:$k\""
+                {%- else -%}
+                p='{{ p | replace: "'", "'\\''" }}'; k='{{ k | replace: "'", "'\\''" }}'; ident='{{ ident | replace: "'", "'\\''" }}'; case "$p" in /*) ;; *) exit 42 ;; esac; case "$p" in *..*) exit 42 ;; esac; test -f "$p" || exit 43; command -v python3 >/dev/null || exit 47; python3 - "$p" "$k" "$ident" <<'PY'
+                import json,sys
+                path,key,ident=sys.argv[1],sys.argv[2],sys.argv[3]
+                with open(path,'r',encoding='utf-8') as f: data=json.load(f)
+                servers=data.get('mcpServers') or data.get('mcp') or {}
+                if key not in servers: sys.exit(45)
+                entry=servers[key] or {}
+                if ident:
+                  blob=' '.join(str(x) for x in ([entry.get('command'), entry.get('url')] + list(entry.get('args') or [])) if x)
+                  if ident not in blob and entry.get('command')!=ident and entry.get('url')!=ident: sys.exit(46)
+                del servers[key]
+                if 'mcpServers' in data: data['mcpServers']=servers
+                elif 'mcp' in data: data['mcp']=servers
+                with open(path,'w',encoding='utf-8') as f: json.dump(data,f,indent=2); f.write('\n')
+                print('removed:'+key)
+                PY
+                {%- endif -%}
+                {%- endif -%}
+          - name: execute_edit
+            type: kibana.request
+            on-failure:
+              continue: true
+            with:
+              method: POST
+              path: /api/endpoint/action/execute
+              headers:
+                kbn-xsrf: "true"
+              body:
+                agent_type: endpoint
+                endpoint_ids:
+                  - "{{ steps.set_context.output.agent_id }}"
+                comment: "T03 remediate-genai-mcp-config mode={{ steps.set_context.output.mode }} key={{ steps.set_context.output.entry_key }} alert={{ steps.set_context.output.alert_id }}"
+                parameters:
+                  command: "{{ steps.set_cmd.output.command }}"
+                  timeout: 90
+          - name: remember
+            type: data.set
+            with:
+              action_id: "{{ steps.execute_edit.output.data.id | default: steps.execute_edit.output.id | default: '' }}"
+              completed: false
+          - name: poll
+            type: while
+            condition: 'variables.action_id: * and not variables.action_id: "" and not variables.completed: true'
+            max-iterations:
+              limit: 36
+              on-limit: continue
+            steps:
+              - name: wait_poll
+                type: wait
+                with:
+                  duration: 5s
+              - name: fetch
+                type: kibana.request
+                on-failure:
+                  continue: true
+                with:
+                  method: GET
+                  path: /api/endpoint/action/{{ variables.action_id | url_encode }}
+              - name: mark
+                type: data.set
+                with:
+                  completed: "{%- assign d = steps.fetch.output.data -%}{%- if variables.action_id != '' and d.id == variables.action_id and d.isCompleted -%}true{%- else -%}false{%- endif -%}"
+            if: 'variables.action_id: * and not variables.action_id: ""'
+          - name: summarize
+            type: console
+            with:
+              message: "mcp-config action_id={{ variables.action_id }} completed={{ variables.completed }} wasSuccessful={{ steps.fetch.output.data.wasSuccessful }} stdout={{ steps.fetch.output.data.outputs[steps.set_context.output.agent_id].content.stdout }} shell_code={{ steps.fetch.output.data.outputs[steps.set_context.output.agent_id].content.shell_code }} outcome={% if variables.completed and steps.fetch.output.data.wasSuccessful %}verified{% elsif variables.completed %}failed{% else %}unknown{% endif %}"
