@@ -81,12 +81,12 @@ triggers:
         type: string
         required: false
         default: ""
-        description: process.entity_id (preferred)
+        description: Required process.entity_id (PID-only refused)
       - name: pid
         type: number
         required: false
         default: 0
-        description: Process PID when entity_id unavailable
+        description: Display-only PID; kill always requires entity_id
       - name: process_name
         type: string
         required: false
@@ -140,7 +140,7 @@ steps:
           - name: log_skip
             type: console
             with:
-              message: "skipped - need agent_id and entity_id or pid. outcome=skipped"
+              message: "skipped - need agent_id and process.entity_id (PID-only refused). outcome=skipped"
         else:
           - name: require_ai_agent
             type: if
@@ -203,7 +203,7 @@ steps:
                         type: while
                         condition: 'variables.kill_action_id: * and not variables.kill_action_id: "" and not variables.kill_completed: true'
                         max-iterations:
-                          limit: "{{ consts.action_poll_limit }}"
+                          limit: 36
                           on-limit: continue
                         steps:
                           - name: wait_kill
