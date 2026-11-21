@@ -121,8 +121,26 @@ steps:
               - name: validate_path
                 type: data.set
                 with:
-                  path_safe: "{%- assign p = steps.set_context.output.file_path -%}{%- assign os = steps.set_context.output.os_type -%}{%- if p contains '..' or p contains '*' or p contains '?' -%}false{%- elsif os == 'windows' -%}{%- assign colon = p | slice: 1, 1 -%}{%- assign slash = p | slice: 2, 1 -%}{%- if colon == ':' and slash == '\\' -%}{%- if p contains '`' or p contains '$(' or p contains '${' or p contains '\"' -%}false{%- else -%}true{%- endif -%}{%- else -%}false{%- endif -%}{%- elsif p contains '/' -%}{%- assign first = p | slice: 0, 1 -%}{%- if first == '/' -%}{%- if p contains '`' or p contains '$(' or p contains '${' or p contains '\"' -%}false{%- else -%}true{%- endif -%}{%- else -%}false{%- endif -%}{%- else -%}false{%- endif -%}"
-                  key_safe: "{%- assign k = steps.set_context.output.entry_key -%}{%- if k contains '`' or k contains '$(' or k contains '${' or k contains '\"' or k contains \"'\" -%}false{%- else -%}true{%- endif -%}"
+                  path_safe: |-
+                    {%- assign p = steps.set_context.output.file_path -%}
+                    {%- assign os = steps.set_context.output.os_type -%}
+                    {%- assign bad = false -%}
+                    {%- if p contains "/../" or p contains "\\..\\" or p == ".." or p contains "*" or p contains "?" or p contains "`" or p contains "$(" or p contains "${" or p contains '"' -%}{%- assign bad = true -%}{%- endif -%}
+                    {%- if bad -%}false
+                    {%- elsif os == "windows" -%}
+                    {%- assign colon = p | slice: 1, 1 -%}
+                    {%- assign sep = p | slice: 2, 1 -%}
+                    {%- if colon == ":" and sep == "/" -%}true
+                    {%- elsif colon == ":" and sep == "\\" -%}true
+                    {%- else -%}false{%- endif -%}
+                    {%- else -%}
+                    {%- assign first = p | slice: 0, 1 -%}
+                    {%- if first == "/" -%}true{%- else -%}false{%- endif -%}
+                    {%- endif -%}
+
+                  key_safe: |-
+                    {%- assign k = steps.set_context.output.entry_key -%}
+                    {%- if k contains "`" or k contains "$(" or k contains "${" or k contains '"' -%}false{%- else -%}true{%- endif -%}
               - name: check_inputs_safe
                 type: if
                 condition: 'not steps.validate_path.output.path_safe: "true" OR not steps.validate_path.output.key_safe: "true"'
@@ -160,11 +178,11 @@ steps:
                             {%- if steps.set_context.output.os_type == 'windows' -%}
                             powershell.exe -NoProfile -NonInteractive -Command "$ErrorActionPreference='Stop'; $p=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('{{ p | base64_encode }}')); $q=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('{{ q | base64_encode }}')); if($p -notmatch '^[A-Za-z]:\\' -or $p.Contains('..')){exit 42}; if(-not (Test-Path -LiteralPath $p) -or (Get-Item -LiteralPath $p).PSIsContainer){exit 43}; New-Item -ItemType Directory -Force -Path $q | Out-Null; $acl=Get-Acl $q; $acl.SetAccessRuleProtection($true,$false); $rule=New-Object Security.AccessControl.FileSystemAccessRule('SYSTEM','FullControl','Allow'); $acl.SetAccessRule($rule); Set-Acl $q $acl; $dest=Join-Path $q ([IO.Path]::GetFileName($p)+'.'+[guid]::NewGuid().ToString('N')); Move-Item -LiteralPath $p -Destination $dest -Force; Write-Output $dest"
                             {%- else -%}
-                            p='{{ p | replace: "'", "'\\''" }}'; q='{{ q | replace: "'", "'\\''" }}'; case "$p" in /*) ;; *) exit 42 ;; esac; case "$p" in *..*) exit 42 ;; esac; [ -f "$p" ] && [ ! -L "$p" ] || exit 43; install -d -m 700 "$q" || exit 43; dest="$q/$(basename "$p").$(date +%s).$$"; mv -- "$p" "$dest" || exit 44; chmod 600 "$dest" 2>/dev/null; printf '%s\n' "$dest"
+                            p='{{ p | replace: "'", "'\\''" }}'; q='{{ q | replace: "'", "'\\''" }}'; case "$p" in /*) ;; *) exit 42 ;; esac; case "$p" in *..*) exit 42 ;; esac; [ -f "$p" ] && [ ! -L "$p" ] || exit 43; install -d -m 700 "$q" || exit 43; dest="$q/$(basename "$p").$(date +%s).$$"; mv -- "$p" "$dest" || exit 44; if [ "$(stat -c %h "$dest" 2>/dev/null || stat -f %l "$dest")" = 1 ]; then chmod 600 "$dest"; fi; printf '%s\n' "$dest"
                             {%- endif -%}
                             {%- else -%}
                             {%- if steps.set_context.output.os_type == 'windows' -%}
-                            powershell.exe -NoProfile -NonInteractive -Command "$ErrorActionPreference='Stop'; $p=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('{{ p | base64_encode }}')); $k=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('{{ k | base64_encode }}')); $ident=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('{{ ident | base64_encode }}')); if($p -notmatch '^[A-Za-z]:\\' -or $p.Contains('..') -or [string]::IsNullOrWhiteSpace($k)){exit 42}; if(-not (Test-Path -LiteralPath $p) -or (Get-Item -LiteralPath $p).PSIsContainer){exit 43}; $raw=[IO.File]::ReadAllText($p,[Text.Encoding]::UTF8); $j=$raw | ConvertFrom-Json; $section='mcpServers'; if(-not $j.mcpServers){if($j.mcp){$section='mcp'}else{exit 45}}; if(-not (@($j.$section.PSObject.Properties.Name) -contains $k)){if($section -eq 'mcpServers' -and $j.mcp -and (@($j.mcp.PSObject.Properties.Name) -contains $k)){$section='mcp'}else{exit 45}}; $entry=$j.$section.$k; if($ident -and $entry.command -ne $ident -and $entry.url -ne $ident -and ($entry.args -join ' ') -ne $ident){exit 46}; $j.$section.PSObject.Properties.Remove($k); $tmp=$p+'.tmp.'+[guid]::NewGuid().ToString('N'); [IO.File]::WriteAllText($tmp,($j | ConvertTo-Json -Depth 20),[Text.Encoding]::new(65001,$false)); Move-Item -LiteralPath $tmp -Destination $p -Force; Write-Output ('removed:'+$k)"
+                            powershell.exe -NoProfile -NonInteractive -Command "$ErrorActionPreference='Stop'; $p=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('{{ p | base64_encode }}')); $k=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('{{ k | base64_encode }}')); $ident=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('{{ ident | base64_encode }}')); if($p -notmatch '^[A-Za-z]:\\' -or $p.Contains('..') -or [string]::IsNullOrWhiteSpace($k)){exit 42}; if(-not (Test-Path -LiteralPath $p) -or (Get-Item -LiteralPath $p).PSIsContainer){exit 43}; $raw=[IO.File]::ReadAllText($p,[Text.Encoding]::UTF8); $j=$raw | ConvertFrom-Json; $section='mcpServers'; if(-not $j.mcpServers){if($j.mcp){$section='mcp'}else{exit 45}}; if(-not ([bool]($j.$section.PSObject.Properties | Where-Object { $_.Name -ceq $k }))){if($section -eq 'mcpServers' -and $j.mcp -and ([bool]($j.mcp.PSObject.Properties | Where-Object { $_.Name -ceq $k }))){$section='mcp'}else{exit 45}}; $entry=$j.$section.$k; if($ident -and $entry.command -ne $ident -and $entry.url -ne $ident -and ($entry.args -join ' ') -ne $ident){exit 46}; $j.$section.PSObject.Properties.Remove($k); $tmp=$p+'.tmp.'+[guid]::NewGuid().ToString('N'); $acl=Get-Acl -LiteralPath $p; [IO.File]::WriteAllText($tmp,($j | ConvertTo-Json -Depth 20),[Text.Encoding]::new(65001,$false)); Move-Item -LiteralPath $tmp -Destination $p -Force; Set-Acl -LiteralPath $p -AclObject $acl; Write-Output ('removed:'+$k)"
                             {%- else -%}
                             p='{{ p | replace: "'", "'\\''" }}'; k='{{ k | replace: "'", "'\\''" }}'; ident='{{ ident | replace: "'", "'\\''" }}'; case "$p" in /*) ;; *) exit 42 ;; esac; case "$p" in *..*) exit 42 ;; esac; [ -f "$p" ] && [ ! -L "$p" ] || exit 43; command -v python3 >/dev/null || exit 47; python3 - "$p" "$k" "$ident" <<'PY'
                             import json,sys,os,tempfile
@@ -189,6 +207,9 @@ steps:
                             fd,tmp=tempfile.mkstemp(dir=os.path.dirname(path),suffix='.tmp')
                             try:
                               with os.fdopen(fd,'w',encoding='utf-8') as f: json.dump(data,f,indent=2); f.write('\n'); f.flush(); os.fsync(f.fileno())
+                              os.chmod(tmp, st.st_mode)
+                              try: os.chown(tmp, st.st_uid, st.st_gid)
+                              except PermissionError: pass
                               os.replace(tmp,path)
                             except:
                               try: os.unlink(tmp)
@@ -224,7 +245,7 @@ steps:
                         type: while
                         condition: 'variables.action_id: * and not variables.action_id: "" and not variables.completed: true'
                         max-iterations:
-                          limit: "{{ consts.action_poll_limit }}"
+                          limit: 36
                           on-limit: continue
                         steps:
                           - name: wait_poll
