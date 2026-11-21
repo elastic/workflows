@@ -6,7 +6,10 @@ template-metadata:
   description: >-
         Remove or disable one verified malicious MCP or GenAI config entry, or
         quarantine a dedicated malicious config file, while preserving unrelated
-        settings. Uses Defend execute. Audit by default.
+        settings. Uses Defend execute. Audit by default. Alert-triggered runs
+        require the detection rule action to pass entry_key (and optionally
+        entry_identity, mode) as workflow inputs; multi-alert batches are
+        rejected.
   solutions: [security]
   categories: [response]
   install:
@@ -24,7 +27,9 @@ name: Remediate GenAI MCP Config
 description: >-
   Remove or disable one verified malicious MCP/config entry, or quarantine a
   dedicated malicious config artifact. Preserve unrelated settings. Audit by
-  default; enforce uses Defend execute with format-aware adapters.
+  default; enforce uses Defend execute with format-aware adapters. Alert-
+  triggered runs require the rule action to pass entry_key (and optionally
+  entry_identity, mode) as workflow inputs. Multi-alert batches are rejected.
 enabled: true
 tags:
   - security
@@ -35,13 +40,13 @@ tags:
 settings:
   timeout: 15m
   concurrency:
-    key: "{{ workflow.id }}-{{ inputs.agent_id | default: '' }}-{{ event.alerts[0].agent.id | default: event.alerts[0].elastic.agent.id | default: '' }}"
+    key: "{{ workflow.id }}-{{ inputs.agent_id | default: event.alerts[0].agent.id | default: event.alerts[0].elastic.agent.id | default: '' }}-{{ inputs.file_path | default: event.alerts[0].file.path | default: '' }}-{{ inputs.entry_key | default: '' }}"
     strategy: drop
     max: 1
 consts:
   enable_enforce: __install__.enable-enforce
-  quarantine_dir_linux: /var/tmp/elastic-genai-quarantine
-  quarantine_dir_macos: /var/tmp/elastic-genai-quarantine
+  quarantine_dir_linux: /var/lib/elastic-genai-quarantine
+  quarantine_dir_macos: /var/lib/elastic-genai-quarantine
   quarantine_dir_windows: C:\ProgramData\Elastic\GenAIQuarantine
   action_poll_limit: 36
 triggers:
@@ -81,116 +86,164 @@ steps:
       os_type: "{% if event.alerts[0].host.os.type != '' and event.alerts[0].host.os.type != null %}{{ event.alerts[0].host.os.type | downcase }}{% else %}{{ inputs.os_type | downcase }}{% endif %}"
       entry_key: "{{ inputs.entry_key }}"
       entry_identity: "{% if inputs.entry_identity != '' %}{{ inputs.entry_identity }}{% else %}{% endif %}"
-      mode: "{% if inputs.mode != '' and inputs.mode != null %}{{ inputs.mode }}{% else %}remove_entry{% endif %}"
+      mode: "{% if inputs.mode == 'remove_entry' or inputs.mode == 'quarantine_file' %}{{ inputs.mode }}{% else %}remove_entry{% endif %}"
       host_name: "{% if event.alerts[0].host.name != '' and event.alerts[0].host.name != null %}{{ event.alerts[0].host.name }}{% else %}{% endif %}"
       alert_id: "{% if event.alerts[0].kibana.alert.uuid != '' and event.alerts[0].kibana.alert.uuid != null %}{{ event.alerts[0].kibana.alert.uuid }}{% elsif event.alerts[0]._id != '' and event.alerts[0]._id != null %}{{ event.alerts[0]._id }}{% else %}{% endif %}"
       run_mode: "{% if event.alerts[0]._id != '' and event.alerts[0]._id != null %}alert{% else %}manual{% endif %}"
-  - name: validate
+      alert_count: "{{ event.alerts | size | default: 0 }}"
+  - name: reject_multi_alert
     type: if
-    condition: 'steps.set_context.output.agent_id: "" OR steps.set_context.output.file_path: "" OR steps.set_context.output.entry_key: "" OR (not steps.set_context.output.os_type: "linux" AND not steps.set_context.output.os_type: "macos" AND not steps.set_context.output.os_type: "windows")'
+    condition: 'steps.set_context.output.run_mode: "alert" AND not steps.set_context.output.alert_count: "0" AND not steps.set_context.output.alert_count: "1"'
     steps:
-      - name: log_skip
+      - name: log_multi_alert
         type: console
         with:
-          message: "skipped - need agent_id, file_path, entry_key, os_type. outcome=skipped"
+          message: "skipped - received {{ steps.set_context.output.alert_count }} alerts; this workflow handles one config per run. Configure the rule action for per-alert mode. outcome=skipped"
     else:
-      - name: decide_enforce
-        type: data.set
-        with:
-          enforce: "{% if consts.enable_enforce %}true{% else %}false{% endif %}"
-          qdir: "{% if steps.set_context.output.os_type == 'windows' %}{{ consts.quarantine_dir_windows }}{% elsif steps.set_context.output.os_type == 'macos' %}{{ consts.quarantine_dir_macos }}{% else %}{{ consts.quarantine_dir_linux }}{% endif %}"
-      - name: audit_path
+      - name: validate_mode
         type: if
-        condition: 'steps.decide_enforce.output.enforce: "false"'
+        condition: 'not steps.set_context.output.mode: "remove_entry" AND not steps.set_context.output.mode: "quarantine_file"'
         steps:
-          - name: log_audit
+          - name: log_bad_mode
             type: console
             with:
-              message: "audited - would {{ steps.set_context.output.mode }} key={{ steps.set_context.output.entry_key }} path={{ steps.set_context.output.file_path }} agent={{ steps.set_context.output.agent_id }} identity={{ steps.set_context.output.entry_identity }} outcome=audited"
+              message: "skipped - mode must be remove_entry or quarantine_file, got={{ steps.set_context.output.mode }}. outcome=skipped"
         else:
-          - name: set_cmd
-            type: data.set
-            with:
-              command: |-
-                {%- assign p = steps.set_context.output.file_path -%}
-                {%- assign k = steps.set_context.output.entry_key -%}
-                {%- assign ident = steps.set_context.output.entry_identity -%}
-                {%- assign mode = steps.set_context.output.mode -%}
-                {%- assign q = steps.decide_enforce.output.qdir -%}
-                {%- if mode == 'quarantine_file' -%}
-                {%- if steps.set_context.output.os_type == 'windows' -%}
-                powershell.exe -NoProfile -NonInteractive -Command "$ErrorActionPreference='Stop'; $p='{{ p | replace: "'", "''" }}'; $q='{{ q | replace: "'", "''" }}'; if($p -notmatch '^[A-Za-z]:\\' -or $p.Contains('..')){exit 42}; New-Item -ItemType Directory -Force -Path $q | Out-Null; $dest=Join-Path $q ([IO.Path]::GetFileName($p)+'.'+[guid]::NewGuid().ToString('N')); Move-Item -LiteralPath $p -Destination $dest -Force; Write-Output $dest"
-                {%- else -%}
-                p='{{ p | replace: "'", "'\\''" }}'; q='{{ q | replace: "'", "'\\''" }}'; case "$p" in /*) ;; *) exit 42 ;; esac; case "$p" in *..*) exit 42 ;; esac; mkdir -p "$q" || exit 43; dest="$q/$(basename "$p").$(date +%s).$$"; mv "$p" "$dest" || exit 44; printf '%s\n' "$dest"
-                {%- endif -%}
-                {%- else -%}
-                {%- if steps.set_context.output.os_type == 'windows' -%}
-                powershell.exe -NoProfile -NonInteractive -Command "$ErrorActionPreference='Stop'; $p='{{ p | replace: "'", "''" }}'; $k='{{ k | replace: "'", "''" }}'; $ident='{{ ident | replace: "'", "''" }}'; if($p -notmatch '^[A-Za-z]:\\' -or $p.Contains('..') -or [string]::IsNullOrWhiteSpace($k)){exit 42}; $raw=Get-Content -LiteralPath $p -Raw; $j=$raw | ConvertFrom-Json; if(-not $j.mcpServers -or -not $j.mcpServers.PSObject.Properties.Name.Contains($k)){exit 45}; $entry=$j.mcpServers.$k; if($ident -and $entry.command -ne $ident -and $entry.url -ne $ident -and ($entry.args -join ' ') -ne $ident){exit 46}; $j.mcpServers.PSObject.Properties.Remove($k); $j | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $p -Encoding utf8; Write-Output \"removed:$k\""
-                {%- else -%}
-                p='{{ p | replace: "'", "'\\''" }}'; k='{{ k | replace: "'", "'\\''" }}'; ident='{{ ident | replace: "'", "'\\''" }}'; case "$p" in /*) ;; *) exit 42 ;; esac; case "$p" in *..*) exit 42 ;; esac; test -f "$p" || exit 43; command -v python3 >/dev/null || exit 47; python3 - "$p" "$k" "$ident" <<'PY'
-                import json,sys
-                path,key,ident=sys.argv[1],sys.argv[2],sys.argv[3]
-                with open(path,'r',encoding='utf-8') as f: data=json.load(f)
-                servers=data.get('mcpServers') or data.get('mcp') or {}
-                if key not in servers: sys.exit(45)
-                entry=servers[key] or {}
-                if ident:
-                  blob=' '.join(str(x) for x in ([entry.get('command'), entry.get('url')] + list(entry.get('args') or [])) if x)
-                  if ident not in blob and entry.get('command')!=ident and entry.get('url')!=ident: sys.exit(46)
-                del servers[key]
-                if 'mcpServers' in data: data['mcpServers']=servers
-                elif 'mcp' in data: data['mcp']=servers
-                with open(path,'w',encoding='utf-8') as f: json.dump(data,f,indent=2); f.write('\n')
-                print('removed:'+key)
-                PY
-                {%- endif -%}
-                {%- endif -%}
-          - name: execute_edit
-            type: kibana.request
-            on-failure:
-              continue: true
-            with:
-              method: POST
-              path: /api/endpoint/action/execute
-              headers:
-                kbn-xsrf: "true"
-              body:
-                agent_type: endpoint
-                endpoint_ids:
-                  - "{{ steps.set_context.output.agent_id }}"
-                comment: "T03 remediate-genai-mcp-config mode={{ steps.set_context.output.mode }} key={{ steps.set_context.output.entry_key }} alert={{ steps.set_context.output.alert_id }}"
-                parameters:
-                  command: "{{ steps.set_cmd.output.command }}"
-                  timeout: 90
-          - name: remember
-            type: data.set
-            with:
-              action_id: "{{ steps.execute_edit.output.data.id | default: steps.execute_edit.output.id | default: '' }}"
-              completed: false
-          - name: poll
-            type: while
-            condition: 'variables.action_id: * and not variables.action_id: "" and not variables.completed: true'
-            max-iterations:
-              limit: 36
-              on-limit: continue
+          - name: validate
+            type: if
+            condition: 'steps.set_context.output.agent_id: "" OR steps.set_context.output.file_path: "" OR steps.set_context.output.entry_key: "" OR (not steps.set_context.output.os_type: "linux" AND not steps.set_context.output.os_type: "macos" AND not steps.set_context.output.os_type: "windows")'
             steps:
-              - name: wait_poll
-                type: wait
+              - name: log_skip
+                type: console
                 with:
-                  duration: 5s
-              - name: fetch
-                type: kibana.request
-                on-failure:
-                  continue: true
-                with:
-                  method: GET
-                  path: /api/endpoint/action/{{ variables.action_id | url_encode }}
-              - name: mark
+                  message: "skipped - need agent_id, file_path, entry_key, os_type. outcome=skipped"
+            else:
+              - name: validate_path
                 type: data.set
                 with:
-                  completed: "{%- assign d = steps.fetch.output.data -%}{%- if variables.action_id != '' and d.id == variables.action_id and d.isCompleted -%}true{%- else -%}false{%- endif -%}"
-            if: 'variables.action_id: * and not variables.action_id: ""'
-          - name: summarize
-            type: console
-            with:
-              message: "mcp-config action_id={{ variables.action_id }} completed={{ variables.completed }} wasSuccessful={{ steps.fetch.output.data.wasSuccessful }} stdout={{ steps.fetch.output.data.outputs[steps.set_context.output.agent_id].content.stdout }} shell_code={{ steps.fetch.output.data.outputs[steps.set_context.output.agent_id].content.shell_code }} outcome={% if variables.completed and steps.fetch.output.data.wasSuccessful %}verified{% elsif variables.completed %}failed{% else %}unknown{% endif %}"
+                  path_safe: "{%- assign p = steps.set_context.output.file_path -%}{%- assign os = steps.set_context.output.os_type -%}{%- if p contains '..' or p contains '*' or p contains '?' -%}false{%- elsif os == 'windows' -%}{%- assign colon = p | slice: 1, 1 -%}{%- assign slash = p | slice: 2, 1 -%}{%- if colon == ':' and slash == '\\' -%}{%- if p contains '`' or p contains '$(' or p contains '${' or p contains '\"' -%}false{%- else -%}true{%- endif -%}{%- else -%}false{%- endif -%}{%- elsif p contains '/' -%}{%- assign first = p | slice: 0, 1 -%}{%- if first == '/' -%}{%- if p contains '`' or p contains '$(' or p contains '${' or p contains '\"' -%}false{%- else -%}true{%- endif -%}{%- else -%}false{%- endif -%}{%- else -%}false{%- endif -%}"
+                  key_safe: "{%- assign k = steps.set_context.output.entry_key -%}{%- if k contains '`' or k contains '$(' or k contains '${' or k contains '\"' or k contains \"'\" -%}false{%- else -%}true{%- endif -%}"
+              - name: check_inputs_safe
+                type: if
+                condition: 'not steps.validate_path.output.path_safe: "true" OR not steps.validate_path.output.key_safe: "true"'
+                steps:
+                  - name: log_bad_inputs
+                    type: console
+                    with:
+                      message: "skipped - file_path must be absolute without .., wildcards, or shell expansion characters; entry_key must not contain shell metacharacters. outcome=skipped"
+                else:
+                  - name: decide_enforce
+                    type: data.set
+                    with:
+                      enforce: "{% if consts.enable_enforce %}true{% else %}false{% endif %}"
+                      qdir: "{% if steps.set_context.output.os_type == 'windows' %}{{ consts.quarantine_dir_windows }}{% elsif steps.set_context.output.os_type == 'macos' %}{{ consts.quarantine_dir_macos }}{% else %}{{ consts.quarantine_dir_linux }}{% endif %}"
+                      identity_display: "{% if steps.set_context.output.entry_identity != '' %}set({{ steps.set_context.output.entry_identity | truncate: 32 }}){% else %}unset{% endif %}"
+                  - name: audit_path
+                    type: if
+                    condition: 'steps.decide_enforce.output.enforce: "false"'
+                    steps:
+                      - name: log_audit
+                        type: console
+                        with:
+                          message: "audited - would {{ steps.set_context.output.mode }} key={{ steps.set_context.output.entry_key }} path={{ steps.set_context.output.file_path }} agent={{ steps.set_context.output.agent_id }} identity={{ steps.decide_enforce.output.identity_display }} outcome=audited"
+                    else:
+                      - name: set_cmd
+                        type: data.set
+                        with:
+                          command: |-
+                            {%- assign p = steps.set_context.output.file_path -%}
+                            {%- assign k = steps.set_context.output.entry_key -%}
+                            {%- assign ident = steps.set_context.output.entry_identity -%}
+                            {%- assign mode = steps.set_context.output.mode -%}
+                            {%- assign q = steps.decide_enforce.output.qdir -%}
+                            {%- if mode == 'quarantine_file' -%}
+                            {%- if steps.set_context.output.os_type == 'windows' -%}
+                            powershell.exe -NoProfile -NonInteractive -Command "$ErrorActionPreference='Stop'; $p=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('{{ p | base64_encode }}')); $q=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('{{ q | base64_encode }}')); if($p -notmatch '^[A-Za-z]:\\' -or $p.Contains('..')){exit 42}; if(-not (Test-Path -LiteralPath $p) -or (Get-Item -LiteralPath $p).PSIsContainer){exit 43}; New-Item -ItemType Directory -Force -Path $q | Out-Null; $acl=Get-Acl $q; $acl.SetAccessRuleProtection($true,$false); $rule=New-Object Security.AccessControl.FileSystemAccessRule('SYSTEM','FullControl','Allow'); $acl.SetAccessRule($rule); Set-Acl $q $acl; $dest=Join-Path $q ([IO.Path]::GetFileName($p)+'.'+[guid]::NewGuid().ToString('N')); Move-Item -LiteralPath $p -Destination $dest -Force; Write-Output $dest"
+                            {%- else -%}
+                            p='{{ p | replace: "'", "'\\''" }}'; q='{{ q | replace: "'", "'\\''" }}'; case "$p" in /*) ;; *) exit 42 ;; esac; case "$p" in *..*) exit 42 ;; esac; [ -f "$p" ] && [ ! -L "$p" ] || exit 43; install -d -m 700 "$q" || exit 43; dest="$q/$(basename "$p").$(date +%s).$$"; mv -- "$p" "$dest" || exit 44; chmod 600 "$dest" 2>/dev/null; printf '%s\n' "$dest"
+                            {%- endif -%}
+                            {%- else -%}
+                            {%- if steps.set_context.output.os_type == 'windows' -%}
+                            powershell.exe -NoProfile -NonInteractive -Command "$ErrorActionPreference='Stop'; $p=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('{{ p | base64_encode }}')); $k=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('{{ k | base64_encode }}')); $ident=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('{{ ident | base64_encode }}')); if($p -notmatch '^[A-Za-z]:\\' -or $p.Contains('..') -or [string]::IsNullOrWhiteSpace($k)){exit 42}; if(-not (Test-Path -LiteralPath $p) -or (Get-Item -LiteralPath $p).PSIsContainer){exit 43}; $raw=[IO.File]::ReadAllText($p,[Text.Encoding]::UTF8); $j=$raw | ConvertFrom-Json; $section='mcpServers'; if(-not $j.mcpServers){if($j.mcp){$section='mcp'}else{exit 45}}; if(-not (@($j.$section.PSObject.Properties.Name) -contains $k)){if($section -eq 'mcpServers' -and $j.mcp -and (@($j.mcp.PSObject.Properties.Name) -contains $k)){$section='mcp'}else{exit 45}}; $entry=$j.$section.$k; if($ident -and $entry.command -ne $ident -and $entry.url -ne $ident -and ($entry.args -join ' ') -ne $ident){exit 46}; $j.$section.PSObject.Properties.Remove($k); $tmp=$p+'.tmp.'+[guid]::NewGuid().ToString('N'); [IO.File]::WriteAllText($tmp,($j | ConvertTo-Json -Depth 20),[Text.Encoding]::new(65001,$false)); Move-Item -LiteralPath $tmp -Destination $p -Force; Write-Output ('removed:'+$k)"
+                            {%- else -%}
+                            p='{{ p | replace: "'", "'\\''" }}'; k='{{ k | replace: "'", "'\\''" }}'; ident='{{ ident | replace: "'", "'\\''" }}'; case "$p" in /*) ;; *) exit 42 ;; esac; case "$p" in *..*) exit 42 ;; esac; [ -f "$p" ] && [ ! -L "$p" ] || exit 43; command -v python3 >/dev/null || exit 47; python3 - "$p" "$k" "$ident" <<'PY'
+                            import json,sys,os,tempfile
+                            path,key,ident=sys.argv[1],sys.argv[2],sys.argv[3]
+                            st=os.lstat(path)
+                            import stat as stmod
+                            if not stmod.S_ISREG(st.st_mode): sys.exit(43)
+                            with open(path,'r',encoding='utf-8') as f: data=json.load(f)
+                            section=None
+                            if 'mcpServers' in data and key in data.get('mcpServers',{}): section='mcpServers'
+                            elif 'mcp' in data and key in data.get('mcp',{}): section='mcp'
+                            if not section: sys.exit(45)
+                            servers=data[section]
+                            entry=servers[key] or {}
+                            if ident:
+                              cmd=str(entry.get('command',''))
+                              url=str(entry.get('url',''))
+                              args=' '.join(str(x) for x in (entry.get('args') or []))
+                              if ident != cmd and ident != url and ident != args and ident not in (cmd+' '+url+' '+args): sys.exit(46)
+                            del servers[key]
+                            data[section]=servers
+                            fd,tmp=tempfile.mkstemp(dir=os.path.dirname(path),suffix='.tmp')
+                            try:
+                              with os.fdopen(fd,'w',encoding='utf-8') as f: json.dump(data,f,indent=2); f.write('\n'); f.flush(); os.fsync(f.fileno())
+                              os.replace(tmp,path)
+                            except:
+                              try: os.unlink(tmp)
+                              except: pass
+                              raise
+                            print('removed:'+key)
+                            PY
+                            {%- endif -%}
+                            {%- endif -%}
+                      - name: execute_edit
+                        type: kibana.request
+                        on-failure:
+                          continue: true
+                        with:
+                          method: POST
+                          path: /api/endpoint/action/execute
+                          headers:
+                            kbn-xsrf: "true"
+                          body:
+                            agent_type: endpoint
+                            endpoint_ids:
+                              - "{{ steps.set_context.output.agent_id }}"
+                            comment: "T03 remediate-genai-mcp-config mode={{ steps.set_context.output.mode }} key={{ steps.set_context.output.entry_key }} alert={{ steps.set_context.output.alert_id }}"
+                            parameters:
+                              command: "{{ steps.set_cmd.output.command }}"
+                              timeout: 90
+                      - name: remember
+                        type: data.set
+                        with:
+                          action_id: "{{ steps.execute_edit.output.data.id | default: steps.execute_edit.output.id | default: '' }}"
+                          completed: false
+                      - name: poll
+                        type: while
+                        condition: 'variables.action_id: * and not variables.action_id: "" and not variables.completed: true'
+                        max-iterations:
+                          limit: "{{ consts.action_poll_limit }}"
+                          on-limit: continue
+                        steps:
+                          - name: wait_poll
+                            type: wait
+                            with:
+                              duration: 5s
+                          - name: fetch
+                            type: kibana.request
+                            on-failure:
+                              continue: true
+                            with:
+                              method: GET
+                              path: /api/endpoint/action/{{ variables.action_id | url_encode }}
+                          - name: mark
+                            type: data.set
+                            with:
+                              completed: "{%- assign d = steps.fetch.output.data -%}{%- if variables.action_id != '' and d.id == variables.action_id and d.isCompleted -%}true{%- else -%}false{%- endif -%}"
+                        if: 'variables.action_id: * and not variables.action_id: ""'
+                      - name: summarize
+                        type: console
+                        with:
+                          message: "mcp-config action_id={{ variables.action_id }} completed={{ variables.completed }} wasSuccessful={{ steps.fetch.output.data.wasSuccessful }} shell_code={{ steps.fetch.output.data.outputs[steps.set_context.output.agent_id].content.shell_code }} stdout={{ steps.fetch.output.data.outputs[steps.set_context.output.agent_id].content.stdout }} outcome={% if variables.completed == 'true' and steps.fetch.output.data.wasSuccessful and steps.fetch.output.data.outputs[steps.set_context.output.agent_id].content.shell_code == 0 %}verified{% elsif variables.completed == 'true' %}failed{% else %}unknown{% endif %}"
