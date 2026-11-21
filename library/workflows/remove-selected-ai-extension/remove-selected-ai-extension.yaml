@@ -37,9 +37,24 @@ settings:
     key: |-
       {%- assign eid = inputs.extension_id | default: event.alerts[0].gen_ai.extension.id | default: '' | strip | downcase | truncate: 256, '' -%}
       {%- assign ed = inputs.editor | default: event.alerts[0].gen_ai.editor.name | default: event.alerts[0].gen_ai.tool.name | default: '' | downcase | truncate: 32, '' -%}
-      {%- assign prof = inputs.profile | default: event.alerts[0].gen_ai.editor.profile | default: 'default' | strip | truncate: 128, '' -%}
+      {%- assign prof_raw = '' -%}
+      {%- assign prof_supplied = false -%}
+      {%- if inputs.profile != '' and inputs.profile != null -%}
+      {%- assign prof_raw = inputs.profile -%}
+      {%- assign prof_supplied = true -%}
+      {%- elsif event.alerts[0].gen_ai.editor.profile != '' and event.alerts[0].gen_ai.editor.profile != null -%}
+      {%- assign prof_raw = event.alerts[0].gen_ai.editor.profile -%}
+      {%- assign prof_supplied = true -%}
+      {%- endif -%}
+      {%- if prof_supplied -%}
+      {%- assign prof = prof_raw | strip | truncate: 128, '' -%}
       {%- assign prof_lc = prof | downcase -%}
-      {%- if prof_lc == 'default' -%}{%- assign prof = 'default' -%}{%- endif -%}
+      {%- if prof == '' -%}{%- assign prof = '__blank__' -%}
+      {%- elsif prof_lc == 'default' -%}{%- assign prof = 'default' -%}
+      {%- endif -%}
+      {%- else -%}
+      {%- assign prof = 'default' -%}
+      {%- endif -%}
       {%- assign aid = inputs.agent_id | default: event.alerts[0].agent.id | default: event.alerts[0].elastic.agent.id | default: 'none' | strip | truncate: 128, '' -%}
       {{ workflow.id }}-ext-{{ eid | base64_encode }}|{{ ed | base64_encode }}|{{ prof | base64_encode }}|{{ aid | base64_encode }}
     strategy: drop
@@ -83,15 +98,25 @@ steps:
       editor: "{% if inputs.editor != '' and inputs.editor != null %}{{ inputs.editor | downcase }}{% elsif event.alerts[0].gen_ai.editor.name != '' and event.alerts[0].gen_ai.editor.name != null %}{{ event.alerts[0].gen_ai.editor.name | downcase }}{% elsif event.alerts[0].gen_ai.tool.name != '' and event.alerts[0].gen_ai.tool.name != null %}{{ event.alerts[0].gen_ai.tool.name | downcase }}{% else %}{% endif %}"
       extension_id: "{% if inputs.extension_id != '' and inputs.extension_id != null %}{{ inputs.extension_id }}{% elsif event.alerts[0].gen_ai.extension.id != '' and event.alerts[0].gen_ai.extension.id != null %}{{ event.alerts[0].gen_ai.extension.id }}{% else %}{% endif %}"
       profile: |-
+        {%- assign supplied = false -%}
+        {%- assign raw = '' -%}
         {%- if inputs.profile != '' and inputs.profile != null -%}
-        {%- assign p = inputs.profile | strip -%}
+        {%- assign raw = inputs.profile -%}
+        {%- assign supplied = true -%}
         {%- elsif event.alerts[0].gen_ai.editor.profile != '' and event.alerts[0].gen_ai.editor.profile != null -%}
-        {%- assign p = event.alerts[0].gen_ai.editor.profile | strip -%}
-        {%- else -%}
-        {%- assign p = 'default' -%}
+        {%- assign raw = event.alerts[0].gen_ai.editor.profile -%}
+        {%- assign supplied = true -%}
         {%- endif -%}
+        {%- if supplied -%}
+        {%- assign p = raw | strip -%}
+        {%- if p == '' -%}
+        {%- else -%}
         {%- assign pl = p | downcase -%}
-        {%- if pl == 'default' or pl == '' -%}default{%- else -%}{{ p }}{%- endif -%}
+        {%- if pl == 'default' -%}default{%- else -%}{{ p }}{%- endif -%}
+        {%- endif -%}
+        {%- else -%}
+        default
+        {%- endif -%}
       install_source: "{% if inputs.install_source != '' and inputs.install_source != null %}{{ inputs.install_source | downcase }}{% elsif event.alerts[0].gen_ai.extension.install_source != '' and event.alerts[0].gen_ai.extension.install_source != null %}{{ event.alerts[0].gen_ai.extension.install_source | downcase }}{% else %}user{% endif %}"
       run_mode: "{% if event.alerts[0]._id != '' and event.alerts[0]._id != null %}alert{% else %}manual{% endif %}"
       alert_count: "{{ event.alerts | size | default: 0 }}"
@@ -136,11 +161,11 @@ steps:
         type: data.set
         with:
           profile_ok: >-
-            {%- assign s = steps.set_context.output.profile | default: 'default' -%}
+            {%- assign s = steps.set_context.output.profile | default: '' -%}
             {%- assign allowed = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_.- ' -%}
             {%- assign ok = true -%}
             {%- assign len = s.size -%}
-            {%- if len < 1 or len > 128 -%}{%- assign ok = false -%}
+            {%- if s == '' or s == '__blank__' or len < 1 or len > 128 -%}{%- assign ok = false -%}
             {%- else -%}
               {%- for i in (0..127) -%}
                 {%- if i >= len -%}{%- break -%}{%- endif -%}
@@ -165,7 +190,7 @@ steps:
               - name: log_skip
                 type: console
                 with:
-                  message: "skipped - need agent_id, os_type, editor vscode|cursor, extension_id, install_source=user, and a safe profile name (caller attestation; Defend runs as SYSTEM/root and cannot verify built-in/policy). outcome=skipped"
+                  message: "skipped - need agent_id, os_type, editor vscode|cursor, extension_id, install_source=user, and a safe non-blank profile name (omit or set default; whitespace-only rejected; Defend runs as SYSTEM/root and cannot verify built-in/policy). outcome=skipped"
             else:
               - name: decide_enforce
                 type: data.set
