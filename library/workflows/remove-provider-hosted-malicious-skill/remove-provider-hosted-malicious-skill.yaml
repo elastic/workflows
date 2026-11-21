@@ -1,0 +1,182 @@
+template-metadata:
+  slug: remove-provider-hosted-malicious-skill
+  version: "1.0.0"
+  availability: ">=9.5.0"
+  name: "Remove Provider-Hosted Malicious Skill"
+  description: >-
+        Remove one approved malicious custom skill version in an Anthropic
+        workspace via the Skills Admin API, with GET verification. Requires a
+        secure HTTP connector. Never escalates a failed version delete to whole-
+        skill delete. Audit by default.
+  solutions: [security]
+  categories: [response]
+  install:
+    form:
+      - name: enable-enforce
+        label: "Enforce hosted skill version delete"
+        description: >-
+          When true, DELETE the skill version through the Anthropic Admin HTTP
+          connector and verify.
+        inputType: boolean
+        required: true
+        default: false
+      - name: anthropic-admin-connector
+        label: "Anthropic Admin HTTP connector"
+        description: >-
+          HTTP connector with base URL https://api.anthropic.com and Admin API key
+          in secret headers (x-api-key).
+        inputType: connector
+        connectorType: .http
+        required: true
+
+name: Remove Provider-Hosted Malicious Skill
+description: >-
+  Remove one approved custom skill version/resource in an exact Anthropic
+  workspace. Never silently escalates failed version delete to whole-skill
+  delete. Audit by default; enforce deletes version then independently verifies
+  with GET. Requires secure HTTP connector - no credentials in YAML.
+enabled: true
+tags:
+  - security
+  - elastic-defend
+  - hunting
+  - response
+  - genai
+settings:
+  timeout: 15m
+  concurrency:
+    key: "{{ workflow.id }}-skill-{{ inputs.skill_id | default: '' }}-{{ inputs.version_id | default: '' }}"
+    strategy: drop
+    max: 1
+consts:
+  enable_enforce: __install__.enable-enforce
+  anthropic_admin_base: https://api.anthropic.com
+  anthropic_version: "2023-06-01"
+  anthropic_skills_beta: skills-2025-10-02
+triggers:
+  - type: alert
+  - type: manual
+    inputs:
+      - name: provider
+        type: string
+        required: true
+        default: anthropic
+      - name: skill_id
+        type: string
+        required: true
+      - name: version_id
+        type: string
+        required: true
+        description: Exact version to delete - required; whole-skill delete refused
+      - name: workspace_id
+        type: string
+        required: false
+        default: ""
+      - name: evidence_ref
+        type: string
+        required: false
+        default: ""
+steps:
+  # --- multi-alert guard ---
+  - name: reject_multi_alert
+    type: if
+    condition: 'event.alerts.size > 1'
+    steps:
+      - name: log_reject_batch
+        type: console
+        with:
+          message: "rejected - received {{ event.alerts.size }} alerts; this workflow handles one skill version at a time. outcome=rejected"
+    else:
+      - name: set_context
+        type: data.set
+        with:
+          provider: "{% if inputs.provider != '' %}{{ inputs.provider | downcase }}{% else %}anthropic{% endif %}"
+          skill_id: "{{ inputs.skill_id }}"
+          version_id: "{{ inputs.version_id }}"
+          workspace_id: "{% if inputs.workspace_id != '' %}{{ inputs.workspace_id }}{% else %}{% endif %}"
+          evidence_ref: "{% if inputs.evidence_ref != '' %}{{ inputs.evidence_ref }}{% else %}{{ execution.id }}{% endif %}"
+          run_mode: "{% if event.alerts[0]._id != '' and event.alerts[0]._id != null %}alert{% else %}manual{% endif %}"
+      # --- charset allowlist for skill_id / version_id (Liquid; KQL has no regex) ---
+      - name: check_ids
+        type: data.set
+        with:
+          ids_ok: >-
+            {%- assign allowed = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_.-' -%}
+            {%- assign alnum = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789' -%}
+            {%- assign sid = steps.set_context.output.skill_id | default: '' -%}
+            {%- assign vid = steps.set_context.output.version_id | default: '' -%}
+            {%- assign ok = true -%}
+            {%- assign vals = sid | append: '|' | append: vid | split: '|' -%}
+            {%- for s in vals -%}
+              {%- assign len = s.size -%}
+              {%- if len < 1 or len > 128 -%}{%- assign ok = false -%}{%- break -%}{%- endif -%}
+              {%- assign c0 = s | slice: 0, 1 -%}
+              {%- unless alnum contains c0 -%}{%- assign ok = false -%}{%- break -%}{%- endunless -%}
+              {%- for i in (0..127) -%}
+                {%- if i >= len -%}{%- break -%}{%- endif -%}
+                {%- assign c = s | slice: i, 1 -%}
+                {%- unless allowed contains c -%}{%- assign ok = false -%}{%- break -%}{%- endunless -%}
+              {%- endfor -%}
+              {%- unless ok -%}{%- break -%}{%- endunless -%}
+            {%- endfor -%}
+            {{ ok }}
+      - name: validate_ids
+        type: if
+        condition: 'not steps.check_ids.output.ids_ok: "true"'
+        steps:
+          - name: log_bad_ids
+            type: console
+            with:
+              message: "rejected - skill_id or version_id failed charset allowlist. outcome=rejected"
+        else:
+          - name: validate
+            type: if
+            condition: 'steps.set_context.output.skill_id: "" OR steps.set_context.output.version_id: "" OR not steps.set_context.output.provider: "anthropic"'
+            steps:
+              - name: log_skip
+                type: console
+                with:
+                  message: "skipped - need anthropic skill_id and exact version_id (whole-skill delete refused). outcome=skipped"
+            else:
+              - name: decide_enforce
+                type: data.set
+                with:
+                  enforce: "{% if consts.enable_enforce %}true{% else %}false{% endif %}"
+              - name: audit_path
+                type: if
+                condition: 'steps.decide_enforce.output.enforce: "false"'
+                steps:
+                  - name: log_audit
+                    type: console
+                    with:
+                      message: "audited - would delete provider=anthropic skill={{ steps.set_context.output.skill_id }} version={{ steps.set_context.output.version_id }} workspace={{ steps.set_context.output.workspace_id }} outcome=audited"
+                else:
+                  - name: delete_version
+                    type: http
+                    connector-id: __install__.anthropic-admin-connector
+                    with:
+                      method: DELETE
+                      path: /v1/skills/{{ steps.set_context.output.skill_id | url_encode }}/versions/{{ steps.set_context.output.version_id | url_encode }}
+                      headers:
+                        anthropic-version: "{{ consts.anthropic_version }}"
+                        anthropic-beta: "{{ consts.anthropic_skills_beta }}"
+                  - name: verify_version_gone
+                    type: http
+                    connector-id: __install__.anthropic-admin-connector
+                    on-failure:
+                      continue: true
+                    with:
+                      method: GET
+                      path: /v1/skills/{{ steps.set_context.output.skill_id | url_encode }}/versions/{{ steps.set_context.output.version_id | url_encode }}
+                      headers:
+                        anthropic-version: "{{ consts.anthropic_version }}"
+                        anthropic-beta: "{{ consts.anthropic_skills_beta }}"
+                  - name: summarize
+                    type: console
+                    with:
+                      message: >-
+                        hosted-skill version delete skill={{ steps.set_context.output.skill_id }} version={{ steps.set_context.output.version_id }}
+                        delete_status={{ steps.delete_version.output.status }}
+                        verify_status={{ steps.verify_version_gone.output.status }} verify_error={{ steps.verify_version_gone.error }}
+                        outcome={% assign vs = steps.verify_version_gone.output.status | plus: 0 %}{% if steps.delete_version.output.status >= 200 and steps.delete_version.output.status < 300 %}{% if vs == 404 or steps.verify_version_gone.error %}verified{% else %}submitted{% endif %}{% else %}failed{% endif %}
+                        (no whole-skill escalation)
