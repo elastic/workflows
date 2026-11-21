@@ -80,7 +80,7 @@ steps:
   - name: set_context
     type: data.set
     with:
-      provider: "{% if inputs.provider != '' %}{{ inputs.provider | downcase }}{% elsif event.alerts[0].gen_ai.provider != '' and event.alerts[0].gen_ai.provider != null %}{{ event.alerts[0].gen_ai.provider | downcase }}{% else %}anthropic{% endif %}"
+      provider: "{% if inputs.provider != '' and inputs.provider != null %}{{ inputs.provider | downcase }}{% elsif event.alerts[0].gen_ai.provider != '' and event.alerts[0].gen_ai.provider != null %}{{ event.alerts[0].gen_ai.provider | downcase }}{% else %}anthropic{% endif %}"
       skill_id: "{% if inputs.skill_id != '' and inputs.skill_id != null %}{{ inputs.skill_id }}{% elsif event.alerts[0].gen_ai.skill.id != '' and event.alerts[0].gen_ai.skill.id != null %}{{ event.alerts[0].gen_ai.skill.id }}{% elsif event.alerts[0].gen_ai.skill_id != '' and event.alerts[0].gen_ai.skill_id != null %}{{ event.alerts[0].gen_ai.skill_id }}{% else %}{% endif %}"
       version_id: "{% if inputs.version_id != '' and inputs.version_id != null %}{{ inputs.version_id }}{% elsif event.alerts[0].gen_ai.skill.version_id != '' and event.alerts[0].gen_ai.skill.version_id != null %}{{ event.alerts[0].gen_ai.skill.version_id }}{% elsif event.alerts[0].gen_ai.version_id != '' and event.alerts[0].gen_ai.version_id != null %}{{ event.alerts[0].gen_ai.version_id }}{% else %}{% endif %}"
       workspace_id: "{% if inputs.workspace_id != '' and inputs.workspace_id != null %}{{ inputs.workspace_id }}{% elsif event.alerts[0].gen_ai.workspace.id != '' and event.alerts[0].gen_ai.workspace.id != null %}{{ event.alerts[0].gen_ai.workspace.id }}{% else %}{% endif %}"
@@ -160,7 +160,6 @@ steps:
                       headers:
                         anthropic-version: "{{ consts.anthropic_version }}"
                         anthropic-beta: "{{ consts.anthropic_skills_beta }}"
-                        anthropic-workspace-id: "{% if steps.set_context.output.workspace_id != '' %}{{ steps.set_context.output.workspace_id }}{% endif %}"
                   - name: verify_version_gone
                     type: http
                     connector-id: __install__.anthropic-admin-connector
@@ -172,7 +171,6 @@ steps:
                       headers:
                         anthropic-version: "{{ consts.anthropic_version }}"
                         anthropic-beta: "{{ consts.anthropic_skills_beta }}"
-                        anthropic-workspace-id: "{% if steps.set_context.output.workspace_id != '' %}{{ steps.set_context.output.workspace_id }}{% endif %}"
                   - name: summarize
                     type: console
                     with:
@@ -180,5 +178,5 @@ steps:
                         hosted-skill version delete skill={{ steps.set_context.output.skill_id }} version={{ steps.set_context.output.version_id }}
                         delete_status={{ steps.delete_version.output.status }}
                         verify_status={{ steps.verify_version_gone.output.status }} verify_error={{ steps.verify_version_gone.error }}
-                        outcome={% assign vs = steps.verify_version_gone.output.status | default: 0 | plus: 0 %}{% assign ve = steps.verify_version_gone.error | default: '' %}{% if steps.delete_version.output.status >= 200 and steps.delete_version.output.status < 300 %}{% if vs == 404 or ve contains '404' or ve contains 'not_found' or ve contains 'Not Found' %}verified{% else %}submitted{% endif %}{% else %}failed{% endif %}
+                        outcome={% assign vs = steps.verify_version_gone.output.status | default: steps.verify_version_gone.output.statusCode | default: 0 | plus: 0 %}{% assign ve = steps.verify_version_gone.error | default: '' | append: '' %}{% if steps.delete_version.output.status >= 200 and steps.delete_version.output.status < 300 %}{% if vs == 404 or ve contains '[404]' or ve contains '404' or ve contains 'not_found' or ve contains 'Not Found' %}verified{% else %}submitted{% endif %}{% else %}failed{% endif %}
                         (no whole-skill escalation)
