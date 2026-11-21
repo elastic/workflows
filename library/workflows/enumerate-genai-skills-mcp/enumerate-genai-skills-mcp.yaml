@@ -56,45 +56,56 @@ triggers:
         default: ""
         description: Optional absolute home/profile root. Empty = HOME/USERPROFILE
 steps:
-  # --- multi-alert guard ---
+  - name: set_alert_context
+    type: data.set
+    with:
+      agent_id: |
+        {%- assign typed = inputs.agent_id | default: '' | append: '' | strip -%}
+        {%- if typed == '<your_input>' -%}{%- assign typed = '' -%}{%- endif -%}
+        {%- if typed != '' -%}
+        {{ typed }}
+        {%- else -%}
+        {%- assign alert_agent = event.alerts[0].agent.id | default: '' | join: ',' | strip -%}
+        {%- if alert_agent == '' -%}{%- assign alert_agent = event.alerts[0].elastic.agent.id | default: '' | join: ',' | strip -%}{%- endif -%}
+        {%- if alert_agent contains ',' -%}{%- assign alert_agent = alert_agent | split: ',' | first | strip -%}{%- endif -%}
+        {{ alert_agent }}
+        {%- endif -%}
+      os_type: |
+        {%- assign typed = inputs.os_type | default: '' | append: '' | downcase | strip -%}
+        {%- if typed == '<your_input>' -%}{%- assign typed = '' -%}{%- endif -%}
+        {%- if typed != '' -%}
+        {{ typed }}
+        {%- else -%}
+        {%- assign host_os = event.alerts[0].host.os.type | default: '' | join: ',' | downcase | strip -%}
+        {%- if host_os contains ',' -%}{%- assign host_os = host_os | split: ',' | first | strip -%}{%- endif -%}
+        {{ host_os }}
+        {%- endif -%}
+      host_name: |
+        {%- assign h = event.alerts[0].host.name | default: '' | join: ',' | strip -%}
+        {%- if h contains ',' -%}{%- assign h = h | split: ',' | first | strip -%}{%- endif -%}
+        {{ h }}
+      user_home: |
+        {%- assign typed = inputs.user_home | default: '' | append: '' | strip -%}
+        {%- if typed == '<your_input>' -%}{%- assign typed = '' -%}{%- endif -%}
+        {%- if typed != '' -%}
+        {{ typed }}
+        {%- else -%}
+        {%- assign uh = event.alerts[0].user.home | default: '' | append: '' | strip -%}
+        {%- if uh == '' -%}{%- assign uh = event.alerts[0].user.directory | default: '' | append: '' | strip -%}{%- endif -%}
+        {%- if uh == '' -%}{%- assign uh = event.alerts[0].host.user.home | default: '' | append: '' | strip -%}{%- endif -%}
+        {{ uh }}
+        {%- endif -%}
+      run_mode: "{% if event.alerts[0]._id != '' and event.alerts[0]._id != null %}alert{% else %}manual{% endif %}"
+      alert_count: "{{ event.alerts | size | default: 0 }}"
   - name: reject_multi_alert
     type: if
-    condition: 'event.alerts.size > 1'
+    condition: 'steps.set_alert_context.output.run_mode: "alert" AND not steps.set_alert_context.output.alert_count: "0" AND not steps.set_alert_context.output.alert_count: "1"'
     steps:
       - name: log_reject_batch
         type: console
         with:
-          message: "rejected - received {{ event.alerts.size }} alerts; this workflow handles one endpoint at a time. outcome=rejected"
+          message: "rejected - received {{ steps.set_alert_context.output.alert_count }} alerts; this workflow handles one endpoint at a time. outcome=rejected"
     else:
-      - name: set_alert_context
-        type: data.set
-        with:
-          agent_id: |
-            {%- assign typed = inputs.agent_id | default: '' | append: '' | strip -%}
-            {%- if typed == '<your_input>' -%}{%- assign typed = '' -%}{%- endif -%}
-            {%- if typed != '' -%}
-            {{ typed }}
-            {%- else -%}
-            {%- assign alert_agent = event.alerts[0].agent.id | default: '' | join: ',' | strip -%}
-            {%- if alert_agent == '' -%}{%- assign alert_agent = event.alerts[0].elastic.agent.id | default: '' | join: ',' | strip -%}{%- endif -%}
-            {%- if alert_agent contains ',' -%}{%- assign alert_agent = alert_agent | split: ',' | first | strip -%}{%- endif -%}
-            {{ alert_agent }}
-            {%- endif -%}
-          os_type: |
-            {%- assign typed = inputs.os_type | default: '' | append: '' | downcase | strip -%}
-            {%- if typed == '<your_input>' -%}{%- assign typed = '' -%}{%- endif -%}
-            {%- if typed != '' -%}
-            {{ typed }}
-            {%- else -%}
-            {%- assign host_os = event.alerts[0].host.os.type | default: '' | join: ',' | downcase | strip -%}
-            {%- if host_os contains ',' -%}{%- assign host_os = host_os | split: ',' | first | strip -%}{%- endif -%}
-            {{ host_os }}
-            {%- endif -%}
-          host_name: |
-            {%- assign h = event.alerts[0].host.name | default: '' | join: ',' | strip -%}
-            {%- if h contains ',' -%}{%- assign h = h | split: ',' | first | strip -%}{%- endif -%}
-            {{ h }}
-          user_home: "{%- assign typed = inputs.user_home | default: '' | append: '' | strip -%}{%- if typed == '<your_input>' -%}{%- assign typed = '' -%}{%- endif -%}{{ typed }}"
       - name: normalize
         type: data.set
         with:
@@ -102,10 +113,25 @@ steps:
           os_type: "{{ steps.set_alert_context.output.os_type | strip | downcase }}"
           host_name: "{{ steps.set_alert_context.output.host_name | strip }}"
           user_home: "{{ steps.set_alert_context.output.user_home | strip }}"
-      # --- path allowlist for user_home ---
+      - name: check_home
+        type: data.set
+        with:
+          home_ok: |-
+            {%- assign p = steps.normalize.output.user_home -%}
+            {%- if p == "" -%}true
+            {%- elsif p contains "/../" or p contains "\\..\\" or p == ".." or p contains "*" or p contains "?" -%}false
+            {%- else -%}
+            {%- assign colon = p | slice: 1, 1 -%}
+            {%- assign sep = p | slice: 2, 1 -%}
+            {%- assign first = p | slice: 0, 1 -%}
+            {%- if colon == ":" and sep == "/" -%}true
+            {%- elsif colon == ":" and sep == "\\" -%}true
+            {%- elsif first == "/" -%}true
+            {%- else -%}false{%- endif -%}
+            {%- endif -%}
       - name: validate_home
         type: if
-        condition: 'not steps.normalize.output.user_home: "" AND not steps.normalize.output.user_home: /^[A-Za-z]:\\/ AND not steps.normalize.output.user_home: /^\//'
+        condition: 'not steps.check_home.output.home_ok: "true"'
         steps:
           - name: log_bad_home
             type: console
@@ -128,7 +154,7 @@ steps:
                     {%- assign os = steps.normalize.output.os_type | strip -%}
                     {%- assign home = steps.normalize.output.user_home | strip -%}
                     {%- if os == 'windows' -%}
-                    powershell.exe -NoProfile -NonInteractive -Command "$ErrorActionPreference='Continue'; $homePath=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('{{ home | base64_encode }}')); if([string]::IsNullOrWhiteSpace($homePath)){ $homePath=$env:USERPROFILE }; if($homePath -notmatch '^[A-Za-z]:\\' -or $homePath.Contains('..') -or $homePath.Contains('*') -or $homePath.Contains('?')){ Write-Output 'ERR|bad_home'; exit 42 }; $maxS={{ consts.max_skills }}; $maxM={{ consts.max_mcp_servers }}; $skills=@(); $mcps=@(); $skillRoots=@((Join-Path $homePath '.claude\skills'),(Join-Path $homePath '.cursor\skills'),(Join-Path $homePath '.agents\skills'),(Join-Path $homePath '.codex\skills'),(Join-Path $homePath '.copilot\skills')); foreach($root in $skillRoots){ if(Test-Path -LiteralPath $root){ Get-ChildItem -LiteralPath $root -Recurse -Filter 'SKILL.md' -File -ErrorAction SilentlyContinue | ForEach-Object { if($skills.Count -ge $maxS){ return }; $client='unknown'; if($_.FullName -match '\\.claude\\'){ $client='claude' }; if($_.FullName -match '\\.cursor\\'){ $client='cursor' }; if($_.FullName -match '\\.codex\\'){ $client='codex' }; if($_.FullName -match '\\.copilot\\'){ $client='copilot' }; if($_.FullName -match '\\.agents\\'){ $client='agents' }; $skills += [pscustomobject]@{client=$client; name=$_.Directory.Name; path=$_.FullName} } } }; $mcpFiles=@((Join-Path $homePath '.cursor\mcp.json'),(Join-Path $homePath '.mcp.json')); if($env:APPDATA){ $mcpFiles += (Join-Path $env:APPDATA 'Claude\claude_desktop_config.json') }; foreach($f in $mcpFiles){ if(-not (Test-Path -LiteralPath $f)){ continue }; try { $j=Get-Content -LiteralPath $f -Raw | ConvertFrom-Json } catch { continue }; $servers=$null; if($j.mcpServers){ $servers=$j.mcpServers } elseif($j.mcp){ $servers=$j.mcp }; if(-not $servers){ continue }; foreach($p in $servers.PSObject.Properties){ if($mcps.Count -ge $maxM){ break }; $e=$p.Value; $ident=''; if($e.command){ $ident=[string]$e.command } elseif($e.url){ $ident=[string]$e.url }; $disabled=$false; if($e.disabled -eq $true){ $disabled=$true }; $mcps += [pscustomobject]@{key=$p.Name; identity=$ident; disabled=$disabled; source=$f} } }; Write-Output ('SUMMARY|skills='+$skills.Count+'|mcp='+$mcps.Count); $skills | ForEach-Object { Write-Output ('SKILL|' + $_.client + '|' + $_.name + '|' + $_.path) }; $mcps | ForEach-Object { Write-Output ('MCP|' + $_.key + '|' + $_.identity + '|' + $_.disabled + '|' + $_.source) }"
+                    powershell.exe -NoProfile -NonInteractive -Command "$ErrorActionPreference='Continue'; $homePath=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('{{ home | base64_encode }}')); if([string]::IsNullOrWhiteSpace($homePath)){ $homePath=$env:USERPROFILE }; if($homePath -notmatch '^[A-Za-z]:\\' -or $homePath.Contains('..') -or $homePath.Contains('*') -or $homePath.Contains('?')){ Write-Output 'ERR|bad_home'; exit 42 }; $maxS={{ consts.max_skills }}; $maxM={{ consts.max_mcp_servers }}; $skills=@(); $mcps=@(); $skillRoots=@((Join-Path $homePath '.claude\skills'),(Join-Path $homePath '.cursor\skills'),(Join-Path $homePath '.agents\skills'),(Join-Path $homePath '.codex\skills'),(Join-Path $homePath '.copilot\skills')); foreach($root in $skillRoots){ if(Test-Path -LiteralPath $root){ Get-ChildItem -LiteralPath $root -Recurse -Filter 'SKILL.md' -File -ErrorAction SilentlyContinue | ForEach-Object { if($skills.Count -ge $maxS){ return }; $client='unknown'; if($_.FullName -match '\\.claude\\'){ $client='claude' }; if($_.FullName -match '\\.cursor\\'){ $client='cursor' }; if($_.FullName -match '\\.codex\\'){ $client='codex' }; if($_.FullName -match '\\.copilot\\'){ $client='copilot' }; if($_.FullName -match '\\.agents\\'){ $client='agents' }; $skills += [pscustomobject]@{client=$client; name=$_.Directory.Name; path=$_.FullName} } } }; $mcpFiles=@((Join-Path $homePath '.cursor\mcp.json'),(Join-Path $homePath '.mcp.json')); $mcpFiles += (Join-Path $homePath 'AppData\Roaming\Claude\claude_desktop_config.json'); foreach($f in $mcpFiles){ if(-not (Test-Path -LiteralPath $f)){ continue }; try { $j=Get-Content -LiteralPath $f -Raw | ConvertFrom-Json } catch { continue }; $servers=$null; if($j.mcpServers){ $servers=$j.mcpServers } elseif($j.mcp){ $servers=$j.mcp }; if(-not $servers){ continue }; foreach($p in $servers.PSObject.Properties){ if($mcps.Count -ge $maxM){ break }; $e=$p.Value; $ident=''; if($e.command){ $ident=[string]$e.command } elseif($e.url){ $ident=[string]$e.url }; $disabled=$false; if($e.disabled -eq $true){ $disabled=$true }; $mcps += [pscustomobject]@{key=$p.Name; identity=$ident; disabled=$disabled; source=$f} } }; Write-Output ('SUMMARY|skills='+$skills.Count+'|mcp='+$mcps.Count); $skills | ForEach-Object { Write-Output ('SKILL|' + $_.client + '|' + $_.name + '|' + $_.path) }; $mcps | ForEach-Object { Write-Output ('MCP|' + $_.key + '|' + $_.identity + '|' + $_.disabled + '|' + $_.source) }"
                     {%- else -%}
                     home='{{ home | replace: "'", "'\\''" }}'; if [ -z "$home" ]; then home="${HOME:-}"; fi; case "$home" in /*) ;; *) echo 'ERR|bad_home'; exit 42 ;; esac; case "$home" in *..*) echo 'ERR|bad_home'; exit 42 ;; esac; max_s={{ consts.max_skills }}; max_m={{ consts.max_mcp_servers }}; command -v python3 >/dev/null || { echo 'ERR|no_python3'; exit 47; }; python3 - "$home" "$max_s" "$max_m" <<'PY'
                     import json,os,sys
@@ -138,7 +164,7 @@ steps:
                       root=os.path.join(home,root_name)
                       if not os.path.isdir(root):
                         continue
-                      for dirpath,_,files in os.walk(root):
+                      for dirpath,_,files in os.walk(root, followlinks=False):
                         if 'SKILL.md' in files:
                           skills.append(('SKILL',client,os.path.basename(dirpath),os.path.join(dirpath,'SKILL.md')))
                           if len(skills)>=max_s:
@@ -220,4 +246,10 @@ steps:
               - name: summarize
                 type: console
                 with:
-                  message: "enumerate action_id={{ variables.action_id }} completed={{ variables.completed }} wasSuccessful={{ steps.fetch.output.data.wasSuccessful }} shell_code={{ steps.fetch.output.data.outputs[steps.normalize.output.agent_id].content.shell_code }} host={{ steps.normalize.output.host_name }} agent={{ steps.normalize.output.agent_id }} outcome={% if variables.completed == 'true' and steps.fetch.output.data.wasSuccessful and steps.fetch.output.data.outputs[steps.normalize.output.agent_id].content.shell_code == 0 %}verified{% elsif variables.completed == 'true' %}failed{% else %}unknown{% endif %}"
+                  message: >-
+                    enumerate action_id={{ variables.action_id }} completed={{ variables.completed }}
+                    wasSuccessful={{ steps.fetch.output.data.wasSuccessful }}
+                    shell_code={{ steps.fetch.output.data.outputs[steps.normalize.output.agent_id].content.shell_code }}
+                    stdout={{ steps.fetch.output.data.outputs[steps.normalize.output.agent_id].content.stdout | default: '' | truncate: 2000 }}
+                    host={{ steps.normalize.output.host_name }} agent={{ steps.normalize.output.agent_id }}
+                    outcome={% assign sc = steps.fetch.output.data.outputs[steps.normalize.output.agent_id].content.shell_code | default: '' %}{% assign ferr = steps.fetch.error | default: '' %}{% if ferr contains '403' or ferr contains '401' or ferr contains 'Forbidden' or ferr contains 'Unauthorized' %}auth_failed{% elsif variables.completed == 'true' and steps.fetch.output.data.wasSuccessful and sc == 0 %}verified{% elsif variables.completed == 'true' %}failed{% else %}unknown{% endif %}
