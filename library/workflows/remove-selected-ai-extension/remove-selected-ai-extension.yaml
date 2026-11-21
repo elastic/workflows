@@ -34,7 +34,7 @@ tags:
 settings:
   timeout: 15m
   concurrency:
-    key: "{{ workflow.id }}-ext-{{ inputs.extension_id | default: '' }}-{{ inputs.agent_id | default: event.alerts[0].agent.id | default: event.alerts[0].elastic.agent.id | default: 'none' }}"
+    key: "{{ workflow.id }}-ext-{{ inputs.extension_id | default: event.alerts[0].gen_ai.extension.id | default: '' }}-{{ inputs.agent_id | default: event.alerts[0].agent.id | default: event.alerts[0].elastic.agent.id | default: 'none' }}"
     strategy: drop
     max: 1
 consts:
@@ -73,8 +73,8 @@ steps:
     with:
       agent_id: "{% if event.alerts[0].agent.id != '' and event.alerts[0].agent.id != null %}{{ event.alerts[0].agent.id }}{% elsif event.alerts[0].elastic.agent.id != '' and event.alerts[0].elastic.agent.id != null %}{{ event.alerts[0].elastic.agent.id }}{% else %}{{ inputs.agent_id }}{% endif %}"
       os_type: "{% if event.alerts[0].host.os.type != '' and event.alerts[0].host.os.type != null %}{{ event.alerts[0].host.os.type | downcase }}{% elsif inputs.os_type != '' and inputs.os_type != null %}{{ inputs.os_type | downcase }}{% else %}{% endif %}"
-      editor: "{% if inputs.editor != '' and inputs.editor != null %}{{ inputs.editor | downcase }}{% elsif event.alerts[0].gen_ai.editor != '' and event.alerts[0].gen_ai.editor != null %}{{ event.alerts[0].gen_ai.editor | downcase }}{% elsif event.alerts[0].gen_ai.tool.name != '' and event.alerts[0].gen_ai.tool.name != null %}{{ event.alerts[0].gen_ai.tool.name | downcase }}{% else %}{% endif %}"
-      extension_id: "{% if inputs.extension_id != '' and inputs.extension_id != null %}{{ inputs.extension_id }}{% elsif event.alerts[0].gen_ai.extension.id != '' and event.alerts[0].gen_ai.extension.id != null %}{{ event.alerts[0].gen_ai.extension.id }}{% elsif event.alerts[0].package.name != '' and event.alerts[0].package.name != null %}{{ event.alerts[0].package.name }}{% else %}{% endif %}"
+      editor: "{% if inputs.editor != '' and inputs.editor != null %}{{ inputs.editor | downcase }}{% elsif event.alerts[0].gen_ai.editor.name != '' and event.alerts[0].gen_ai.editor.name != null %}{{ event.alerts[0].gen_ai.editor.name | downcase }}{% elsif event.alerts[0].gen_ai.tool.name != '' and event.alerts[0].gen_ai.tool.name != null %}{{ event.alerts[0].gen_ai.tool.name | downcase }}{% else %}{% endif %}"
+      extension_id: "{% if inputs.extension_id != '' and inputs.extension_id != null %}{{ inputs.extension_id }}{% elsif event.alerts[0].gen_ai.extension.id != '' and event.alerts[0].gen_ai.extension.id != null %}{{ event.alerts[0].gen_ai.extension.id }}{% else %}{% endif %}"
       profile: "{% if inputs.profile != '' and inputs.profile != null %}{{ inputs.profile }}{% elsif event.alerts[0].gen_ai.editor.profile != '' and event.alerts[0].gen_ai.editor.profile != null %}{{ event.alerts[0].gen_ai.editor.profile }}{% else %}default{% endif %}"
       install_source: "{% if inputs.install_source != '' and inputs.install_source != null %}{{ inputs.install_source | downcase }}{% elsif event.alerts[0].gen_ai.extension.install_source != '' and event.alerts[0].gen_ai.extension.install_source != null %}{{ event.alerts[0].gen_ai.extension.install_source | downcase }}{% else %}user{% endif %}"
       run_mode: "{% if event.alerts[0]._id != '' and event.alerts[0]._id != null %}alert{% else %}manual{% endif %}"
@@ -116,6 +116,23 @@ steps:
               {%- endif -%}
             {%- endif -%}
             {{ ok }}
+      - name: check_profile
+        type: data.set
+        with:
+          profile_ok: >-
+            {%- assign s = steps.set_context.output.profile | default: 'default' -%}
+            {%- assign allowed = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_.-' -%}
+            {%- assign ok = true -%}
+            {%- assign len = s.size -%}
+            {%- if len < 1 or len > 128 -%}{%- assign ok = false -%}
+            {%- else -%}
+              {%- for i in (0..127) -%}
+                {%- if i >= len -%}{%- break -%}{%- endif -%}
+                {%- assign c = s | slice: i, 1 -%}
+                {%- unless allowed contains c -%}{%- assign ok = false -%}{%- break -%}{%- endunless -%}
+              {%- endfor -%}
+            {%- endif -%}
+            {{ ok }}
       - name: validate_extension_id
         type: if
         condition: 'not steps.check_extension_id.output.extension_id_ok: "true"'
@@ -127,12 +144,12 @@ steps:
         else:
           - name: validate
             type: if
-            condition: 'steps.set_context.output.agent_id: "" OR steps.set_context.output.extension_id: "" OR steps.set_context.output.os_type: "" OR not steps.set_context.output.install_source: "user" OR (not steps.set_context.output.editor: "vscode" AND not steps.set_context.output.editor: "cursor")'
+            condition: 'not steps.check_profile.output.profile_ok: "true" OR steps.set_context.output.agent_id: "" OR steps.set_context.output.extension_id: "" OR steps.set_context.output.os_type: "" OR not steps.set_context.output.install_source: "user" OR (not steps.set_context.output.editor: "vscode" AND not steps.set_context.output.editor: "cursor")'
             steps:
               - name: log_skip
                 type: console
                 with:
-                  message: "skipped - need agent_id, os_type, editor vscode|cursor, extension_id, install_source=user (caller attestation; Defend runs as SYSTEM/root and cannot verify built-in/policy). outcome=skipped"
+                  message: "skipped - need agent_id, os_type, editor vscode|cursor, extension_id, install_source=user, and a safe profile name (caller attestation; Defend runs as SYSTEM/root and cannot verify built-in/policy). outcome=skipped"
             else:
               - name: decide_enforce
                 type: data.set
@@ -155,12 +172,12 @@ steps:
                         {%- assign eid = steps.set_context.output.extension_id -%}
                         {%- if steps.set_context.output.os_type == 'windows' -%}
                         {%- if ed == 'cursor' -%}
-                        powershell.exe -NoProfile -NonInteractive -Command "$ErrorActionPreference='Stop'; $eid=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('{{ eid | base64_encode }}')); if($eid -notmatch '^[A-Za-z0-9][A-Za-z0-9_.-]*\.[A-Za-z0-9][A-Za-z0-9_.-]*$'){exit 42}; $bin='cursor'; if($bin -notin @('cursor','code')){exit 42}; $prof=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('{{ steps.set_context.output.profile | base64_encode }}')); if($prof -and $prof -ne 'default'){ & $bin --uninstall-extension $eid --force --profile $prof } else { & $bin --uninstall-extension $eid --force }; if($LASTEXITCODE -ne 0){exit $LASTEXITCODE}; Write-Output ('removed:'+$eid)"
+                        powershell.exe -NoProfile -NonInteractive -Command "$ErrorActionPreference='Stop'; $eid=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('{{ eid | base64_encode }}')); if($eid -notmatch '^[A-Za-z0-9][A-Za-z0-9_.-]*\.[A-Za-z0-9][A-Za-z0-9_.-]*$'){exit 42}; $bin='cursor'; if($bin -notin @('cursor','code')){exit 42}; $prof=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('{{ steps.set_context.output.profile | base64_encode }}')); if($prof -and $prof -ne 'default'){ if($prof -notmatch '^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$'){exit 42}; & $bin --uninstall-extension $eid --force --profile $prof } else { & $bin --uninstall-extension $eid --force }; if($LASTEXITCODE -ne 0){exit $LASTEXITCODE}; Write-Output ('removed:'+$eid)"
                         {%- else -%}
-                        powershell.exe -NoProfile -NonInteractive -Command "$ErrorActionPreference='Stop'; $eid=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('{{ eid | base64_encode }}')); if($eid -notmatch '^[A-Za-z0-9][A-Za-z0-9_.-]*\.[A-Za-z0-9][A-Za-z0-9_.-]*$'){exit 42}; $bin='code'; if($bin -notin @('cursor','code')){exit 42}; $prof=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('{{ steps.set_context.output.profile | base64_encode }}')); if($prof -and $prof -ne 'default'){ & $bin --uninstall-extension $eid --force --profile $prof } else { & $bin --uninstall-extension $eid --force }; if($LASTEXITCODE -ne 0){exit $LASTEXITCODE}; Write-Output ('removed:'+$eid)"
+                        powershell.exe -NoProfile -NonInteractive -Command "$ErrorActionPreference='Stop'; $eid=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('{{ eid | base64_encode }}')); if($eid -notmatch '^[A-Za-z0-9][A-Za-z0-9_.-]*\.[A-Za-z0-9][A-Za-z0-9_.-]*$'){exit 42}; $bin='code'; if($bin -notin @('cursor','code')){exit 42}; $prof=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('{{ steps.set_context.output.profile | base64_encode }}')); if($prof -and $prof -ne 'default'){ if($prof -notmatch '^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$'){exit 42}; & $bin --uninstall-extension $eid --force --profile $prof } else { & $bin --uninstall-extension $eid --force }; if($LASTEXITCODE -ne 0){exit $LASTEXITCODE}; Write-Output ('removed:'+$eid)"
                         {%- endif -%}
                         {%- else -%}
-                        eid='{{ eid | replace: "'", "'\\''" }}'; case "$eid" in *[!A-Za-z0-9_.-]*) exit 42 ;; esac; case "$eid" in *.*) ;; *) exit 42 ;; esac; bin={% if ed == 'cursor' %}cursor{% else %}code{% endif %}; command -v "$bin" >/dev/null || exit 47; prof='{{ steps.set_context.output.profile | replace: "'", "'\\''" }}'; if [ -n "$prof" ] && [ "$prof" != "default" ]; then "$bin" --uninstall-extension "$eid" --force --profile "$prof"; else "$bin" --uninstall-extension "$eid" --force; fi; ec=$?; [ $ec -eq 0 ] || exit $ec; printf 'removed:%s\n' "$eid"
+                        eid='{{ eid | replace: "'", "'\\''" }}'; case "$eid" in *[!A-Za-z0-9_.-]*) exit 42 ;; esac; case "$eid" in *.*) ;; *) exit 42 ;; esac; bin={% if ed == 'cursor' %}cursor{% else %}code{% endif %}; command -v "$bin" >/dev/null || exit 47; prof='{{ steps.set_context.output.profile | replace: "'", "'\\''" }}'; case "$prof" in *[!A-Za-z0-9_.-]*) exit 42 ;; esac; if [ -n "$prof" ] && [ "$prof" != "default" ]; then "$bin" --uninstall-extension "$eid" --force --profile "$prof"; else "$bin" --uninstall-extension "$eid" --force; fi; ec=$?; [ $ec -eq 0 ] || exit $ec; printf 'removed:%s\n' "$eid"
                         {%- endif -%}
                   - name: execute_remove
                     type: kibana.request
