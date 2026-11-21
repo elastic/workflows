@@ -1,0 +1,275 @@
+template-metadata:
+  slug: remediate-genai-file-artifact
+  version: "1.0.0"
+  availability: ">=9.5.0"
+  name: "Remediate GenAI File Artifact"
+  description: >-
+        Collect one GenAI-related file with Defend get-file, then quarantine
+        (or optionally delete) after confirming collection succeeded. Alert or
+        manual. One absolute path only — no wildcards, relative paths, or
+        directory traversal. Audit by default. Multi-alert batches are
+        rejected; configure rule actions for per-alert mode.
+  solutions: [security]
+  categories: [response]
+  install:
+    form:
+      - name: enable-enforce
+        label: "Enforce quarantine or delete"
+        description: >-
+          When true, perform get-file then quarantine/delete for the verified
+          path.
+        inputType: boolean
+        required: true
+        default: false
+      - name: enable-delete
+        label: "Delete instead of quarantine"
+        description: >-
+          When true with enforce, delete the file after evidence collection
+          instead of moving it to the quarantine directory.
+        inputType: boolean
+        required: true
+        default: false
+
+name: Remediate GenAI File Artifact
+description: >-
+  Collect one GenAI/persistence file via Defend get-file, then quarantine it
+  outside normal load paths when enforce is enabled. Absolute path only — no
+  wildcards, relative paths, or directory traversal. Audit by default.
+  Multi-alert batches are rejected; configure rule actions for per-alert mode.
+enabled: true
+tags:
+  - security
+  - elastic-defend
+  - hunting
+  - response
+  - genai
+settings:
+  timeout: 15m
+  concurrency:
+    key: "{{ workflow.id }}-{{ inputs.agent_id | default: event.alerts[0].agent.id | default: event.alerts[0].elastic.agent.id | default: '' }}-{{ inputs.file_path | default: event.alerts[0].file.path | default: '' }}"
+    strategy: drop
+    max: 1
+consts:
+  enable_enforce: __install__.enable-enforce
+  enable_delete: __install__.enable-delete
+  quarantine_dir_linux: /var/lib/elastic-genai-quarantine
+  quarantine_dir_macos: /var/lib/elastic-genai-quarantine
+  quarantine_dir_windows: C:\ProgramData\Elastic\GenAIQuarantine
+  action_poll_limit: 36
+triggers:
+  - type: alert
+  - type: manual
+    inputs:
+      - name: agent_id
+        type: string
+        required: true
+        description: Elastic Defend agent.id
+      - name: file_path
+        type: string
+        required: true
+        description: Absolute path to one artifact
+      - name: os_type
+        type: string
+        required: true
+        description: linux | macos | windows
+      - name: evidence_ref
+        type: string
+        required: false
+        default: ""
+steps:
+  - name: set_context
+    type: data.set
+    with:
+      agent_id: "{% if event.alerts[0].agent.id != '' and event.alerts[0].agent.id != null %}{{ event.alerts[0].agent.id }}{% elsif event.alerts[0].elastic.agent.id != '' and event.alerts[0].elastic.agent.id != null %}{{ event.alerts[0].elastic.agent.id }}{% else %}{{ inputs.agent_id }}{% endif %}"
+      file_path: "{% if event.alerts[0].file.path != '' and event.alerts[0].file.path != null %}{{ event.alerts[0].file.path }}{% else %}{{ inputs.file_path }}{% endif %}"
+      os_type: "{% if event.alerts[0].host.os.type != '' and event.alerts[0].host.os.type != null %}{{ event.alerts[0].host.os.type | downcase }}{% else %}{{ inputs.os_type | downcase }}{% endif %}"
+      host_name: "{% if event.alerts[0].host.name != '' and event.alerts[0].host.name != null %}{{ event.alerts[0].host.name }}{% else %}{% endif %}"
+      alert_id: "{% if event.alerts[0].kibana.alert.uuid != '' and event.alerts[0].kibana.alert.uuid != null %}{{ event.alerts[0].kibana.alert.uuid }}{% elsif event.alerts[0]._id != '' and event.alerts[0]._id != null %}{{ event.alerts[0]._id }}{% else %}{% endif %}"
+      evidence_ref: "{% if inputs.evidence_ref != '' and inputs.evidence_ref != null %}{{ inputs.evidence_ref }}{% else %}{{ execution.id }}{% endif %}"
+      run_mode: "{% if event.alerts[0]._id != '' and event.alerts[0]._id != null %}alert{% else %}manual{% endif %}"
+      alert_count: "{{ event.alerts | size | default: 0 }}"
+  - name: reject_multi_alert
+    type: if
+    condition: 'steps.set_context.output.run_mode: "alert" AND not steps.set_context.output.alert_count: "0" AND not steps.set_context.output.alert_count: "1"'
+    steps:
+      - name: log_multi_alert
+        type: console
+        with:
+          message: "skipped - received {{ steps.set_context.output.alert_count }} alerts; this workflow handles one artifact per run. Configure the rule action for per-alert mode. outcome=skipped"
+    else:
+      - name: validate
+        type: if
+        condition: 'steps.set_context.output.agent_id: "" OR steps.set_context.output.file_path: "" OR (not steps.set_context.output.os_type: "linux" AND not steps.set_context.output.os_type: "macos" AND not steps.set_context.output.os_type: "windows")'
+        steps:
+          - name: log_skip
+            type: console
+            with:
+              message: "skipped - need agent_id, absolute file_path, and os_type in linux|macos|windows. outcome=skipped"
+        else:
+          - name: validate_path
+            type: data.set
+            with:
+              path_safe: |-
+                {%- assign p = steps.set_context.output.file_path -%}
+                {%- assign os = steps.set_context.output.os_type -%}
+                {%- assign bad = false -%}
+                {%- if p contains "/../" or p contains "\\..\\" or p == ".." or p contains "*" or p contains "?" or p contains "`" or p contains "$(" or p contains "${" or p contains '"' -%}{%- assign bad = true -%}{%- endif -%}
+                {%- if bad -%}false
+                {%- elsif os == "windows" -%}
+                {%- assign colon = p | slice: 1, 1 -%}
+                {%- assign sep = p | slice: 2, 1 -%}
+                {%- if colon == ":" and sep == "/" -%}true
+                {%- elsif colon == ":" and sep == "\\" -%}true
+                {%- else -%}false{%- endif -%}
+                {%- else -%}
+                {%- assign first = p | slice: 0, 1 -%}
+                {%- if first == "/" -%}true{%- else -%}false{%- endif -%}
+                {%- endif -%}
+          - name: check_path_safe
+            type: if
+            condition: 'not steps.validate_path.output.path_safe: "true"'
+            steps:
+              - name: log_bad_path
+                type: console
+                with:
+                  message: "skipped - file_path must be absolute without .., wildcards (* ?), backticks, or shell expansion characters. path={{ steps.set_context.output.file_path }} outcome=skipped"
+            else:
+              - name: decide_enforce
+                type: data.set
+                with:
+                  enforce: "{% if consts.enable_enforce %}true{% else %}false{% endif %}"
+                  qdir: "{% if steps.set_context.output.os_type == 'windows' %}{{ consts.quarantine_dir_windows }}{% elsif steps.set_context.output.os_type == 'macos' %}{{ consts.quarantine_dir_macos }}{% else %}{{ consts.quarantine_dir_linux }}{% endif %}"
+              - name: get_file
+                type: kibana.request
+                on-failure:
+                  continue: true
+                with:
+                  method: POST
+                  path: /api/endpoint/action/get_file
+                  headers:
+                    kbn-xsrf: "true"
+                  body:
+                    agent_type: endpoint
+                    endpoint_ids:
+                      - "{{ steps.set_context.output.agent_id }}"
+                    parameters:
+                      path: "{{ steps.set_context.output.file_path }}"
+                    comment: "T02 remediate-genai-file-artifact get-file evidence={{ steps.set_context.output.evidence_ref }} alert={{ steps.set_context.output.alert_id }}"
+              - name: remember_get
+                type: data.set
+                with:
+                  get_action_id: "{{ steps.get_file.output.data.id | default: steps.get_file.output.id | default: '' }}"
+                  get_completed: false
+              - name: poll_get
+                type: while
+                condition: 'variables.get_action_id: * and not variables.get_action_id: "" and not variables.get_completed: true'
+                max-iterations:
+                  limit: 36
+                  on-limit: continue
+                steps:
+                  - name: wait_get
+                    type: wait
+                    with:
+                      duration: 5s
+                  - name: fetch_get
+                    type: kibana.request
+                    on-failure:
+                      continue: true
+                    with:
+                      method: GET
+                      path: /api/endpoint/action/{{ variables.get_action_id | url_encode }}
+                  - name: mark_get
+                    type: data.set
+                    with:
+                      get_completed: "{%- assign d = steps.fetch_get.output.data -%}{%- if variables.get_action_id != '' and d.id == variables.get_action_id and d.isCompleted -%}true{%- else -%}false{%- endif -%}"
+                if: 'variables.get_action_id: * and not variables.get_action_id: ""'
+              - name: get_outcome
+                type: data.set
+                with:
+                  get_ok: "{% if variables.get_completed == 'true' and steps.fetch_get.output.data.wasSuccessful %}true{% else %}false{% endif %}"
+              - name: fail_closed_if_get_failed
+                type: if
+                condition: 'not steps.get_outcome.output.get_ok: "true"'
+                steps:
+                  - name: log_get_failed
+                    type: console
+                    with:
+                      message: "failed - get-file did not complete successfully; quarantine/delete refused. action_id={{ variables.get_action_id }} completed={{ variables.get_completed }} wasSuccessful={{ steps.fetch_get.output.data.wasSuccessful }} outcome=failed"
+                else:
+                  - name: audit_or_enforce
+                    type: if
+                    condition: 'steps.decide_enforce.output.enforce: "false"'
+                    steps:
+                      - name: log_audit
+                        type: console
+                        with:
+                          message: "audited - get-file collected path={{ steps.set_context.output.file_path }} agent={{ steps.set_context.output.agent_id }} get_action={{ variables.get_action_id }} mode={% if consts.enable_delete %}delete{% else %}quarantine{% endif %} would_quarantine_to={{ steps.decide_enforce.output.qdir }} outcome=audited"
+                    else:
+                      - name: set_quarantine_cmd
+                        type: data.set
+                        with:
+                          command: |-
+                            {%- assign p = steps.set_context.output.file_path -%}
+                            {%- assign q = steps.decide_enforce.output.qdir -%}
+                            {%- if consts.enable_delete -%}
+                            {%- if steps.set_context.output.os_type == 'windows' -%}
+                            powershell.exe -NoProfile -NonInteractive -Command "$ErrorActionPreference='Stop'; $p=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('{{ p | base64_encode }}')); if($p -notmatch '^[A-Za-z]:\\' -or $p.Contains('..')){exit 42}; if(-not (Test-Path -LiteralPath $p)){exit 43}; Remove-Item -LiteralPath $p -Force; Write-Output ('deleted:'+$p)"
+                            {%- else -%}
+                            p='{{ p | replace: "'", "'\\''" }}'; case "$p" in /*) ;; *) exit 42 ;; esac; case "$p" in *..*) exit 42 ;; esac; [ -f "$p" ] && [ ! -L "$p" ] || exit 43; rm -f -- "$p" || exit 44; printf 'deleted:%s\n' "$p"
+                            {%- endif -%}
+                            {%- else -%}
+                            {%- if steps.set_context.output.os_type == 'windows' -%}
+                            powershell.exe -NoProfile -NonInteractive -Command "$ErrorActionPreference='Stop'; $p=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('{{ p | base64_encode }}')); $q=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('{{ q | base64_encode }}')); if($p -notmatch '^[A-Za-z]:\\' -or $p.Contains('..')){exit 42}; New-Item -ItemType Directory -Force -Path $q | Out-Null; $acl=Get-Acl $q; $acl.SetAccessRuleProtection($true,$false); $rule=New-Object Security.AccessControl.FileSystemAccessRule('SYSTEM','FullControl','Allow'); $acl.SetAccessRule($rule); Set-Acl $q $acl; $dest=Join-Path $q ([IO.Path]::GetFileName($p)+'.'+[guid]::NewGuid().ToString('N')); Move-Item -LiteralPath $p -Destination $dest -Force; Write-Output $dest"
+                            {%- else -%}
+                            p='{{ p | replace: "'", "'\\''" }}'; q='{{ q | replace: "'", "'\\''" }}'; case "$p" in /*) ;; *) exit 42 ;; esac; case "$p" in *..*) exit 42 ;; esac; [ -f "$p" ] && [ ! -L "$p" ] || exit 43; install -d -m 700 "$q" || exit 43; dest="$q/$(basename "$p").$(date +%s).$$"; mv -- "$p" "$dest" || exit 44; if [ "$(stat -c %h "$dest" 2>/dev/null || stat -f %l "$dest")" = 1 ]; then chmod 600 "$dest"; fi; printf '%s\n' "$dest"
+                            {%- endif -%}
+                            {%- endif -%}
+                      - name: quarantine_or_delete
+                        type: kibana.request
+                        on-failure:
+                          continue: true
+                        with:
+                          method: POST
+                          path: /api/endpoint/action/execute
+                          headers:
+                            kbn-xsrf: "true"
+                          body:
+                            agent_type: endpoint
+                            endpoint_ids:
+                              - "{{ steps.set_context.output.agent_id }}"
+                            comment: "T02 remediate-genai-file-artifact {% if consts.enable_delete %}delete{% else %}quarantine{% endif %} evidence={{ steps.set_context.output.evidence_ref }}"
+                            parameters:
+                              command: "{{ steps.set_quarantine_cmd.output.command }}"
+                              timeout: 90
+                      - name: remember_q
+                        type: data.set
+                        with:
+                          q_action_id: "{{ steps.quarantine_or_delete.output.data.id | default: steps.quarantine_or_delete.output.id | default: '' }}"
+                          q_completed: false
+                      - name: poll_q
+                        type: while
+                        condition: 'variables.q_action_id: * and not variables.q_action_id: "" and not variables.q_completed: true'
+                        max-iterations:
+                          limit: 36
+                          on-limit: continue
+                        steps:
+                          - name: wait_q
+                            type: wait
+                            with:
+                              duration: 5s
+                          - name: fetch_q
+                            type: kibana.request
+                            on-failure:
+                              continue: true
+                            with:
+                              method: GET
+                              path: /api/endpoint/action/{{ variables.q_action_id | url_encode }}
+                          - name: mark_q
+                            type: data.set
+                            with:
+                              q_completed: "{%- assign d = steps.fetch_q.output.data -%}{%- if variables.q_action_id != '' and d.id == variables.q_action_id and d.isCompleted -%}true{%- else -%}false{%- endif -%}"
+                        if: 'variables.q_action_id: * and not variables.q_action_id: ""'
+                      - name: log_q
+                        type: console
+                        with:
+                          message: "{% if consts.enable_delete %}delete{% else %}quarantine{% endif %} action_id={{ variables.q_action_id }} completed={{ variables.q_completed }} wasSuccessful={{ steps.fetch_q.output.data.wasSuccessful }} shell_code={{ steps.fetch_q.output.data.outputs[steps.set_context.output.agent_id].content.shell_code }} stdout={{ steps.fetch_q.output.data.outputs[steps.set_context.output.agent_id].content.stdout }} path={{ steps.set_context.output.file_path }} outcome={% if variables.q_completed == 'true' and steps.fetch_q.output.data.wasSuccessful and steps.fetch_q.output.data.outputs[steps.set_context.output.agent_id].content.shell_code == 0 %}verified{% elsif variables.q_completed == 'true' %}failed{% else %}unknown{% endif %}"
