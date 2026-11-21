@@ -1,0 +1,723 @@
+template-metadata:
+  slug: appsec-cps-auto-ops
+  version: "1.1.2"
+  availability: ">=9.6.0"
+  name: "AppSec CPS auto-ops (Security via CPS)"
+  description: >-
+    Evaluate Elastic Security vulnerability findings and detection alerts via
+    Cross Project Search (CPS), upsert Auto AppSec dashboards that read those
+    Security indices, and run AI Observability Case lifecycle with CPS Search
+    remediation enrichment — never seed data, never MCP.
+  solutions: [observability]
+  categories: [detection, monitoring, ai-agent, case-management]
+  install:
+    form:
+      - name: agent-id
+        label: "Agent Builder agent ID"
+        description: >-
+          Agent that owns AppSec Case lifecycle and remediation outlines.
+          Default elastic-ai-agent is the built-in Elastic AI Agent.
+        inputType: text
+        required: true
+        default: "elastic-ai-agent"
+      - name: security-project-alias
+        label: "CPS Security project alias"
+        description: >-
+          Linked Security project alias for Cross Project Search (Organization →
+          linked projects). Example: my-security-project*
+        inputType: text
+        required: true
+        default: "my-security-project*"
+      - name: search-project-alias
+        label: "CPS Search project alias"
+        description: >-
+          Linked Search project alias for remediation knowledge via CPS.
+          Example: my-search-project*
+        inputType: text
+        required: true
+        default: "my-search-project*"
+      - name: security-alerts-index
+        label: "Security alerts index (CPS)"
+        description: Detection alerts index in the linked Security project.
+        inputType: esIndex
+        required: true
+        default: ".alerts-security.alerts-default"
+      - name: security-vuln-index
+        label: "Security vulnerability findings index (CPS)"
+        description: >-
+          CNVM / cloud security posture vulnerability findings index in the
+          linked Security project.
+        inputType: esIndex
+        required: true
+        default: "logs-cloud_security_posture.vulnerabilities*"
+
+name: AppSec CPS Auto-ops
+description: >
+  Hourly (and on demand): query Elastic Security vulnerability findings and
+  detection alerts via CPS, upsert Auto AppSec dashboards against those indices,
+  and run AI Case lifecycle with CPS → Security + Search (never seed, never MCP).
+enabled: true
+
+triggers:
+  - type: manual
+  - type: scheduled
+    with:
+      every: 1h
+
+settings:
+  timeout: 20m
+  concurrency:
+    key: "{{ workflow.id }}"
+    strategy: drop
+    max: 1
+
+consts:
+  security_project_alias: __install__.security-project-alias
+  search_project_alias: __install__.search-project-alias
+  security_alerts_index: __install__.security-alerts-index
+  security_vuln_index: __install__.security-vuln-index
+
+steps:
+  - name: ensure_tag_auto
+    type: kibana.request
+    on-failure:
+      continue: true
+    with:
+      method: PUT
+      path: /api/tags/auto
+      headers:
+        Elastic-Api-Version: "2023-10-31"
+      body:
+        name: auto
+        description: Auto-ops generated assets
+        color: "#00BFB3"
+
+  - name: ensure_tag_appsec
+    type: kibana.request
+    on-failure:
+      continue: true
+    with:
+      method: PUT
+      path: /api/tags/appsec
+      headers:
+        Elastic-Api-Version: "2023-10-31"
+      body:
+        name: appsec
+        description: AppSec CPS Auto-ops (Security findings + alerts via CPS)
+        color: "#F04E98"
+
+  # --- Elastic Security evidence via CPS (no seeding) ---
+  - name: security_vuln_severity
+    type: elasticsearch.esql.query
+    on-failure:
+      continue: true
+    with:
+      format: json
+      query: |
+        SET unmapped_fields="nullify";
+        FROM {{ consts.security_project_alias }}:logs-cloud_security_posture.vulnerabilities*
+        | WHERE @timestamp > NOW() - 7 days
+            AND `vulnerability.severity` IS NOT NULL
+        | STATS
+            findings = COUNT(*),
+            critical = COUNT(*) WHERE `vulnerability.severity` == "CRITICAL" OR `vulnerability.severity` == "Critical",
+            high = COUNT(*) WHERE `vulnerability.severity` == "HIGH" OR `vulnerability.severity` == "High",
+            medium = COUNT(*) WHERE `vulnerability.severity` == "MEDIUM" OR `vulnerability.severity` == "Medium",
+            low = COUNT(*) WHERE `vulnerability.severity` == "LOW" OR `vulnerability.severity` == "Low"
+        | LIMIT 1
+
+  - name: security_vuln_hotspots
+    type: elasticsearch.esql.query
+    on-failure:
+      continue: true
+    with:
+      format: json
+      query: |
+        SET unmapped_fields="nullify";
+        FROM {{ consts.security_project_alias }}:logs-cloud_security_posture.vulnerabilities*
+        | WHERE @timestamp > NOW() - 7 days
+            AND `package.name` IS NOT NULL
+        | STATS
+            vuln_count = COUNT(*),
+            max_cvss = MAX(`vulnerability.score.base`)
+            BY `package.name`, `package.version`, `package.fixed_version`, `vulnerability.id`, `vulnerability.severity`
+        | SORT max_cvss DESC, vuln_count DESC
+        | LIMIT 25
+
+  - name: security_alert_signals
+    type: elasticsearch.esql.query
+    on-failure:
+      continue: true
+    with:
+      format: json
+      query: |
+        SET unmapped_fields="nullify";
+        FROM {{ consts.security_project_alias }}:{{ consts.security_alerts_index }}
+        | WHERE @timestamp > NOW() - 7 days
+        | STATS
+            alerts = COUNT(*)
+            BY `kibana.alert.severity`, `kibana.alert.rule.name`, `threat.technique.name`
+        | SORT alerts DESC
+        | LIMIT 30
+
+  - name: security_critical_alerts
+    type: elasticsearch.esql.query
+    on-failure:
+      continue: true
+    with:
+      format: json
+      query: |
+        SET unmapped_fields="nullify";
+        FROM {{ consts.security_project_alias }}:{{ consts.security_alerts_index }}
+        | WHERE @timestamp > NOW() - 24 hours
+            AND (`kibana.alert.severity` == "critical" OR `kibana.alert.severity` == "high")
+        | STATS
+            alerts = COUNT(*)
+            BY `kibana.alert.rule.name`, `kibana.alert.severity`, `host.name`
+        | SORT alerts DESC
+        | LIMIT 20
+
+  - name: upsert_vulnerabilities_dashboard
+    type: kibana.request
+    with:
+      method: PUT
+      path: /api/dashboards/auto-appsec-vulnerabilities
+      headers:
+        Elastic-Api-Version: "2023-10-31"
+      body:
+        title: "Auto: AppSec Vulnerabilities"
+        description: >
+          Elastic Security vulnerability findings via CPS. Upserted by
+          appsec-cps-auto-ops — no seeded indices.
+        time_range:
+          from: now-7d
+          to: now
+        options:
+          auto_apply_filters: true
+          hide_panel_titles: false
+          hide_panel_borders: false
+          use_margins: true
+          sync_colors: true
+          sync_tooltips: true
+          sync_cursor: true
+        filters: []
+        tags: [auto, auto-ops, appsec, security]
+        pinned_panels: []
+        panels:
+          - id: open-by-severity
+            type: vis
+            grid: {x: 0, y: 0, w: 16, h: 14}
+            config:
+              type: xy
+              title: Open Vulnerabilities By Severity
+              legend:
+                visibility: hidden
+              styling:
+                points:
+                  visibility: hidden
+              axis:
+                x:
+                  title:
+                    visible: false
+                y:
+                  title:
+                    visible: false
+                  grid:
+                    visible: true
+              layers:
+              - type: bar
+                data_source:
+                  type: esql
+                  query: |
+                    SET unmapped_fields="nullify";
+                    FROM {{ consts.security_project_alias }}:logs-cloud_security_posture.vulnerabilities*
+                    | WHERE COALESCE(@timestamp, event.ingested) >= ?_tstart AND COALESCE(@timestamp, event.ingested) <= ?_tend AND `vulnerability.severity` IS NOT NULL
+                    | STATS findings = COUNT(*) BY `vulnerability.severity`
+                    | EVAL severity_order = CASE(
+                        `vulnerability.severity` == "CRITICAL" OR `vulnerability.severity` == "Critical", 1,
+                        `vulnerability.severity` == "HIGH" OR `vulnerability.severity` == "High", 2,
+                        `vulnerability.severity` == "MEDIUM" OR `vulnerability.severity` == "Medium", 3,
+                        4)
+                    | SORT severity_order ASC
+                x:
+                  column: vulnerability.severity
+                y:
+                - column: findings
+          - id: severity-trend
+            type: vis
+            grid: {x: 16, y: 0, w: 16, h: 14}
+            config:
+              type: xy
+              title: Severity Trend
+              legend:
+                visibility: visible
+                placement: outside
+                position: bottom
+              styling:
+                interpolation: linear
+                points:
+                  visibility: hidden
+              axis:
+                x:
+                  title:
+                    visible: false
+                  grid:
+                    visible: false
+                  scale: temporal
+                  domain:
+                    type: fit
+                    rounding: false
+                y:
+                  title:
+                    visible: false
+                  grid:
+                    visible: true
+              layers:
+              - type: line
+                data_source:
+                  type: esql
+                  query: |
+                    SET unmapped_fields="nullify";
+                    FROM {{ consts.security_project_alias }}:logs-cloud_security_posture.vulnerabilities*
+                    | WHERE @timestamp <= ?_tend AND @timestamp > ?_tstart
+                        AND `vulnerability.severity` IS NOT NULL
+                    | STATS findings = COUNT(*) BY `vulnerability.severity`, BUCKET(@timestamp, 75, ?_tstart, ?_tend)
+                x:
+                  column: BUCKET(@timestamp, 75, ?_tstart, ?_tend)
+                  label: '@timestamp'
+                y:
+                - column: findings
+                breakdown_by:
+                  column: vulnerability.severity
+          - id: age-buckets
+            type: vis
+            grid: {x: 32, y: 0, w: 16, h: 14}
+            config:
+              type: xy
+              title: Days Since First Detected
+              legend:
+                visibility: visible
+                placement: outside
+                position: bottom
+              styling:
+                points:
+                  visibility: hidden
+              axis:
+                x:
+                  title:
+                    visible: false
+                y:
+                  title:
+                    visible: false
+                  grid:
+                    visible: true
+              layers:
+              - type: bar_horizontal_stacked
+                data_source:
+                  type: esql
+                  query: |
+                    SET unmapped_fields="nullify";
+                    FROM {{ consts.security_project_alias }}:logs-cloud_security_posture.vulnerabilities*
+                    | WHERE COALESCE(@timestamp, event.ingested) >= ?_tstart AND COALESCE(@timestamp, event.ingested) <= ?_tend
+                    | EVAL first_seen = COALESCE(`vulnerability.first_found`, @timestamp)
+                    | EVAL age_days = DATE_DIFF("days", first_seen, NOW())
+                    | EVAL age_bucket = CASE(age_days < 1, "<1 Day Ago", age_days <= 7, "1-7 Days Ago", age_days <= 14, "8-14 Days Ago", "14+ Days Ago")
+                    | EVAL Age = "Age"
+                    | STATS findings = COUNT(*) BY Age, age_bucket
+                x:
+                  column: Age
+                y:
+                - column: findings
+                breakdown_by:
+                  column: age_bucket
+          - id: vuln-table
+            type: vis
+            grid: {x: 0, y: 14, w: 48, h: 20}
+            config:
+              type: data_table
+              title: Vulnerabilities
+              data_source:
+                type: esql
+                query: |
+                  SET unmapped_fields="nullify";
+                  FROM {{ consts.security_project_alias }}:logs-cloud_security_posture.vulnerabilities*
+                  | WHERE COALESCE(@timestamp, event.ingested) >= ?_tstart AND COALESCE(@timestamp, event.ingested) <= ?_tend
+                  | EVAL Title = COALESCE(message, `vulnerability.description`, `vulnerability.id`)
+                  | EVAL ID = `vulnerability.id`
+                  | EVAL Reached = CASE(`vulnerability.score.base` >= 9.0, "Yes", "No")
+                  | EVAL `CVSS Score` = `vulnerability.score.base`
+                  | EVAL `Risk score` = COALESCE(`risk.score`, `vulnerability.score.base`)
+                  | EVAL Application = COALESCE(`resource.name`, `host.name`, `cloud.instance.name`, "n/a")
+                  | EVAL Library = CONCAT(COALESCE(`package.name`, ""), ":", COALESCE(`package.version`, ""))
+                  | EVAL Status = COALESCE(`vulnerability.status`, "open")
+                  | STATS `CVSS Score` = MAX(`CVSS Score`), `Risk score` = MAX(`Risk score`) BY Title, ID, Reached, Application, Library, Status
+                  | SORT `CVSS Score` DESC
+                  | LIMIT 50
+              rows:
+              - column: Title
+              - column: ID
+              - column: Reached
+              - column: Application
+              - column: Library
+              - column: Status
+              metrics:
+              - column: CVSS Score
+              - column: Risk score
+
+  - name: upsert_composition_dashboard
+    type: kibana.request
+    with:
+      method: PUT
+      path: /api/dashboards/auto-appsec-software-composition
+      headers:
+        Elastic-Api-Version: "2023-10-31"
+      body:
+        title: "Auto: AppSec Software Composition"
+        description: >
+          Package inventory derived from Elastic Security vulnerability findings
+          via CPS. Upserted by appsec-cps-auto-ops.
+        time_range:
+          from: now-7d
+          to: now
+        options:
+          auto_apply_filters: true
+          hide_panel_titles: false
+          hide_panel_borders: false
+          use_margins: true
+          sync_colors: true
+          sync_tooltips: true
+          sync_cursor: true
+        filters: []
+        tags: [auto, auto-ops, appsec, security]
+        pinned_panels: []
+        panels:
+          - id: libraries-table
+            type: vis
+            grid: {x: 0, y: 0, w: 48, h: 28}
+            config:
+              type: data_table
+              title: Libraries
+              data_source:
+                type: esql
+                query: |
+                  SET unmapped_fields="nullify";
+                  FROM {{ consts.security_project_alias }}:logs-cloud_security_posture.vulnerabilities*
+                  | WHERE COALESCE(@timestamp, event.ingested) >= ?_tstart AND COALESCE(@timestamp, event.ingested) <= ?_tend
+                      AND `package.name` IS NOT NULL
+                  | EVAL Library = CONCAT(`package.name`, ":", COALESCE(`package.version`, ""))
+                  | EVAL Application = COALESCE(`resource.name`, `host.name`, "n/a")
+                  | EVAL `Highest CVSS Score` = `vulnerability.score.base`
+                  | EVAL `Risk score` = COALESCE(`risk.score`, `vulnerability.score.base`)
+                  | EVAL Remediation = COALESCE(`package.fixed_version`, "see advisory")
+                  | EVAL Status = COALESCE(`vulnerability.status`, "open")
+                  | STATS `Highest CVSS Score` = MAX(`Highest CVSS Score`), `Risk score` = MAX(`Risk score`), `Total Vulnerabilities` = COUNT(*) BY Library, Application, Remediation, Status
+                  | SORT `Highest CVSS Score` DESC, `Risk score` DESC
+                  | LIMIT 50
+              rows:
+              - column: Library
+              - column: Application
+              - column: Remediation
+              - column: Status
+              metrics:
+              - column: Highest CVSS Score
+              - column: Risk score
+              - column: Total Vulnerabilities
+
+  - name: upsert_attacks_dashboard
+    type: kibana.request
+    with:
+      method: PUT
+      path: /api/dashboards/auto-appsec-runtime-attacks
+      headers:
+        Elastic-Api-Version: "2023-10-31"
+      body:
+        title: "Auto: AppSec Runtime Attacks"
+        description: >
+          Elastic Security detection alerts via CPS (severity, rule, MITRE).
+          Upserted by appsec-cps-auto-ops — no seeded attack indices.
+        time_range:
+          from: now-7d
+          to: now
+        options:
+          auto_apply_filters: true
+          hide_panel_titles: false
+          hide_panel_borders: false
+          use_margins: true
+          sync_colors: true
+          sync_tooltips: true
+          sync_cursor: true
+        filters: []
+        tags: [auto, auto-ops, appsec, security]
+        pinned_panels: []
+        panels:
+          - id: alerts-by-severity
+            type: vis
+            grid: {x: 0, y: 0, w: 12, h: 14}
+            config:
+              type: xy
+              title: Alerts By Severity
+              legend:
+                visibility: hidden
+              styling:
+                points:
+                  visibility: hidden
+              axis:
+                x:
+                  title:
+                    visible: false
+                y:
+                  title:
+                    visible: false
+                  grid:
+                    visible: true
+              layers:
+              - type: bar
+                data_source:
+                  type: esql
+                  query: |
+                    SET unmapped_fields="nullify";
+                    FROM {{ consts.security_project_alias }}:{{ consts.security_alerts_index }}
+                    | WHERE COALESCE(@timestamp, event.ingested) >= ?_tstart AND COALESCE(@timestamp, event.ingested) <= ?_tend AND `kibana.alert.severity` IS NOT NULL
+                    | STATS alerts = COUNT(*) BY `kibana.alert.severity`
+                    | EVAL severity_order = CASE(
+                        `kibana.alert.severity` == "critical", 1,
+                        `kibana.alert.severity` == "high", 2,
+                        `kibana.alert.severity` == "medium", 3,
+                        4)
+                    | SORT severity_order ASC
+                x:
+                  column: kibana.alert.severity
+                y:
+                - column: alerts
+          - id: top-rules
+            type: vis
+            grid: {x: 12, y: 0, w: 18, h: 14}
+            config:
+              type: xy
+              title: Top Detection Rules
+              legend:
+                visibility: hidden
+              styling:
+                points:
+                  visibility: hidden
+              axis:
+                x:
+                  title:
+                    visible: false
+                y:
+                  title:
+                    visible: false
+                  grid:
+                    visible: true
+              layers:
+              - type: bar_horizontal_stacked
+                data_source:
+                  type: esql
+                  query: |
+                    SET unmapped_fields="nullify";
+                    FROM {{ consts.security_project_alias }}:{{ consts.security_alerts_index }}
+                    | WHERE COALESCE(@timestamp, event.ingested) >= ?_tstart AND COALESCE(@timestamp, event.ingested) <= ?_tend AND `kibana.alert.rule.name` IS NOT NULL
+                    | STATS alerts = COUNT(*) BY `kibana.alert.rule.name`, `kibana.alert.severity`
+                    | SORT alerts DESC
+                    | LIMIT 20
+                x:
+                  column: kibana.alert.rule.name
+                y:
+                - column: alerts
+                breakdown_by:
+                  column: kibana.alert.severity
+          - id: top-techniques
+            type: vis
+            grid: {x: 30, y: 0, w: 18, h: 14}
+            config:
+              type: xy
+              title: Top MITRE Techniques
+              legend:
+                visibility: visible
+                placement: outside
+                position: bottom
+              styling:
+                points:
+                  visibility: hidden
+              axis:
+                x:
+                  title:
+                    visible: false
+                y:
+                  title:
+                    visible: false
+                  grid:
+                    visible: true
+              layers:
+              - type: bar_horizontal_stacked
+                data_source:
+                  type: esql
+                  query: |
+                    SET unmapped_fields="nullify";
+                    FROM {{ consts.security_project_alias }}:{{ consts.security_alerts_index }}
+                    | WHERE COALESCE(@timestamp, event.ingested) >= ?_tstart AND COALESCE(@timestamp, event.ingested) <= ?_tend AND `threat.technique.name` IS NOT NULL
+                    | EVAL `Attack Type` = TO_UPPER(`threat.technique.name`)
+                    | STATS alerts = COUNT(*) BY `Attack Type`, `kibana.alert.severity`
+                    | SORT alerts DESC
+                    | LIMIT 20
+                x:
+                  column: Attack Type
+                y:
+                - column: alerts
+                breakdown_by:
+                  column: kibana.alert.severity
+          - id: alerts-table
+            type: vis
+            grid: {x: 0, y: 14, w: 48, h: 20}
+            config:
+              type: data_table
+              title: Security Alerts
+              data_source:
+                type: esql
+                query: |
+                  SET unmapped_fields="nullify";
+                  FROM {{ consts.security_project_alias }}:{{ consts.security_alerts_index }}
+                  | WHERE COALESCE(@timestamp, event.ingested) >= ?_tstart AND COALESCE(@timestamp, event.ingested) <= ?_tend
+                  | EVAL Rule = `kibana.alert.rule.name`
+                  | EVAL Severity = `kibana.alert.severity`
+                  | EVAL `Attack Type` = COALESCE(TO_UPPER(`threat.technique.name`), "n/a")
+                  | EVAL Reason = COALESCE(`kibana.alert.reason`, message)
+                  | EVAL Host = COALESCE(`host.name`, "n/a")
+                  | EVAL Status = COALESCE(`kibana.alert.workflow_status`, "open")
+                  | EVAL events = 1
+                  | STATS events = SUM(events) BY Rule, Severity, `Attack Type`, Reason, Host, Status
+                  | SORT events DESC
+                  | LIMIT 50
+              rows:
+              - column: Rule
+              - column: Severity
+              - column: Attack Type
+              - column: Reason
+              - column: Host
+              - column: Status
+              metrics:
+              - column: events
+
+  - name: list_open_auto_ops_cases
+    type: kibana.request
+    on-failure:
+      continue: true
+    with:
+      method: GET
+      path: /api/cases/_find
+      query:
+        owner: observability
+        status: open
+        tags: auto-ops
+        perPage: "50"
+        page: "1"
+        sortField: createdAt
+        sortOrder: desc
+      headers:
+        Elastic-Api-Version: "2023-10-31"
+
+  - name: appsec_assessment
+    type: ai.agent
+    agent-id: __install__.agent-id
+    create-conversation: true
+    with:
+      message: |
+        You are an AppSec-aware SRE on Observability.
+        You own vulnerability / composition / detection-alert Case lifecycle with AI remediation outlines.
+        **Primary evidence is Elastic Security via CPS** — never invent findings, never seed data, never use Security or Search MCP.
+
+        ## Elastic Security evidence (CPS)
+        Vulnerability severity snapshot (7d):
+        {{ steps.security_vuln_severity.output }}
+
+        Package / CVE hotspots (7d):
+        {{ steps.security_vuln_hotspots.output }}
+
+        Detection alert rollup (7d):
+        {{ steps.security_alert_signals.output }}
+
+        Critical/high alerts (24h):
+        {{ steps.security_critical_alerts.output }}
+
+        Already-open Observability Cases (tag auto-ops):
+        {{ steps.list_open_auto_ops_cases.output }}
+
+        Dashboards already upserted (do NOT recreate — they query Security via CPS):
+        - Auto: AppSec Vulnerabilities (`auto-appsec-vulnerabilities`)
+        - Auto: AppSec Software Composition (`auto-appsec-software-composition`)
+        - Auto: AppSec Runtime Attacks (`auto-appsec-runtime-attacks`)
+
+        ## CPS enrichment — Security (preferred — do NOT use Security MCP)
+        Re-query when you need fresher detail:
+        ```
+        SET unmapped_fields="nullify";
+        FROM {{ consts.security_project_alias }}:{{ consts.security_alerts_index }}
+        | WHERE @timestamp > NOW() - 24 hours
+        | STATS alerts = COUNT(*) BY `kibana.alert.rule.name`, `kibana.alert.severity`
+        | SORT alerts DESC
+        | LIMIT 20
+        ```
+        ```
+        SET unmapped_fields="nullify";
+        FROM {{ consts.security_project_alias }}:logs-cloud_security_posture.vulnerabilities*
+        | WHERE @timestamp > NOW() - 7 days
+        | STATS c = COUNT(*) BY `vulnerability.severity`
+        | LIMIT 20
+        ```
+
+        ## CPS enrichment — Search (preferred — do NOT use Search MCP)
+        Query the linked Search project for remediation knowledge (upgrade notes, runbooks):
+        ```
+        SET project_routing = "_alias:{{ consts.search_project_alias }}";
+        FROM *
+        | WHERE @timestamp > NOW() - 90 days OR _id IS NOT NULL
+        | LIMIT 5
+        ```
+        Prefer targeted searches for package names / CVE ids from the hotspots above.
+        If CPS returns empty / unavailable, note once and continue with Security evidence — never ask to configure MCP.
+
+        ## Lifecycle rules (critical — stop comment spam)
+        Theme = AppSec posture from Elastic Security (critical/high vulns, CVSS≥9 packages, critical/high detection alerts).
+        Tags on Cases: **security**, **auto-ops**, **appsec**.
+
+        1) **OPEN_CASE** — No open theme Case AND risk warrants one
+           (Critical/High Security findings, CVSS≥9 packages, or critical/high alerts > 0).
+           Create ONE Observability Case (owner: observability; tags: security, auto-ops, appsec;
+           severity from evidence). Include Summary + Evidence (Security CPS) + **Remediation outline**
+           (upgrade `package.fixed_version`, respond to rule/technique, Search hit if any).
+           Reference the three Auto: AppSec dashboards. Mention CPS (not MCP).
+
+        2) **KEEP_OPEN_SILENT** — Open theme Case exists AND risk still elevated AND
+           nothing material changed. Do **NOT** comment. Do **NOT** create another Case.
+
+        3) **UPDATE_CASE** — Open theme Case exists AND material change
+           (new Critical CVE, new high-severity rule, severity shift, first CPS Search hit).
+           Add ONE short comment with what changed + refreshed remediation outline.
+
+        4) **CLOSE_CASE** — Open theme Case exists AND AppSec risk has **cleared**:
+           - no Critical/High findings and no CVSS≥9 rows in the 7d Security snapshot, AND
+           - no critical/high Security alerts in the 24h snapshot.
+           Close with one resolution comment.
+
+        5) **NO_CASE** — No actionable Security AppSec risk and no open theme Case to close.
+
+        End your reply with EXACTLY this Markdown (after any tool use):
+
+        ## Verdict
+        `OPEN_CASE` or `KEEP_OPEN_SILENT` or `UPDATE_CASE` or `CLOSE_CASE` or `NO_CASE`
+
+        ## Severity
+        `low` | `medium` | `high` | `critical` | `n/a`
+
+        ## Title
+        Case title used (or `n/a`)
+
+        ## CPS Security
+        One line: Security alerts/findings seen (or `unavailable` / `empty`)
+
+        ## CPS Search
+        One line: Search remediation hits (or `unavailable` / `empty`)
+
+        ## Remediation
+        2–5 bullets (or `n/a`)
+    timeout: 15m
