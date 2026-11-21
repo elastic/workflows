@@ -34,7 +34,7 @@ tags:
 settings:
   timeout: 15m
   concurrency:
-    key: "{{ workflow.id }}-ext-{{ inputs.extension_id | default: event.alerts[0].gen_ai.extension.id | default: '' }}-{{ inputs.agent_id | default: event.alerts[0].agent.id | default: event.alerts[0].elastic.agent.id | default: 'none' }}"
+    key: "{{ workflow.id }}-ext-{{ inputs.extension_id | default: event.alerts[0].gen_ai.extension.id | default: '' | downcase }}-{{ inputs.editor | default: event.alerts[0].gen_ai.editor.name | default: event.alerts[0].gen_ai.tool.name | default: '' | downcase }}-{{ inputs.profile | default: event.alerts[0].gen_ai.editor.profile | default: 'default' | downcase }}-{{ inputs.agent_id | default: event.alerts[0].agent.id | default: event.alerts[0].elastic.agent.id | default: 'none' }}"
     strategy: drop
     max: 1
 consts:
@@ -121,7 +121,7 @@ steps:
         with:
           profile_ok: >-
             {%- assign s = steps.set_context.output.profile | default: 'default' -%}
-            {%- assign allowed = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_.-' -%}
+            {%- assign allowed = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_.- ' -%}
             {%- assign ok = true -%}
             {%- assign len = s.size -%}
             {%- if len < 1 or len > 128 -%}{%- assign ok = false -%}
@@ -172,12 +172,12 @@ steps:
                         {%- assign eid = steps.set_context.output.extension_id -%}
                         {%- if steps.set_context.output.os_type == 'windows' -%}
                         {%- if ed == 'cursor' -%}
-                        powershell.exe -NoProfile -NonInteractive -Command "$ErrorActionPreference='Stop'; $eid=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('{{ eid | base64_encode }}')); if($eid -notmatch '^[A-Za-z0-9][A-Za-z0-9_.-]*\.[A-Za-z0-9][A-Za-z0-9_.-]*$'){exit 42}; $bin='cursor'; if($bin -notin @('cursor','code')){exit 42}; $prof=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('{{ steps.set_context.output.profile | base64_encode }}')); if($prof -and $prof -ne 'default'){ if($prof -notmatch '^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$'){exit 42}; & $bin --uninstall-extension $eid --force --profile $prof } else { & $bin --uninstall-extension $eid --force }; if($LASTEXITCODE -ne 0){exit $LASTEXITCODE}; Write-Output ('removed:'+$eid)"
+                        powershell.exe -NoProfile -NonInteractive -Command "$ErrorActionPreference='Stop'; $eid=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('{{ eid | base64_encode }}')); if($eid -notmatch '^[A-Za-z0-9][A-Za-z0-9_.-]*\.[A-Za-z0-9][A-Za-z0-9_.-]*$'){exit 42}; $bin='cursor'; if($bin -notin @('cursor','code')){exit 42}; $prof=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('{{ steps.set_context.output.profile | base64_encode }}')); if($prof -and $prof -ne 'default'){ if($prof -notmatch '^[A-Za-z0-9_. -]{1,128}$'){exit 42}; & $bin --uninstall-extension $eid --force --profile $prof } else { & $bin --uninstall-extension $eid --force }; if($LASTEXITCODE -ne 0){exit $LASTEXITCODE}; Write-Output ('removed:'+$eid)"
                         {%- else -%}
-                        powershell.exe -NoProfile -NonInteractive -Command "$ErrorActionPreference='Stop'; $eid=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('{{ eid | base64_encode }}')); if($eid -notmatch '^[A-Za-z0-9][A-Za-z0-9_.-]*\.[A-Za-z0-9][A-Za-z0-9_.-]*$'){exit 42}; $bin='code'; if($bin -notin @('cursor','code')){exit 42}; $prof=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('{{ steps.set_context.output.profile | base64_encode }}')); if($prof -and $prof -ne 'default'){ if($prof -notmatch '^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$'){exit 42}; & $bin --uninstall-extension $eid --force --profile $prof } else { & $bin --uninstall-extension $eid --force }; if($LASTEXITCODE -ne 0){exit $LASTEXITCODE}; Write-Output ('removed:'+$eid)"
+                        powershell.exe -NoProfile -NonInteractive -Command "$ErrorActionPreference='Stop'; $eid=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('{{ eid | base64_encode }}')); if($eid -notmatch '^[A-Za-z0-9][A-Za-z0-9_.-]*\.[A-Za-z0-9][A-Za-z0-9_.-]*$'){exit 42}; $bin='code'; if($bin -notin @('cursor','code')){exit 42}; $prof=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('{{ steps.set_context.output.profile | base64_encode }}')); if($prof -and $prof -ne 'default'){ if($prof -notmatch '^[A-Za-z0-9_. -]{1,128}$'){exit 42}; & $bin --uninstall-extension $eid --force --profile $prof } else { & $bin --uninstall-extension $eid --force }; if($LASTEXITCODE -ne 0){exit $LASTEXITCODE}; Write-Output ('removed:'+$eid)"
                         {%- endif -%}
                         {%- else -%}
-                        eid='{{ eid | replace: "'", "'\\''" }}'; case "$eid" in *[!A-Za-z0-9_.-]*) exit 42 ;; esac; case "$eid" in *.*) ;; *) exit 42 ;; esac; bin={% if ed == 'cursor' %}cursor{% else %}code{% endif %}; command -v "$bin" >/dev/null || exit 47; prof='{{ steps.set_context.output.profile | replace: "'", "'\\''" }}'; case "$prof" in *[!A-Za-z0-9_.-]*) exit 42 ;; esac; if [ -n "$prof" ] && [ "$prof" != "default" ]; then "$bin" --uninstall-extension "$eid" --force --profile "$prof"; else "$bin" --uninstall-extension "$eid" --force; fi; ec=$?; [ $ec -eq 0 ] || exit $ec; printf 'removed:%s\n' "$eid"
+                        eid='{{ eid | replace: "'", "'\\''" }}'; case "$eid" in *[!A-Za-z0-9_.-]*) exit 42 ;; esac; case "$eid" in *.*) ;; *) exit 42 ;; esac; bin={% if ed == 'cursor' %}cursor{% else %}code{% endif %}; command -v "$bin" >/dev/null || exit 47; prof='{{ steps.set_context.output.profile | replace: "'", "'\\''" }}'; case "$prof" in *[!A-Za-z0-9_.\ -]*) exit 42 ;; esac; if [ -n "$prof" ] && [ "$prof" != "default" ]; then "$bin" --uninstall-extension "$eid" --force --profile "$prof"; else "$bin" --uninstall-extension "$eid" --force; fi; ec=$?; [ $ec -eq 0 ] || exit $ec; printf 'removed:%s\n' "$eid"
                         {%- endif -%}
                   - name: execute_remove
                     type: kibana.request
