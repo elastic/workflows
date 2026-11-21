@@ -190,7 +190,18 @@ steps:
                             st=os.lstat(path)
                             import stat as stmod
                             if not stmod.S_ISREG(st.st_mode): sys.exit(43)
-                            with open(path,'r',encoding='utf-8') as f: data=json.load(f)
+                            import subprocess
+                            with open(path,'r',encoding='utf-8') as rf:
+                              data=json.load(rf)
+                              stf=os.fstat(rf.fileno())
+                              acl=None
+                              try:
+                                acl=subprocess.check_output(['getfacl','-p',f'/proc/self/fd/{rf.fileno()}'], stderr=subprocess.DEVNULL)
+                              except Exception:
+                                try:
+                                  acl=subprocess.check_output(['getfacl','-p','--absolute-names',path], stderr=subprocess.DEVNULL)
+                                except Exception:
+                                  acl=None
                             section=None
                             if 'mcpServers' in data and key in data.get('mcpServers',{}): section='mcpServers'
                             elif 'mcp' in data and key in data.get('mcp',{}): section='mcp'
@@ -204,18 +215,22 @@ steps:
                               if ident != cmd and ident != url and ident != args and ident not in (cmd+' '+url+' '+args): sys.exit(46)
                             del servers[key]
                             data[section]=servers
+                            st2=os.lstat(path)
+                            if (st2.st_ino, st2.st_dev) != (stf.st_ino, stf.st_dev): sys.exit(48)
                             fd,tmp=tempfile.mkstemp(dir=os.path.dirname(path),suffix='.tmp')
                             try:
-                              with os.fdopen(fd,'w',encoding='utf-8') as f: json.dump(data,f,indent=2); f.write('\n'); f.flush(); os.fsync(f.fileno())
-                              os.chmod(tmp, st.st_mode)
-                              try: os.chown(tmp, st.st_uid, st.st_gid)
+                              with os.fdopen(fd,'w',encoding='utf-8') as wf: json.dump(data,wf,indent=2); wf.write('\n'); wf.flush(); os.fsync(wf.fileno())
+                              os.chmod(tmp, stf.st_mode)
+                              try: os.chown(tmp, stf.st_uid, stf.st_gid)
                               except PermissionError: pass
-                              try:
-                                import subprocess
-                                acl=subprocess.check_output(['getfacl','-p','--absolute-names',path], stderr=subprocess.DEVNULL)
-                                subprocess.run(['setfacl','--set-file=-',tmp], input=acl, check=False)
-                              except Exception:
-                                pass
+                              if acl:
+                                try: subprocess.run(['setfacl','--set-file=-',tmp], input=acl, check=False)
+                                except Exception: pass
+                              st3=os.lstat(path)
+                              if (st3.st_ino, st3.st_dev) != (stf.st_ino, stf.st_dev):
+                                try: os.unlink(tmp)
+                                except: pass
+                                sys.exit(48)
                               os.replace(tmp,path)
                             except:
                               try: os.unlink(tmp)
