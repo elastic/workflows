@@ -49,7 +49,7 @@ settings:
       {%- if prof_supplied -%}
       {%- assign prof = prof_raw | strip | truncate: 128, '' -%}
       {%- assign prof_lc = prof | downcase -%}
-      {%- if prof == '' -%}{%- assign prof = '__blank__' -%}
+      {%- if prof == '' -%}
       {%- elsif prof_lc == 'default' -%}{%- assign prof = 'default' -%}
       {%- endif -%}
       {%- else -%}
@@ -165,7 +165,7 @@ steps:
             {%- assign allowed = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_.- ' -%}
             {%- assign ok = true -%}
             {%- assign len = s.size -%}
-            {%- if s == '' or s == '__blank__' or len < 1 or len > 128 -%}{%- assign ok = false -%}
+            {%- if s == '' or len < 1 or len > 128 -%}{%- assign ok = false -%}
             {%- else -%}
               {%- for i in (0..127) -%}
                 {%- if i >= len -%}{%- break -%}{%- endif -%}
