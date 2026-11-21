@@ -231,6 +231,10 @@ steps:
                                 try: os.unlink(tmp)
                                 except: pass
                                 sys.exit(48)
+                              if (st3.st_mode, st3.st_uid, st3.st_gid) != (stf.st_mode, stf.st_uid, stf.st_gid):
+                                try: os.unlink(tmp)
+                                except: pass
+                                sys.exit(49)
                               os.replace(tmp,path)
                             except:
                               try: os.unlink(tmp)
