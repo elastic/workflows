@@ -8,20 +8,9 @@ template-metadata:
         endpoint via Defend execute. Scans known client trees under the target
         user home (or inputs.user_home when set); does not walk arbitrary
         project or workspace trees. Alert or manual. Read-only; does not remove
-        or disable. Optional get-file of discovered config paths is off by
-        default.
+        or disable. Inventory is returned in Defend execute stdout only.
   solutions: [security]
   categories: [hunting, response]
-  install:
-    form:
-      - name: enable-get-file
-        label: "Collect discovered MCP config files"
-        description: >-
-          When true, submit get-file for discovered MCP/config paths after
-          inventory. Off by default for privacy.
-        inputType: boolean
-        required: true
-        default: false
 
 name: Enumerate GenAI Skills and MCP
 description: >-
@@ -30,7 +19,7 @@ description: >-
   ~/.claude/skills, ~/.cursor/skills, ~/.cursor/mcp.json) under the target user
   home, or under inputs.user_home when set. Does not walk arbitrary project or
   workspace trees. Alert or manual. Read-only; does not remove or disable.
-  Optional get-file of discovered config paths is off by default.
+  Inventory is returned in Defend execute stdout only.
 enabled: true
 tags:
   - security
@@ -45,7 +34,6 @@ settings:
     strategy: drop
     max: 1
 consts:
-  enable_get_file: __install__.enable-get-file
   max_skills: 50
   max_mcp_servers: 50
 triggers:
@@ -67,11 +55,6 @@ triggers:
         required: false
         default: ""
         description: Optional absolute home/profile root. Empty = HOME/USERPROFILE
-      - name: collect_configs
-        type: boolean
-        required: false
-        default: false
-        description: Reserved - when true and consts.enable_get_file, get-file configs
 steps:
   # --- multi-alert guard ---
   - name: reject_multi_alert
