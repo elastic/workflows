@@ -8,7 +8,7 @@ template-metadata:
         endpoint via Defend execute. Scans known client trees under the target
         user home (or inputs.user_home when set); does not walk arbitrary
         project or workspace trees. Alert or manual. Read-only; does not remove
-        or disable. Inventory is returned in Defend execute stdout only.
+        or disable. Inventory is returned in Defend execute stdout only. Linux/macOS require python3 on the Defend service PATH.
   solutions: [security]
   categories: [hunting, response]
 
@@ -154,7 +154,7 @@ steps:
                     {%- assign os = steps.normalize.output.os_type | strip -%}
                     {%- assign home = steps.normalize.output.user_home | strip -%}
                     {%- if os == 'windows' -%}
-                    powershell.exe -NoProfile -NonInteractive -Command "$ErrorActionPreference='Continue'; $homePath=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('{{ home | base64_encode }}')); if([string]::IsNullOrWhiteSpace($homePath)){ $homePath=$env:USERPROFILE }; if($homePath -notmatch '^[A-Za-z]:\\' -or $homePath.Contains('..') -or $homePath.Contains('*') -or $homePath.Contains('?')){ Write-Output 'ERR|bad_home'; exit 42 }; $maxS={{ consts.max_skills }}; $maxM={{ consts.max_mcp_servers }}; $skills=@(); $mcps=@(); $skillRoots=@((Join-Path $homePath '.claude\skills'),(Join-Path $homePath '.cursor\skills'),(Join-Path $homePath '.agents\skills'),(Join-Path $homePath '.codex\skills'),(Join-Path $homePath '.copilot\skills')); foreach($root in $skillRoots){ if(Test-Path -LiteralPath $root){ Get-ChildItem -LiteralPath $root -Recurse -Filter 'SKILL.md' -File -ErrorAction SilentlyContinue | ForEach-Object { if($skills.Count -ge $maxS){ return }; $client='unknown'; if($_.FullName -match '\\.claude\\'){ $client='claude' }; if($_.FullName -match '\\.cursor\\'){ $client='cursor' }; if($_.FullName -match '\\.codex\\'){ $client='codex' }; if($_.FullName -match '\\.copilot\\'){ $client='copilot' }; if($_.FullName -match '\\.agents\\'){ $client='agents' }; $skills += [pscustomobject]@{client=$client; name=$_.Directory.Name; path=$_.FullName} } } }; $mcpFiles=@((Join-Path $homePath '.cursor\mcp.json'),(Join-Path $homePath '.mcp.json')); $mcpFiles += (Join-Path $homePath 'AppData\Roaming\Claude\claude_desktop_config.json'); foreach($f in $mcpFiles){ if(-not (Test-Path -LiteralPath $f)){ continue }; try { $j=Get-Content -LiteralPath $f -Raw | ConvertFrom-Json } catch { continue }; $servers=$null; if($j.mcpServers){ $servers=$j.mcpServers } elseif($j.mcp){ $servers=$j.mcp }; if(-not $servers){ continue }; foreach($p in $servers.PSObject.Properties){ if($mcps.Count -ge $maxM){ break }; $e=$p.Value; $ident=''; if($e.command){ $ident=[string]$e.command } elseif($e.url){ $ident=[string]$e.url }; $disabled=$false; if($e.disabled -eq $true){ $disabled=$true }; $mcps += [pscustomobject]@{key=$p.Name; identity=$ident; disabled=$disabled; source=$f} } }; Write-Output ('SUMMARY|skills='+$skills.Count+'|mcp='+$mcps.Count); $skills | ForEach-Object { Write-Output ('SKILL|' + $_.client + '|' + $_.name + '|' + $_.path) }; $mcps | ForEach-Object { Write-Output ('MCP|' + $_.key + '|' + $_.identity + '|' + $_.disabled + '|' + $_.source) }"
+                    powershell.exe -NoProfile -NonInteractive -Command "$ErrorActionPreference='Continue'; $homePath=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('{{ home | base64_encode }}')); if([string]::IsNullOrWhiteSpace($homePath)){ $homePath=$env:USERPROFILE }; if($homePath -notmatch '^[A-Za-z]:\\' -or $homePath.Contains('..') -or $homePath.Contains('*') -or $homePath.Contains('?')){ Write-Output 'ERR|bad_home'; exit 42 }; $maxS={{ consts.max_skills }}; $maxM={{ consts.max_mcp_servers }}; $skills=@(); $mcps=@(); $skillRoots=@((Join-Path $homePath '.claude\skills'),(Join-Path $homePath '.cursor\skills'),(Join-Path $homePath '.agents\skills'),(Join-Path $homePath '.codex\skills'),(Join-Path $homePath '.copilot\skills'),(Join-Path $homePath '.github\skills')); foreach($root in $skillRoots){ if(Test-Path -LiteralPath $root){ Get-ChildItem -LiteralPath $root -Recurse -Filter 'SKILL.md' -File -ErrorAction SilentlyContinue | ForEach-Object { if($skills.Count -ge $maxS){ return }; $client='unknown'; if($_.FullName -match '\\.claude\\'){ $client='claude' }; if($_.FullName -match '\\.cursor\\'){ $client='cursor' }; if($_.FullName -match '\\.codex\\'){ $client='codex' }; if($_.FullName -match '\\.copilot\\'){ $client='copilot' }; if($_.FullName -match '\\.agents\\'){ $client='agents' }; $skills += [pscustomobject]@{client=$client; name=$_.Directory.Name; path=$_.FullName} } } }; $mcpFiles=@((Join-Path $homePath '.cursor\mcp.json'),(Join-Path $homePath '.mcp.json'),(Join-Path $homePath '.claude.json')); $mcpFiles += (Join-Path $homePath 'AppData\Roaming\Claude\claude_desktop_config.json'); foreach($f in $mcpFiles){ if(-not (Test-Path -LiteralPath $f)){ continue }; try { $j=Get-Content -LiteralPath $f -Raw | ConvertFrom-Json } catch { continue }; $servers=$null; if($j.mcpServers){ $servers=$j.mcpServers } elseif($j.mcp){ $servers=$j.mcp }; if(-not $servers){ continue }; foreach($p in $servers.PSObject.Properties){ if($mcps.Count -ge $maxM){ break }; $e=$p.Value; $ident=''; if($e.command){ $ident=[string]$e.command } elseif($e.url){ $u=[string]$e.url; if($u -match '://([^@/]+)@'){ $u=$u -replace '://[^@/]+@', '://' }; $ident=$u }; $disabled=$false; if($e.disabled -eq $true){ $disabled=$true }; $mcps += [pscustomobject]@{key=$p.Name; identity=$ident; disabled=$disabled; source=$f} } }; Write-Output ('SUMMARY|skills='+$skills.Count+'|mcp='+$mcps.Count); $skills | ForEach-Object { Write-Output ('SKILL|' + $_.client + '|' + $_.name + '|' + $_.path) }; $mcps | ForEach-Object { Write-Output ('MCP|' + $_.key + '|' + $_.identity + '|' + $_.disabled + '|' + $_.source) }"
                     {%- else -%}
                     home='{{ home | replace: "'", "'\\''" }}'; if [ -z "$home" ]; then home="${HOME:-}"; fi; case "$home" in /*) ;; *) echo 'ERR|bad_home'; exit 42 ;; esac; case "$home" in *..*) echo 'ERR|bad_home'; exit 42 ;; esac; max_s={{ consts.max_skills }}; max_m={{ consts.max_mcp_servers }}; command -v python3 >/dev/null || { echo 'ERR|no_python3'; exit 47; }; python3 - "$home" "$max_s" "$max_m" <<'PY'
                     import json,os,sys
@@ -175,6 +175,7 @@ steps:
                     mcp_paths=[
                       os.path.join(home,'.cursor','mcp.json'),
                       os.path.join(home,'.mcp.json'),
+                      os.path.join(home,'.claude.json'),
                       os.path.join(home,'Library','Application Support','Claude','claude_desktop_config.json'),
                       os.path.join(home,'.config','Claude','claude_desktop_config.json'),
                       os.path.join(home,'.claude','.mcp.json'),
@@ -191,7 +192,10 @@ steps:
                         if len(mcps)>=max_m:
                           break
                         v=v or {}
-                        ident=str(v.get('command') or v.get('url') or '')
+                        ident=str(v.get('command') or '')
+                        if not ident and v.get('url'):
+                          from urllib.parse import urlsplit,urlunsplit
+                          u=urlsplit(str(v.get('url'))); ident=urlunsplit((u.scheme,u.hostname or '',u.path,'',''))
                         disabled=bool(v.get('disabled') is True)
                         mcps.append(('MCP',k,ident,str(disabled).lower(),path))
                     print(f'SUMMARY|skills={len(skills)}|mcp={len(mcps)}')
