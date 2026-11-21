@@ -109,7 +109,22 @@ steps:
           - name: validate_path
             type: data.set
             with:
-              path_safe: "{%- assign p = steps.set_context.output.file_path -%}{%- assign os = steps.set_context.output.os_type -%}{%- if p contains '..' or p contains '*' or p contains '?' -%}false{%- elsif os == 'windows' -%}{%- assign drive = p | slice: 0, 3 -%}{%- assign letter = p | slice: 0, 1 -%}{%- assign colon = p | slice: 1, 1 -%}{%- assign slash = p | slice: 2, 1 -%}{%- if colon == ':' and slash == '\\' -%}{%- if p contains '`' or p contains '$(' or p contains '${' or p contains '\"' -%}false{%- else -%}true{%- endif -%}{%- else -%}false{%- endif -%}{%- elsif p contains '/' -%}{%- assign first = p | slice: 0, 1 -%}{%- if first == '/' -%}{%- if p contains '`' or p contains '$(' or p contains '${' or p contains '\"' -%}false{%- else -%}true{%- endif -%}{%- else -%}false{%- endif -%}{%- else -%}false{%- endif -%}"
+              path_safe: |-
+                {%- assign p = steps.set_context.output.file_path -%}
+                {%- assign os = steps.set_context.output.os_type -%}
+                {%- assign bad = false -%}
+                {%- if p contains "/../" or p contains "\\..\\" or p == ".." or p contains "*" or p contains "?" or p contains "`" or p contains "$(" or p contains "${" or p contains '"' -%}{%- assign bad = true -%}{%- endif -%}
+                {%- if bad -%}false
+                {%- elsif os == "windows" -%}
+                {%- assign colon = p | slice: 1, 1 -%}
+                {%- assign sep = p | slice: 2, 1 -%}
+                {%- if colon == ":" and sep == "/" -%}true
+                {%- elsif colon == ":" and sep == "\\" -%}true
+                {%- else -%}false{%- endif -%}
+                {%- else -%}
+                {%- assign first = p | slice: 0, 1 -%}
+                {%- if first == "/" -%}true{%- else -%}false{%- endif -%}
+                {%- endif -%}
           - name: check_path_safe
             type: if
             condition: 'not steps.validate_path.output.path_safe: "true"'
@@ -149,7 +164,7 @@ steps:
                 type: while
                 condition: 'variables.get_action_id: * and not variables.get_action_id: "" and not variables.get_completed: true'
                 max-iterations:
-                  limit: "{{ consts.action_poll_limit }}"
+                  limit: 36
                   on-limit: continue
                 steps:
                   - name: wait_get
@@ -206,7 +221,7 @@ steps:
                             {%- if steps.set_context.output.os_type == 'windows' -%}
                             powershell.exe -NoProfile -NonInteractive -Command "$ErrorActionPreference='Stop'; $p=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('{{ p | base64_encode }}')); $q=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('{{ q | base64_encode }}')); if($p -notmatch '^[A-Za-z]:\\' -or $p.Contains('..')){exit 42}; New-Item -ItemType Directory -Force -Path $q | Out-Null; $acl=Get-Acl $q; $acl.SetAccessRuleProtection($true,$false); $rule=New-Object Security.AccessControl.FileSystemAccessRule('SYSTEM','FullControl','Allow'); $acl.SetAccessRule($rule); Set-Acl $q $acl; $dest=Join-Path $q ([IO.Path]::GetFileName($p)+'.'+[guid]::NewGuid().ToString('N')); Move-Item -LiteralPath $p -Destination $dest -Force; Write-Output $dest"
                             {%- else -%}
-                            p='{{ p | replace: "'", "'\\''" }}'; q='{{ q | replace: "'", "'\\''" }}'; case "$p" in /*) ;; *) exit 42 ;; esac; case "$p" in *..*) exit 42 ;; esac; [ -f "$p" ] && [ ! -L "$p" ] || exit 43; install -d -m 700 "$q" || exit 43; dest="$q/$(basename "$p").$(date +%s).$$"; mv -- "$p" "$dest" || exit 44; chmod 600 "$dest" 2>/dev/null; printf '%s\n' "$dest"
+                            p='{{ p | replace: "'", "'\\''" }}'; q='{{ q | replace: "'", "'\\''" }}'; case "$p" in /*) ;; *) exit 42 ;; esac; case "$p" in *..*) exit 42 ;; esac; [ -f "$p" ] && [ ! -L "$p" ] || exit 43; install -d -m 700 "$q" || exit 43; dest="$q/$(basename "$p").$(date +%s).$$"; mv -- "$p" "$dest" || exit 44; if [ "$(stat -c %h "$dest" 2>/dev/null || stat -f %l "$dest")" = 1 ]; then chmod 600 "$dest"; fi; printf '%s\n' "$dest"
                             {%- endif -%}
                             {%- endif -%}
                       - name: quarantine_or_delete
@@ -235,7 +250,7 @@ steps:
                         type: while
                         condition: 'variables.q_action_id: * and not variables.q_action_id: "" and not variables.q_completed: true'
                         max-iterations:
-                          limit: "{{ consts.action_poll_limit }}"
+                          limit: 36
                           on-limit: continue
                         steps:
                           - name: wait_q
