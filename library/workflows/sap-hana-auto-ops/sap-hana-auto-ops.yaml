@@ -1,30 +1,31 @@
 template-metadata:
   slug: sap-hana-auto-ops
-  version: "1.0.1"
+  version: "1.0.2"
   availability: ">=9.6.0"
   name: "SAP HANA Auto-ops (Prometheus)"
   description: >-
     Detect hanadb_* Prometheus metrics and upsert Auto: SAP HANA health dashboard,
-    Universal alerts, ML anomaly scaffold, and availability SLO. Expect metrics from
-    the SAP HANA Fleet integration or a SUSE hanadb_exporter scrape into Managed PRW.
+    Universal alerts, ML anomaly scaffold, and an alert-free sample-ratio SLO. Expect
+    metrics from the SAP HANA Fleet integration or a SUSE hanadb_exporter scrape into
+    Managed PRW.
   solutions: [observability]
   categories: [monitoring, reporting]
   install:
     form:
+      - name: agent-id
+        label: "Agent Builder agent ID"
+        description: Agent used for Universal alerts / ML / SLO gap-fill.
+        inputType: text
+        required: true
+        default: "elastic-ai-agent"
       - name: metrics-index
         label: "Prometheus metrics index pattern"
         description: >-
-          Elasticsearch index / data stream pattern used for inventory and detect.
+          Elasticsearch index / data stream pattern used for detect, panels, and alerts.
+          Include Fleet SAP HANA streams if used (e.g. metrics-*, metrics-generic.prometheus-*).
         inputType: esIndex
         required: true
         default: "metrics-generic.prometheus-*,metrics-*"
-      - name: metrics-data-stream
-        label: "Prometheus metrics data stream"
-        description: >-
-          Primary data stream for ES|QL panels (usually the Managed PRW landing stream).
-        inputType: esIndex
-        required: true
-        default: "metrics-generic.prometheus-default"
 
 name: sap-hana-auto-ops
 description: >
@@ -50,7 +51,6 @@ settings:
 
 consts:
   metrics_index: __install__.metrics-index
-  metrics_data_stream: __install__.metrics-data-stream
   dash_id: auto-sap-hana-health
 
 steps:
@@ -79,7 +79,7 @@ steps:
         Elastic-Api-Version: "2023-10-31"
       body:
         name: sap-hana
-        description: SAP HANA Prom-gap Auto-ops
+        description: SAP HANA Auto-ops
         color: "#0070F2"
 
   - name: detect_hanadb
@@ -96,9 +96,20 @@ steps:
                  OR hanadb_alerts_current IS NOT NULL)
         | STATS docs = COUNT(*)
 
-  - name: upsert_dashboard
+  - name: get_dashboard
     type: kibana.request
     if: "steps.detect_hanadb.output.values.0.0 > 0"
+    on-failure:
+      continue: true
+    with:
+      method: GET
+      path: /api/dashboards/auto-sap-hana-health
+      headers:
+        Elastic-Api-Version: "2023-10-31"
+
+  - name: upsert_dashboard
+    type: kibana.request
+    if: "steps.detect_hanadb.output.values.0.0 > 0 and steps.get_dashboard.error.message: HTTP*404*"
     on-failure:
       continue: true
     with:
@@ -108,7 +119,7 @@ steps:
         Elastic-Api-Version: "2023-10-31"
       body:
         title: 'Auto: SAP HANA — Performance & Health'
-        description: Prom-gap Auto-ops for hanadb_* (SUSE hanadb_exporter → Managed PRW).
+        description: Auto-ops for hanadb_* metrics (SUSE hanadb_exporter or Fleet SAP HANA → Managed PRW).
         time_range:
           from: now-2h
           to: now
@@ -154,12 +165,10 @@ steps:
               1. Confirm exporter scrape + PRW (`job=hanadb` / `hanadb_*` fields).
               2. Memory HOT → check `hanadb_column_tables_used_memory` + schema consumers.
               3. Alerts > 0 → join to HANA Statistics Server details.
-              4. Owned by **`sap-hana-auto-ops`** (Prom-gap process).
+              4. Owned by **`sap-hana-auto-ops`**.
 
               ## Related
-              - Catalog: `integrations/sap-hana/prometheus-metrics.json` (75 metrics).
-              - Process: `docs/prom-gap-to-auto-ops.md`.
-              - Collect via Fleet **SAP HANA** integration or scrape SUSE hanadb_exporter.
+              - Collect via Fleet **SAP HANA** integration or scrape [SUSE hanadb_exporter](https://github.com/SUSE/hanadb_exporter).
         - id: hana-flow
           type: custom_content
           grid:
@@ -223,25 +232,25 @@ steps:
                 .badge.warn { background: var(--cc-color-warning); color: var(--cc-color-background); }
                 .empty { opacity: 0.65; padding: var(--cc-space-l); }
               </style>
-              {{ '{%' }} if rows.size == 0 {{ '%}' }}
+              {{ "{% if rows.size == 0 %}" }}
                 <p class="empty">No hanadb_* samples — install the SAP HANA integration or scrape SUSE hanadb_exporter into Managed PRW.</p>
-              {{ '{%' }} else {{ '%}' }}
+              {{ "{% else %}" }}
               <div class="board">
-              {{ '{%' }} for row in rows {{ '%}' }}
-                <div class="card {{ '{%' }} if row["mem_mb"].value >= 50000 {{ '%}' }}bad{{ '{%' }} elsif row["mem_mb"].value >= 20000 {{ '%}' }}warn{{ '{%' }} endif {{ '%}' }}">
-                  <div class="name">{{ '{{' }} row["host"].value {{ '}}' }}</div>
-                  <div class="pct">{{ '{{' }} row["mem_mb"].value {{ '}}' }} MB</div>
-                  <div class="meta">{{ '{{' }} row["conns"].value {{ '}}' }} conns · alerts {{ '{{' }} row["alerts"].value {{ '}}' }} · {{ '{{' }} row["samples"].value {{ '}}' }} samples</div>
-                  <span class="badge {{ '{%' }} if row["mem_mb"].value >= 50000 {{ '%}' }}bad{{ '{%' }} elsif row["mem_mb"].value >= 20000 {{ '%}' }}warn{{ '{%' }} else {{ '%}' }}{{ '{%' }} endif {{ '%}' }}">
-                    {{ '{%' }} if row["mem_mb"].value >= 50000 {{ '%}' }}HOT{{ '{%' }} elsif row["mem_mb"].value >= 20000 {{ '%}' }}WATCH{{ '{%' }} else {{ '%}' }}OK{{ '{%' }} endif {{ '%}' }}
+              {{ "{% for row in rows %}" }}
+                <div class="card {{ '{% if row["mem_mb"].value >= 50000 %}' }}bad{{ '{% elsif row["mem_mb"].value >= 20000 %}' }}warn{{ "{% endif %}" }}">
+                  <div class="name">{{ "{{ row[\"host\"].value }}" }}</div>
+                  <div class="pct">{{ "{{ row[\"mem_mb\"].value }}" }} MB</div>
+                  <div class="meta">{{ "{{ row[\"conns\"].value }}" }} conns · alerts {{ "{{ row[\"alerts\"].value }}" }} · {{ "{{ row[\"samples\"].value }}" }} samples</div>
+                  <span class="badge {{ '{% if row["mem_mb"].value >= 50000 %}' }}bad{{ '{% elsif row["mem_mb"].value >= 20000 %}' }}warn{{ "{% endif %}" }}">
+                    {{ '{% if row["mem_mb"].value >= 50000 %}' }}HOT{{ '{% elsif row["mem_mb"].value >= 20000 %}' }}WATCH{{ "{% else %}" }}OK{{ "{% endif %}" }}
                   </span>
                 </div>
-              {{ '{%' }} endfor {{ '%}' }}
+              {{ "{% endfor %}" }}
               </div>
-              {{ '{%' }} endif {{ '%}' }}
+              {{ "{% endif %}" }}
             esql_query:
             - |
-              FROM {{ consts.metrics_data_stream }}
+              FROM {{ consts.metrics_index }}
               | WHERE @timestamp >= ?_tstart AND @timestamp <= ?_tend
                   AND (hanadb_host_memory_used_total IS NOT NULL OR hanadb_connections_total IS NOT NULL)
               | STATS mem_mb = MAX(hanadb_host_memory_used_total),
@@ -265,7 +274,7 @@ steps:
             data_source:
               type: esql
               query: |-
-                FROM {{ consts.metrics_data_stream }}
+                FROM {{ consts.metrics_index }}
                 | WHERE hanadb_connections_total IS NOT NULL
                 | STATS `Connections` = MAX(hanadb_connections_total)
             metrics:
@@ -285,7 +294,7 @@ steps:
             data_source:
               type: esql
               query: |-
-                FROM {{ consts.metrics_data_stream }}
+                FROM {{ consts.metrics_index }}
                 | WHERE hanadb_host_memory_used_total IS NOT NULL
                 | STATS `Memory used (MB)` = MAX(hanadb_host_memory_used_total)
             metrics:
@@ -305,7 +314,7 @@ steps:
             data_source:
               type: esql
               query: |-
-                FROM {{ consts.metrics_data_stream }}
+                FROM {{ consts.metrics_index }}
                 | WHERE hanadb_sql_service_executions IS NOT NULL
                 | STATS `SQL executions` = MAX(hanadb_sql_service_executions)
             metrics:
@@ -325,7 +334,7 @@ steps:
             data_source:
               type: esql
               query: |-
-                FROM {{ consts.metrics_data_stream }}
+                FROM {{ consts.metrics_index }}
                 | WHERE hanadb_alerts_current IS NOT NULL
                 | STATS `HANA alerts` = MAX(hanadb_alerts_current)
             metrics:
@@ -358,7 +367,7 @@ steps:
               data_source:
                 type: esql
                 query: |-
-                  FROM {{ consts.metrics_data_stream }}
+                  FROM {{ consts.metrics_index }}
                   | WHERE hanadb_host_memory_used_total IS NOT NULL
                   | STATS mem_mb = MAX(hanadb_host_memory_used_total)
                       BY time_bucket = BUCKET(@timestamp, 75, ?_tstart, ?_tend),
@@ -393,7 +402,7 @@ steps:
               data_source:
                 type: esql
                 query: |-
-                  FROM {{ consts.metrics_data_stream }}
+                  FROM {{ consts.metrics_index }}
                   | WHERE hanadb_connections_total IS NOT NULL
                   | STATS conns = MAX(hanadb_connections_total)
                       BY time_bucket = BUCKET(@timestamp, 75, ?_tstart, ?_tend),
@@ -408,16 +417,16 @@ steps:
 
   - name: sync_alerts_ml_slo
     type: ai.agent
-    agent-id: elastic-ai-agent
-    create-conversation: true
+    agent-id: "{{ consts.agent_id }}"
     if: "steps.detect_hanadb.output.values.0.0 > 0"
     on-failure:
       continue: true
     with:
       message: |
-        You are SAP HANA Prom-gap Auto-ops on Elastic Observability Serverless.
+        You are SAP HANA Auto-ops on Elastic Observability.
 
         Telemetry gate: hanadb_* docs (7d) = {{ steps.detect_hanadb.output.values.0.0 }}
+        Metrics index pattern: {{ consts.metrics_index }}
 
         ## Goal (gap-only)
         1. **Universal alerts** via `POST /api/alerting/v2/rules` (never Classic thresholds).
@@ -426,15 +435,16 @@ steps:
            - `Auto: SAP HANA Connections High` — `hanadb_connections_total` by host; breach when > 500.
            - `Auto: SAP HANA Alerts Current` — `hanadb_alerts_current` > 0.
            Tags: `sap-hana`, `auto-ops`, `universal`, `prometheus`.
-           Index: `metrics-generic.prometheus-*` (and metrics-* if needed).
+           Index / data view: **{{ consts.metrics_index }}** (same pattern used for detect + dashboard panels).
         2. **ML** — if no job `auto-sap-hana-memory`, create/open a single metric anomaly job on
            `hanadb_host_memory_used_total` (15m bucket) + Classic `xpack.ml.anomaly_detection_alert`
            named `Auto: SAP HANA Memory Anomaly`. Skip if APIs unavailable; note in report.
         3. **SLO** — gap-only `POST /api/observability/slos`:
-           - id `auto-sap-hana-availability`
-           - name `Auto: SAP HANA — alert-free availability`
+           - id `auto-sap-hana-alert-free-ratio`
+           - name `Auto: SAP HANA — alert-free sample ratio`
            - indicator: custom KQL / metric good events where `hanadb_alerts_current:0` (or burn when alerts > 0)
-           - objective 99.9% / 7d or softer 99% if estate is demo-noisy
+           - Label clearly as **alert-free sample ratio** (not true availability — telemetry loss is not counted as bad).
+           - objective 99.9% / 7d
            - tags: sap-hana, auto-ops
 
         Do **not** recreate healthy assets. Prefer kibana.request / execute_api.
@@ -452,4 +462,3 @@ steps:
         sap-hana-auto-ops complete.
         detect docs={{ steps.detect_hanadb.output.values.0.0 }}
         dashboard=auto-sap-hana-health
-        catalog_metrics=75
