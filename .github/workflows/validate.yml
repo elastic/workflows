@@ -10,10 +10,10 @@ jobs:
   lint-and-catalog:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-      - uses: actions/setup-node@cdca7365b2dadb8aad0a33bc7601856ffabcc48e # v4.3.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version: '20'
+          node-version: '26'
           cache: 'npm'
       - run: npm ci --ignore-scripts
       - run: npm run build:catalog
@@ -29,18 +29,18 @@ jobs:
             schema_url: https://workflows.elastic.co/schema/v1/serverless
             blocking: true
           - name: release
-            # Bump the version to the latest released Kibana minor. The release
-            # schema can lag templates targeting a newer stack (see
-            # `availability`), so this line reports without blocking.
+            # Bump both versions to the latest released Kibana minor. Templates
+            # whose `availability` excludes `kibana_version` are skipped.
+            kibana_version: 9.6.0
             schema_url: https://workflows.elastic.co/schema/v1/9.6.0/release
-            blocking: false
+            blocking: true
     name: validate (${{ matrix.name }})
     continue-on-error: ${{ !matrix.blocking }}
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-      - uses: actions/setup-node@cdca7365b2dadb8aad0a33bc7601856ffabcc48e # v4.3.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version: '20'
+          node-version: '26'
           cache: 'npm'
       - run: npm ci --ignore-scripts
       - name: Check schema is published
@@ -59,17 +59,19 @@ jobs:
         if: steps.schema.outputs.published == 'true'
         env:
           WORKFLOWS_SCHEMA_CDN_URL: ${{ matrix.schema_url }}
+          WORKFLOWS_KIBANA_VERSION: ${{ matrix.kibana_version }}
         run: npm run validate:templates -- --json reports/templates.json
       - name: Validate examples
         # Run even if the templates step failed, so both results are reported.
         if: ${{ !cancelled() && steps.schema.outputs.published == 'true' }}
         env:
           WORKFLOWS_SCHEMA_CDN_URL: ${{ matrix.schema_url }}
+          WORKFLOWS_KIBANA_VERSION: ${{ matrix.kibana_version }}
         run: npm run validate:examples -- --json reports/examples.json
       - name: Upload validation reports
         # Run after failed validation too: validate-report.yml reads these.
         if: ${{ !cancelled() && steps.schema.outputs.published == 'true' }}
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: validation-${{ matrix.name }}
           path: reports/

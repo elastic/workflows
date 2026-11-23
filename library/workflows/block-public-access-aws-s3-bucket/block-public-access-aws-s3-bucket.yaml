@@ -1,0 +1,261 @@
+template-metadata:
+  slug: block-public-access-aws-s3-bucket
+  version: "1.0.0"
+  availability: ">=9.7.0"
+  name: "Block Public Access to AWS S3 Bucket"
+  description: >-
+    Enable all four bucket-level Amazon S3 Block Public Access controls from a
+    security alert or manual input. Reads whether a configuration exists,
+    requires explicit analyst approval, applies the controls, and parses the
+    follow-up response for verification. Alert-driven runs require flattened
+    request parameters and use the CloudTrail recipient account as the expected
+    bucket owner. If an alert does not identify both values, it fails closed;
+    operators can rerun manually with explicit inputs. The AWS connector
+    requires only s3:GetBucketPublicAccessBlock and
+    s3:PutBucketPublicAccessBlock.
+  solutions: [security]
+  categories: [response]
+  install:
+    form:
+      - name: aws-connector
+        label: "AWS connector"
+        description: >-
+          AWS connector with permission to read and update Block Public Access
+          for the S3 buckets this workflow may remediate.
+        inputType: connector
+        connectorType: .aws
+        required: true
+
+name: Block Public Access to AWS S3 Bucket
+description: |
+  Resolve an S3 bucket, expected owner account, and region from an alert or
+  manual input. Distinguish an absent bucket-level Block Public Access
+  configuration from a returned one, require analyst approval, enable all four
+  controls, and verify the response. Alert-driven runs require the AWS
+  integration's request-parameter retention mode to be All or Flattened. The
+  expected owner is the resource-side CloudTrail recipient account, never the
+  caller account. If either alert field is absent, the run fails closed and can
+  be repeated manually with explicit inputs.
+
+triggers:
+  - type: alert
+  - type: manual
+    inputs:
+      - name: bucket_name
+        type: string
+        description: AWS S3 bucket on which to enable Block Public Access.
+        required: true
+        default: ""
+      - name: region
+        type: string
+        description: AWS region containing the S3 bucket.
+        required: true
+        default: ""
+      - name: expected_bucket_owner
+        type: string
+        description: >-
+          AWS account ID expected to own the S3 bucket. Required for manual
+          runs. Alert runs use the CloudTrail recipient account and fail closed
+          when it is absent; do not use the caller's cloud.account.id.
+        required: true
+        default: ""
+
+steps:
+  # Alert fields take precedence; manual inputs support direct runs.
+  - name: resolve_target
+    type: data.set
+    with:
+      bucket_name: "{{ event.alerts[0].aws.cloudtrail.flattened.request_parameters.bucketName | default: inputs.bucket_name }}"
+      region: "{{ event.alerts[0].cloud.region | default: inputs.region }}"
+      expected_bucket_owner: "{{ event.alerts[0].aws.cloudtrail.recipient_account_id | default: inputs.expected_bucket_owner }}"
+      expected_bucket_owner_source: >-
+        {% if event.alerts[0].aws.cloudtrail.recipient_account_id != blank %}CloudTrail recipient account{% elsif inputs.expected_bucket_owner != blank %}manual input{% else %}unavailable{% endif %}
+      alert_id: "{{ event.alerts[0].kibana.alert.uuid | default: event.alerts[0]._id | default: 'manual' }}"
+
+  # Fail closed unless the bucket, Region, and resource-side expected owner are known.
+  - name: validate_target
+    type: if
+    condition: "${{ variables.bucket_name != blank and variables.region != blank and variables.expected_bucket_owner != blank }}"
+    steps:
+      # Absence is valid; all other errors are classified and stopped below.
+      - name: get_public_access_block_before
+        type: aws.request
+        connector-id: __install__.aws-connector
+        on-failure:
+          continue: true
+        with:
+          service: s3
+          region: "{{ variables.region }}"
+          method: GET
+          path: "/{{ variables.bucket_name }}"
+          query:
+            publicAccessBlock: ""
+          headers:
+            x-amz-expected-bucket-owner: "{{ variables.expected_bucket_owner }}"
+
+      # Preserve whether S3 returned a configuration, reported absence, or failed.
+      - name: classify_pre_read
+        type: data.set
+        with:
+          state: >-
+            {% if steps.get_public_access_block_before.error == nil %}returned{% elsif steps.get_public_access_block_before.error.message contains 'AWS s3 request failed with status 404:' and steps.get_public_access_block_before.error.message contains '<Code>NoSuchPublicAccessBlockConfiguration</Code>' %}absent{% else %}failed{% endif %}
+
+      - name: continue_only_after_safe_pre_read
+        type: if
+        condition: "${{ steps.classify_pre_read.output.state != 'failed' }}"
+        steps:
+          - name: request_approval
+            type: waitForInput
+            timeout: 1h
+            with:
+              message: |-
+                Approve enabling all four bucket-level Amazon S3 Block Public
+                Access controls for {{ variables.bucket_name }} in
+                {{ variables.region }}?
+
+                **Expected bucket owner:** {{ variables.expected_bucket_owner }}
+                **Owner source:** {{ variables.expected_bucket_owner_source }}
+                Alert: {{ variables.alert_id }}
+                {% if steps.classify_pre_read.output.state == 'absent' %}Pre-change state: absent. S3 returned NoSuchPublicAccessBlockConfiguration, so no bucket-level configuration existed.{% else %}Pre-change state: returned. GetPublicAccessBlock response:
+
+                ~~~xml
+                {{ steps.get_public_access_block_before.output.data }}
+                ~~~
+                {% endif %}
+              schema:
+                type: object
+                properties:
+                  approved:
+                    type: boolean
+                    title: Enable all four Block Public Access controls
+                    default: false
+                  notes:
+                    type: string
+                    title: Analyst notes
+                required:
+                  - approved
+
+          # PutPublicAccessBlock is the immediate next action after approval.
+          - name: apply_when_approved
+            type: if
+            condition: "${{ steps.request_approval.output.response.approved == true }}"
+            steps:
+              - name: put_public_access_block
+                type: aws.request
+                connector-id: __install__.aws-connector
+                with:
+                  service: s3
+                  region: "{{ variables.region }}"
+                  method: PUT
+                  path: "/{{ variables.bucket_name }}"
+                  query:
+                    publicAccessBlock: ""
+                  headers:
+                    Content-Type: application/xml
+                    x-amz-expected-bucket-owner: "{{ variables.expected_bucket_owner }}"
+                    x-amz-sdk-checksum-algorithm: SHA256
+                    x-amz-checksum-sha256: bt9tf+B4IeXSg6LONCGEGsyrAv0O+hUOBU1a5oUoSck=
+                  body: '<PublicAccessBlockConfiguration xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><BlockPublicAcls>true</BlockPublicAcls><IgnorePublicAcls>true</IgnorePublicAcls><BlockPublicPolicy>true</BlockPublicPolicy><RestrictPublicBuckets>true</RestrictPublicBuckets></PublicAccessBlockConfiguration>'
+
+              - name: get_public_access_block_after
+                type: aws.request
+                connector-id: __install__.aws-connector
+                with:
+                  service: s3
+                  region: "{{ variables.region }}"
+                  method: GET
+                  path: "/{{ variables.bucket_name }}"
+                  query:
+                    publicAccessBlock: ""
+                  headers:
+                    x-amz-expected-bucket-owner: "{{ variables.expected_bucket_owner }}"
+
+              # Parse each control from the XML response before claiming verification.
+              - name: parse_verification_response
+                type: data.set
+                with:
+                  block_public_acls: "{{ steps.get_public_access_block_after.output.data | split: '<BlockPublicAcls>' | last | split: '</BlockPublicAcls>' | first | strip }}"
+                  ignore_public_acls: "{{ steps.get_public_access_block_after.output.data | split: '<IgnorePublicAcls>' | last | split: '</IgnorePublicAcls>' | first | strip }}"
+                  block_public_policy: "{{ steps.get_public_access_block_after.output.data | split: '<BlockPublicPolicy>' | last | split: '</BlockPublicPolicy>' | first | strip }}"
+                  restrict_public_buckets: "{{ steps.get_public_access_block_after.output.data | split: '<RestrictPublicBuckets>' | last | split: '</RestrictPublicBuckets>' | first | strip }}"
+
+              - name: check_verification_response
+                type: data.set
+                with:
+                  verified: >-
+                    {% if steps.parse_verification_response.output.block_public_acls == 'true' and steps.parse_verification_response.output.ignore_public_acls == 'true' and steps.parse_verification_response.output.block_public_policy == 'true' and steps.parse_verification_response.output.restrict_public_buckets == 'true' %}true{% else %}false{% endif %}
+
+              - name: log_approved_audit_result
+                type: console
+                with:
+                  message: |-
+                    Outcome: PutPublicAccessBlock was requested for AWS S3 bucket {{ variables.bucket_name }} in {{ variables.region }}. {% if steps.check_verification_response.output.verified == 'true' %}The follow-up GetPublicAccessBlock XML was parsed and all four controls were verified true.{% else %}The follow-up GetPublicAccessBlock response did not verify all four controls as true; review the response and bucket state.{% endif %}
+                    Expected bucket owner: {{ variables.expected_bucket_owner }}.
+                    Alert: {{ variables.alert_id }}.
+                    Approved: {{ steps.request_approval.output.response.approved }}.
+                    Responder: {{ steps.request_approval.output.respondedBy }}.
+                    Notes: {{ steps.request_approval.output.response.notes | default: '(none)' }}.
+                    Pre-change state: {{ steps.classify_pre_read.output.state }}.
+                    Follow-up GetPublicAccessBlock response:
+                    {{ steps.get_public_access_block_after.output.data }}
+
+              - name: stop_if_unverified
+                type: if
+                condition: "${{ steps.check_verification_response.output.verified != 'true' }}"
+                steps:
+                  - name: fail_if_unverified
+                    type: workflow.fail
+                    with:
+                      message: >-
+                        PutPublicAccessBlock was requested for
+                        {{ variables.bucket_name }}, but the follow-up
+                        GetPublicAccessBlock response did not verify all four
+                        controls.
+            else:
+              - name: log_rejected_audit_result
+                type: console
+                with:
+                  message: |-
+                    Outcome: No PutPublicAccessBlock request was made for AWS S3 bucket {{ variables.bucket_name }} in {{ variables.region }} because remediation was rejected.
+                    Expected bucket owner: {{ variables.expected_bucket_owner }}.
+                    Alert: {{ variables.alert_id }}.
+                    Approved: {{ steps.request_approval.output.response.approved }}.
+                    Responder: {{ steps.request_approval.output.respondedBy }}.
+                    Notes: {{ steps.request_approval.output.response.notes | default: '(none)' }}.
+                    Pre-change state: {{ steps.classify_pre_read.output.state }}.
+        else:
+          - name: log_pre_read_failure
+            type: console
+            with:
+              message: |-
+                AWS S3 Block Public Access remediation stopped before approval because GetPublicAccessBlock failed with an error other than NoSuchPublicAccessBlockConfiguration.
+                Bucket: {{ variables.bucket_name }}.
+                Region: {{ variables.region }}.
+                Expected bucket owner: {{ variables.expected_bucket_owner }}.
+                Alert: {{ variables.alert_id }}.
+                Error: {{ steps.get_public_access_block_before.error.message }}.
+          - name: fail_pre_read
+            type: workflow.fail
+            with:
+              message: >-
+                GetPublicAccessBlock failed for {{ variables.bucket_name }};
+                remediation stopped before approval.
+    else:
+      - name: log_missing_target
+        type: console
+        with:
+          message: >-
+            AWS S3 Block Public Access remediation skipped because
+            aws.cloudtrail.flattened.request_parameters.bucketName/manual
+            bucket_name, cloud.region/manual region, or
+            aws.cloudtrail.recipient_account_id/manual expected_bucket_owner
+            was missing. Alert runs require request-parameter retention mode
+            All or Flattened. The caller's cloud.account.id is not accepted as
+            bucket ownership evidence.
+      - name: fail_missing_target
+        type: workflow.fail
+        with:
+          message: >-
+            AWS S3 Block Public Access remediation requires a bucket name,
+            Region, and expected bucket owner established from the CloudTrail
+            recipient account or an explicit manual fallback.
