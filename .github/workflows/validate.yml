@@ -33,7 +33,7 @@ jobs:
             # whose `availability` excludes `kibana_version` are skipped.
             kibana_version: 9.6.0
             schema_url: https://workflows.elastic.co/schema/v1/9.6.0/release
-            blocking: false
+            blocking: true
     name: validate (${{ matrix.name }})
     continue-on-error: ${{ !matrix.blocking }}
     steps:
