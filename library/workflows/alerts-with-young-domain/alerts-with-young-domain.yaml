@@ -7,7 +7,8 @@ template-metadata:
     Every hour, and on demand, find security alerts from the last hour that
     carry dns.question.name or destination.domain, look up WHOIS registration
     age, and open a Security case when the domain was registered within the
-    configured maximum age (default 90 days). Names ending in .local or
+    configured maximum age (default 90 days). Alerts are read from this
+    workflow's Kibana space. Names ending in .local or
     .internal are not sent to WHOIS. One open case per agent and observed
     domain.
   solutions: [security]
@@ -27,7 +28,8 @@ name: Alerts with Young Domain
 description: >
   Query security alerts from the last hour for dns.question.name and
   destination.domain, check WHOIS registration age, and open a Security case
-  for each young domain. Names ending in .local or .internal are not sent to
+  for each young domain. Alerts are read from this workflow's Kibana space.
+  Names ending in .local or .internal are not sent to
   WHOIS. Runs every hour and can be started manually. An open case for the
   same agent and domain is left as-is. Closing that case allows a later run
   to open a new one if the domain shows up again.
@@ -52,9 +54,6 @@ settings:
 
 consts:
   max_domain_age_days: __install__.max-domain-age-days
-  # Security alerts data stream. Narrow this if the workflow user can read
-  # alerts from more spaces than this workflow should case.
-  alerts_index: ".alerts-security.alerts-*"
   lookback: 1 hour
   # who-dat has no dedicated connector. Cap each run so a noisy hour cannot
   # exhaust the public WHOIS proxy. Raise this in consts if lookups stay fast.
@@ -77,6 +76,13 @@ steps:
     with:
       max_domain_age_days: "{% assign max_age = consts.max_domain_age_days | plus: 0 %}{% if max_age > 0 %}{{ max_age }}{% else %}90{% endif %}"
 
+  - name: set_alerts_index
+    type: data.set
+    with:
+      # .alerts-security.alerts-* would also read other spaces and copy those
+      # alerts into a case in this space.
+      alerts_index: ".alerts-security.alerts-{{ workflow.spaceId | default: 'default' }}"
+
   - name: log_run_start
     type: console
     with:
@@ -86,6 +92,7 @@ steps:
         lookback={{ consts.lookback }}
         max_domain_age_days={{ steps.set_age_threshold.output.max_domain_age_days }}
         max_domains_per_run={{ consts.max_domains_per_run }}
+        alerts_index={{ steps.set_alerts_index.output.alerts_index }}
 
   - name: init_counters
     type: data.set
@@ -103,7 +110,7 @@ steps:
     type: elasticsearch.esql.query
     with:
       query: |
-        FROM {{ consts.alerts_index }}
+        FROM {{ steps.set_alerts_index.output.alerts_index }}
         | WHERE @timestamp > NOW() - {{ consts.lookback }}
           AND (dns.question.name IS NOT NULL OR destination.domain IS NOT NULL)
         | EVAL observed_domain = CASE(
@@ -114,6 +121,7 @@ steps:
         | WHERE observed_domain IS NOT NULL
         | MV_EXPAND observed_domain
         | EVAL observed_domain = TO_LOWER(observed_domain)
+        | EVAL observed_domain = REPLACE(REPLACE(REPLACE(observed_domain, "。", "."), "．", "."), "｡", ".")
         | WHERE NOT ENDS_WITH(observed_domain, ".local")
             AND NOT ENDS_WITH(observed_domain, ".local.")
             AND NOT ENDS_WITH(observed_domain, ".internal")
@@ -135,7 +143,7 @@ steps:
       - name: log_domain_count
         type: console
         with:
-          message: "Young-domain alert check — {{ steps.query_alert_domains.output.values | size }} domain row(s) from {{ consts.alerts_index }} over the last {{ consts.lookback }}."
+          message: "Young-domain alert check — {{ steps.query_alert_domains.output.values | size }} domain row(s) from {{ steps.set_alerts_index.output.alerts_index }} over the last {{ consts.lookback }}."
 
       - name: per_domain
         type: foreach
@@ -173,8 +181,8 @@ steps:
             type: data.set
             with:
               allowed: |-
-                {%- assign sent = steps.set_domain_context.output.whois_domain | default: '' | downcase | strip -%}
-                {%- assign observed = steps.set_domain_context.output.observed_domain | default: '' | downcase | strip -%}
+                {%- assign sent = steps.set_domain_context.output.whois_domain | default: '' | downcase | strip | replace: '。', '.' | replace: '．', '.' | replace: '｡', '.' -%}
+                {%- assign observed = steps.set_domain_context.output.observed_domain | default: '' | downcase | strip | replace: '。', '.' | replace: '．', '.' | replace: '｡', '.' -%}
                 {%- assign sent_last = sent | slice: -1, 1 -%}
                 {%- if sent_last == '.' -%}
                 {%- assign sent_len = sent.size | minus: 1 -%}
