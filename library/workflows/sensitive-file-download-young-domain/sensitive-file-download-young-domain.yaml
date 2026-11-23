@@ -9,9 +9,10 @@ template-metadata:
     file event collection in logs-endpoint.events.file-*. Keep downloads seen
     on a single host whose origin domain is not a known vendor, look up WHOIS,
     and open a medium-severity Security case when the domain was registered
-    within the configured maximum age (default 90 days). Names ending in
-    .local or .internal, and direct IP origins, are not sent to WHOIS. One
-    open or in-progress case per agent, domain, and file extension.
+    within the configured maximum age (default 90 days). The origin host is
+    taken without userinfo or a port. Names ending in .local or .internal,
+    and direct IP origins, are not sent to WHOIS. One open or in-progress
+    case per agent, domain, and file extension.
   solutions: [security]
   categories: [detection, hunting, case-management]
   install:
@@ -30,12 +31,14 @@ description: >
   Requires Elastic Defend file events (logs-endpoint.events.file-*). Query
   those events from the last hour for browser downloads of sensitive file
   types, check WHOIS registration age of the origin domain, and open a
-  medium-severity Security case when that age is within the threshold. Names
-  ending in .local or .internal, and direct IP origins, are not sent to WHOIS.
-  Runs every hour and can be started manually. Each run pages through the
-  hour in batches of consts.max_rows_per_run. An open or in-progress case for
-  the same agent, domain, and file extension is left as-is. Closing that case
-  allows a later run to open a new one if the download shows up again.
+  medium-severity Security case when that age is within the threshold. The
+  origin host is taken without userinfo or a port. Names ending in .local or
+  .internal, and direct IP origins, are not sent to WHOIS. Runs every hour
+  and can be started manually. Each run pages the hour in batches of
+  consts.max_rows_per_run, and every page uses the same window ending at the
+  run start. An open or in-progress case for the same agent, domain, and file
+  extension is left as-is. Closing that case allows a later run to open a new
+  one if the download shows up again.
 enabled: true
 tags:
   - security
@@ -72,6 +75,8 @@ consts:
   flag_recent_whois_update: false
   # Last two labels are the registrable domain, except these multi-part
   # suffixes, which take the last three. Dots are escaped for ES|QL RLIKE.
+  # RLIKE already matches the whole string. A trailing $ would be a literal
+  # dollar sign, so these suffixes must not end with one.
   # This is not the public suffix list; extend the value in consts when a
   # suffix is missing.
   multi_part_suffixes: "co\\.uk|org\\.uk|ac\\.uk|gov\\.uk|net\\.uk|co\\.jp|ne\\.jp|or\\.jp|ac\\.jp|go\\.jp|com\\.au|net\\.au|org\\.au|edu\\.au|co\\.nz|org\\.nz|net\\.nz|com\\.br|com\\.mx|com\\.ar|com\\.tr|com\\.sg|com\\.hk|com\\.tw|com\\.cn|co\\.in|net\\.in|org\\.in|co\\.za|org\\.za|com\\.co|com\\.pe|co\\.kr|or\\.kr|com\\.my|com\\.ph|co\\.id|com\\.vn|co\\.il|org\\.il|com\\.eg|com\\.sa|com\\.pk|com\\.ng"
@@ -84,6 +89,13 @@ steps:
     with:
       max_domain_age_days: "{% assign max_age = consts.max_domain_age_days | plus: 0 %}{% if max_age > 0 %}{{ max_age }}{% else %}90{% endif %}"
 
+  # Every page uses this instant. NOW() inside the loop would move after each
+  # WHOIS batch and drop downloads that were in scope when the run started.
+  - name: set_query_window
+    type: data.set
+    with:
+      window_end: "{{ execution.startedAt | date: '%Y-%m-%dT%H:%M:%S.%LZ' }}"
+
   - name: log_run_start
     type: console
     with:
@@ -91,6 +103,7 @@ steps:
         Sensitive file download from young domain — run start
         execution.id={{ execution.id }}
         lookback={{ consts.lookback }}
+        window_end={{ steps.set_query_window.output.window_end }}
         max_domain_age_days={{ steps.set_age_threshold.output.max_domain_age_days }}
         max_rows_per_run={{ consts.max_rows_per_run }}
 
@@ -101,6 +114,7 @@ steps:
       young_domains: 0
       cases_opened: 0
       keep_paging: "yes"
+      paging_incomplete: "no"
       cursor_domain: ""
       cursor_extension: ""
 
@@ -116,22 +130,26 @@ steps:
       # Columns consumed as foreach.item[N]:
       #   [0] domain  [1] host.id  [2] file.extension
       #   [3] file.name  [4] agent.id  [5] user
-      # The authority drops a trailing :port. The registrable domain is the
-      # last two labels, or the last three when consts.multi_part_suffixes
-      # matches. .local, .internal, and direct IP origins are removed here.
-      # Edit the vendor RLIKE to extend the exclusion list.
+      # Userinfo is skipped and a trailing :port is dropped, so the captured
+      # host is what WHOIS sees. A trailing root dot is removed before
+      # grouping. The registrable domain is the last two labels, or the last
+      # three when consts.multi_part_suffixes matches. RLIKE matches the whole
+      # string; do not add a trailing $. .local, .internal, and direct IP
+      # origins are removed here. Edit the vendor RLIKE to extend the list.
       - name: query_file_downloads
         type: elasticsearch.esql.query
         with:
           query: |
             FROM {{ consts.file_events_index }}
-            | WHERE @timestamp > NOW() - {{ consts.lookback }}
-              AND process.name IN ("chrome.exe", "msedge.exe", "firefox.exe")
-              AND file.extension IN ("msi", "js", "vbs", "vbe", "jse", "lnk", "url", "iso", "zip", "rar", "exe", "ps1")
-              AND file.origin_url IS NOT NULL
-            | GROK file.origin_url """^https?:\/\/(?<domain>(?:\[[^\]]+\]|[^\/\?:#]+))"""
+            | WHERE @timestamp > TO_DATETIME("{{ steps.set_query_window.output.window_end }}") - {{ consts.lookback }}
+                AND @timestamp <= TO_DATETIME("{{ steps.set_query_window.output.window_end }}")
+                AND process.name IN ("chrome.exe", "msedge.exe", "firefox.exe")
+                AND file.extension IN ("msi", "js", "vbs", "vbe", "jse", "lnk", "url", "iso", "zip", "rar", "exe", "ps1")
+                AND file.origin_url IS NOT NULL
+            | GROK file.origin_url """^https?:\/\/(?:[^\/?#@]+@)?(?<domain>(?:\[[^\]]+\]|[^\/\?:#@]+))"""
             | WHERE domain IS NOT NULL
             | EVAL domain = TO_LOWER(domain)
+            | EVAL domain = REPLACE(domain, """\.+$""", "")
             | WHERE NOT ENDS_WITH(domain, ".local")
                 AND NOT ENDS_WITH(domain, ".local.")
                 AND NOT ENDS_WITH(domain, ".internal")
@@ -139,7 +157,7 @@ steps:
                 AND NOT STARTS_WITH(domain, "[")
                 AND NOT domain RLIKE """[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}"""
             | EVAL label_count = MV_COUNT(SPLIT(domain, "."))
-            | EVAL multipart = CASE(domain RLIKE """(.*\.)?({{ consts.multi_part_suffixes }})$""", 1, 0)
+            | EVAL multipart = CASE(domain RLIKE """(.*\.)?({{ consts.multi_part_suffixes }})""", 1, 0)
             | EVAL registrable = CASE(
                 multipart == 1 AND label_count >= 4, REPLACE(domain, """^.*\.([^.]+)\.([^.]+)\.([^.]+)$""", "$1.$2.$3"),
                 multipart == 1, domain,
@@ -147,7 +165,10 @@ steps:
                 domain
               )
             | EVAL domain = COALESCE(registrable, domain)
-            | WHERE NOT domain RLIKE """(.*\.)?(elastic\.co|amazonaws\.com|mysql\.com|windows\.net|microsoft\.com|google\.com|logrhythm\.com|veeam\.com|whatsapp\.com|sharepoint\.com|githubusercontent\.com|ubuntu\.com)$"""
+            | WHERE domain IS NOT NULL
+                AND LOCATE("\"", domain) == 0
+                AND LOCATE("\\", domain) == 0
+                AND NOT domain RLIKE """(.*\.)?(elastic\.co|amazonaws\.com|mysql\.com|windows\.net|microsoft\.com|google\.com|logrhythm\.com|veeam\.com|whatsapp\.com|sharepoint\.com|githubusercontent\.com|ubuntu\.com)"""
             | STATS
                 hosts_count = COUNT_DISTINCT(host.id),
                 hosts = VALUES(host.id),
@@ -217,6 +238,10 @@ steps:
                     {%- elsif sent_internal == '.internal' -%}no
                     {%- elsif obs_local == '.local' -%}no
                     {%- elsif obs_internal == '.internal' -%}no
+                    {%- elsif sent contains '@' -%}no
+                    {%- elsif sent contains ':' -%}no
+                    {%- elsif observed contains '@' -%}no
+                    {%- elsif observed contains ':' -%}no
                     {%- else -%}yes
                     {%- endif -%}
 
@@ -510,7 +535,7 @@ steps:
                         Skipped WHOIS for agent.id={{ steps.set_download_context.output.agent_id }}
                         domain={{ steps.set_download_context.output.domain }}
                         file={{ steps.set_download_context.output.file_name }}
-                        — name ends with .local or .internal.
+                        — name is .local, .internal, or not a bare hostname.
 
               - name: remember_cursor
                 type: data.set
@@ -546,6 +571,15 @@ steps:
                 {%- elsif n >= cap -%}yes
                 {%- else -%}no
                 {%- endif -%}
+              paging_incomplete: |-
+                {%- assign n = steps.query_file_downloads.output.values | size | plus: 0 -%}
+                {%- assign cap = consts.max_rows_per_run | plus: 0 -%}
+                {%- if variables.cursor_safe == 'no' -%}
+                {%- if n >= cap -%}yes
+                {%- else -%}{{ variables.paging_incomplete | default: 'no' }}
+                {%- endif -%}
+                {%- else -%}{{ variables.paging_incomplete | default: 'no' }}
+                {%- endif -%}
         else:
           - name: stop_paging
             type: data.set
@@ -568,4 +602,4 @@ steps:
         downloads_checked={{ variables.downloads_checked }}
         young_domains={{ variables.young_domains }}
         cases_opened={{ variables.cases_opened }}
-        {% if variables.keep_paging == 'yes' %}paging stopped at the 25-page cap; later rows in this hour were not checked{% else %}window fully paged{% endif %}
+        {% if variables.keep_paging == 'yes' %}paging stopped at the 25-page cap; later rows in this hour were not checked{% elsif variables.paging_incomplete == 'yes' %}paging stopped early because a row could not be used as the cursor; later rows in this hour were not checked{% else %}window fully paged{% endif %}
