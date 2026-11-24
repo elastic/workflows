@@ -1,0 +1,597 @@
+template-metadata:
+  slug: stop-aws-ec2-instance
+  version: "1.0.0"
+  availability: ">=9.7.0"
+  name: "Stop AWS EC2 Instance"
+  description: >-
+    Stop a running AWS EC2 instance after verifying the connector account,
+    preserving its state, and receiving explicit analyst approval. Classifies
+    the follow-up state as stopped, stopping, unexpected, or unknown.
+    Alert-driven CloudTrail runs require request-parameter retention mode All
+    or Flattened. The AWS connector requires sts:GetCallerIdentity,
+    ec2:DescribeInstances, and ec2:StopInstances.
+  solutions: [security]
+  categories: [response]
+  install:
+    form:
+      - name: aws-connector
+        label: "AWS connector"
+        description: >-
+          AWS connector with sts:GetCallerIdentity and permission to describe
+          and stop EC2 instances in the Regions this workflow may target.
+        inputType: connector
+        connectorType: .aws
+        required: true
+      - name: expected-account-id
+        label: "Expected AWS account ID"
+        description: >-
+          Twelve-digit AWS account ID that must match the selected connector
+          before any EC2 instance is described or stopped.
+        inputType: text
+        required: true
+
+consts:
+  expected_account_id: "__install__.expected-account-id"
+
+name: Stop AWS EC2 Instance
+description: |
+  Resolve one EC2 instance and Region from one alert or manual input, verify
+  the connector account and instance owner, require a running pre-state and
+  explicit analyst approval, repeat account, identity, and state checks
+  immediately before the change, request a graceful non-hibernating stop, and
+  classify the follow-up state. Configure alert rules for per-alert workflow
+  execution; batches containing more than one alert fail closed. CloudTrail
+  alerts require request-parameter retention mode All or Flattened.
+
+triggers:
+  - type: alert
+  - type: manual
+    inputs:
+      - name: instance_id
+        type: string
+        description: EC2 instance to stop.
+        required: true
+        default: ""
+      - name: region
+        type: string
+        description: AWS Region containing the EC2 instance.
+        required: true
+        default: ""
+
+steps:
+  # CloudTrail fields require request-parameter retention mode All or Flattened.
+  - name: resolve_target
+    type: data.set
+    with:
+      instance_id: >-
+        {%- assign target_ids = "" | split: "" -%}
+        {%- if event.alerts and event.alerts.size > 0 -%}
+          {%- assign normalized_id = event.alerts[0].cloud.instance.id | strip -%}
+          {%- if normalized_id != blank -%}{%- assign target_ids = target_ids | push: normalized_id -%}{%- endif -%}
+          {%- assign direct_id = event.alerts[0].aws.cloudtrail.flattened.request_parameters.instanceId | strip -%}
+          {%- if direct_id != blank -%}{%- assign target_ids = target_ids | push: direct_id -%}{%- endif -%}
+          {%- for item in event.alerts[0].aws.cloudtrail.flattened.request_parameters.instancesSet.items -%}
+            {%- assign item_id = item.instanceId | strip -%}
+            {%- if item_id != blank -%}{%- assign target_ids = target_ids | push: item_id -%}{%- endif -%}
+          {%- endfor -%}
+        {%- else -%}
+          {%- assign manual_id = inputs.instance_id | strip -%}
+          {%- if manual_id != blank -%}{%- assign target_ids = target_ids | push: manual_id -%}{%- endif -%}
+        {%- endif -%}
+        {%- assign target_ids = target_ids | compact | uniq -%}
+        {%- if target_ids.size == 1 -%}{{- target_ids | first -}}{%- endif -%}
+      target_count: >-
+        {%- assign target_ids = "" | split: "" -%}
+        {%- if event.alerts and event.alerts.size > 0 -%}
+          {%- assign normalized_id = event.alerts[0].cloud.instance.id | strip -%}
+          {%- if normalized_id != blank -%}{%- assign target_ids = target_ids | push: normalized_id -%}{%- endif -%}
+          {%- assign direct_id = event.alerts[0].aws.cloudtrail.flattened.request_parameters.instanceId | strip -%}
+          {%- if direct_id != blank -%}{%- assign target_ids = target_ids | push: direct_id -%}{%- endif -%}
+          {%- for item in event.alerts[0].aws.cloudtrail.flattened.request_parameters.instancesSet.items -%}
+            {%- assign item_id = item.instanceId | strip -%}
+            {%- if item_id != blank -%}{%- assign target_ids = target_ids | push: item_id -%}{%- endif -%}
+          {%- endfor -%}
+        {%- else -%}
+          {%- assign manual_id = inputs.instance_id | strip -%}
+          {%- if manual_id != blank -%}{%- assign target_ids = target_ids | push: manual_id -%}{%- endif -%}
+        {%- endif -%}
+        {{- target_ids | compact | uniq | size -}}
+      region: "{{ event.alerts[0].cloud.region | default: inputs.region }}"
+      account_id: >-
+        {% if event.alerts and event.alerts.size > 0 %}{% if event.alerts[0].aws.cloudtrail != blank %}{{ event.alerts[0].aws.cloudtrail.recipient_account_id }}{% else %}{{ event.alerts[0].cloud.account.id }}{% endif %}{% else %}{{ consts.expected_account_id }}{% endif %}
+      alert_id: "{{ event.alerts[0].kibana.alert.uuid | default: event.alerts[0]._id | default: '(manual)' }}"
+      alert_count: "{{ event.alerts | size }}"
+
+  - name: validate_context
+    type: data.set
+    with:
+      single_alert: >-
+        {% assign count = event.alerts | size %}{% if count <= 1 %}true{% else %}false{% endif %}
+      target_valid: >-
+        {% assign instance = variables.instance_id | strip %}{% assign instance_size = instance | size %}{% assign prefix = instance | slice: 0, 2 %}{% assign suffix = instance | remove_first: 'i-' %}{% assign suffix_remainder = suffix | remove: '0' | remove: '1' | remove: '2' | remove: '3' | remove: '4' | remove: '5' | remove: '6' | remove: '7' | remove: '8' | remove: '9' | remove: 'a' | remove: 'b' | remove: 'c' | remove: 'd' | remove: 'e' | remove: 'f' %}{% assign region = variables.region | strip %}{% assign resource_account = variables.account_id | strip %}{% assign account = consts.expected_account_id | strip %}{% assign account_remainder = account | remove: '0' | remove: '1' | remove: '2' | remove: '3' | remove: '4' | remove: '5' | remove: '6' | remove: '7' | remove: '8' | remove: '9' %}{% if variables.target_count == '1' and prefix == 'i-' and suffix_remainder == blank and account.size == 12 and account_remainder == blank and resource_account != blank and resource_account == consts.expected_account_id and region contains '-' %}{% if instance_size == 10 or instance_size == 19 %}{% unless region contains '/' or region contains ' ' %}true{% else %}false{% endunless %}{% else %}false{% endif %}{% else %}false{% endif %}
+
+  # Alert rules must invoke this workflow once per alert; batches fail closed.
+  - name: continue_for_single_alert
+    type: if
+    condition: "${{ steps.validate_context.output.single_alert == 'true' }}"
+    steps:
+      - name: continue_for_valid_target
+        type: if
+        condition: "${{ steps.validate_context.output.target_valid == 'true' }}"
+        steps:
+          # DescribeInstances needs Resource "*"; constrain it by ec2:Region and scope StopInstances to instance ARNs or tags.
+          - name: get_caller_identity
+            type: aws.request
+            connector-id: __install__.aws-connector
+            with:
+              service: sts
+              region: "{{ variables.region }}"
+              query:
+                Action: GetCallerIdentity
+                Version: "2011-06-15"
+
+          - name: verify_connector_account
+            type: data.set
+            with:
+              verified: "{% if steps.get_caller_identity.output.data.GetCallerIdentityResponse.GetCallerIdentityResult.Account == consts.expected_account_id %}true{% else %}false{% endif %}"
+
+          - name: continue_for_verified_account
+            type: if
+            condition: "${{ steps.verify_connector_account.output.verified == 'true' }}"
+            steps:
+              # DescribeInstances must succeed before approval.
+              - name: describe_instance_before
+                type: aws.request
+                connector-id: __install__.aws-connector
+                with:
+                  service: ec2
+                  region: "{{ variables.region }}"
+                  query:
+                    Action: DescribeInstances
+                    Version: "2016-11-15"
+                    InstanceId.1: "{{ variables.instance_id }}"
+
+              - name: classify_pre_change
+                type: data.set
+                with:
+                  identity_verified: >-
+                    {% assign instance_marker = '<instanceId>' | append: variables.instance_id | append: '</instanceId>' %}{% assign owner_marker = '<ownerId>' | append: consts.expected_account_id | append: '</ownerId>' %}{% if steps.describe_instance_before.output.data contains instance_marker and steps.describe_instance_before.output.data contains owner_marker %}true{% else %}false{% endif %}
+                  state: >-
+                    {% assign state_block =
+                    steps.describe_instance_before.output.data | split:
+                    '<instanceState>' | last | split: '</instanceState>' | first
+                    %}{% if state_block contains '<code>16</code>' and
+                    state_block contains '<name>running</name>' %}running{%
+                    elsif state_block contains '<code>64</code>' and state_block
+                    contains '<name>stopping</name>' %}stopping{% elsif
+                    state_block contains '<code>80</code>' and state_block
+                    contains '<name>stopped</name>' %}stopped{% else
+                    %}unexpected{% endif %}
+
+              - name: continue_for_verified_running_instance
+                type: if
+                condition: "${{ steps.classify_pre_change.output.identity_verified == 'true' and steps.classify_pre_change.output.state == 'running' }}"
+                steps:
+                  - name: request_approval
+                    type: waitForInput
+                    timeout: 1h
+                    with:
+                      message: |-
+                        Approve stopping EC2 instance {{ variables.instance_id }}?
+
+                        Account: {{ consts.expected_account_id }}
+                        Region: {{ variables.region }}
+                        Verified current state: running
+
+                        WARNING: Stopping this instance interrupts its services
+                        and can affect dependent systems. Unsaved volatile memory
+                        and instance-store data can be lost. Auto Scaling or other
+                        orchestration may replace or restart the instance. The
+                        request uses Force=false and Hibernate=false.
+
+                        Fresh account, owner, instance-ID, and running-state
+                        checks run after approval. A stopping state is
+                        transitional; only a stopped follow-up state confirms
+                        completion.
+                      schema:
+                        type: object
+                        properties:
+                          approved:
+                            type: boolean
+                            title: Stop this EC2 instance
+                            default: false
+                          notes:
+                            type: string
+                            title: Analyst notes
+                        required:
+                          - approved
+
+                  - name: apply_when_approved
+                    type: if
+                    condition: "${{ steps.request_approval.output.response.approved == true }}"
+                    steps:
+                      - name: get_caller_identity_fresh
+                        type: aws.request
+                        connector-id: __install__.aws-connector
+                        with:
+                          service: sts
+                          region: "{{ variables.region }}"
+                          query:
+                            Action: GetCallerIdentity
+                            Version: "2011-06-15"
+
+                      - name: verify_fresh_connector_account
+                        type: data.set
+                        with:
+                          verified: "{% if steps.get_caller_identity_fresh.output.data.GetCallerIdentityResponse.GetCallerIdentityResult.Account == consts.expected_account_id %}true{% else %}false{% endif %}"
+
+                      - name: continue_for_fresh_account
+                        type: if
+                        condition: "${{ steps.verify_fresh_connector_account.output.verified == 'true' }}"
+                        steps:
+                          - name: describe_instance_fresh
+                            type: aws.request
+                            connector-id: __install__.aws-connector
+                            with:
+                              service: ec2
+                              region: "{{ variables.region }}"
+                              query:
+                                Action: DescribeInstances
+                                Version: "2016-11-15"
+                                InstanceId.1: "{{ variables.instance_id }}"
+
+                          - name: classify_fresh_pre_change
+                            type: data.set
+                            with:
+                              identity_verified: >-
+                                {% assign instance_marker = '<instanceId>' | append: variables.instance_id | append: '</instanceId>' %}{% assign owner_marker = '<ownerId>' | append: consts.expected_account_id | append: '</ownerId>' %}{% if steps.describe_instance_fresh.output.data contains instance_marker and steps.describe_instance_fresh.output.data contains owner_marker %}true{% else %}false{% endif %}
+                              state: >-
+                                {% assign state_block =
+                                steps.describe_instance_fresh.output.data |
+                                split: '<instanceState>' | last | split:
+                                '</instanceState>' | first %}{% if state_block
+                                contains '<code>16</code>' and state_block
+                                contains '<name>running</name>' %}running{%
+                                elsif state_block contains '<code>64</code>' and
+                                state_block contains '<name>stopping</name>'
+                                %}stopping{% elsif state_block contains
+                                '<code>80</code>' and state_block contains
+                                '<name>stopped</name>' %}stopped{% else
+                                %}unexpected{% endif %}
+
+                          - name: continue_for_fresh_running_instance
+                            type: if
+                            condition: "${{ steps.classify_fresh_pre_change.output.identity_verified == 'true' and steps.classify_fresh_pre_change.output.state == 'running' }}"
+                            steps:
+                              - name: stop_instance
+                                type: aws.request
+                                connector-id: __install__.aws-connector
+                                on-failure:
+                                  continue: true
+                                with:
+                                  service: ec2
+                                  region: "{{ variables.region }}"
+                                  query:
+                                    Action: StopInstances
+                                    Version: "2016-11-15"
+                                    InstanceId.1: "{{ variables.instance_id }}"
+                                    Force: "false"
+                                    Hibernate: "false"
+
+                              - name: verify_after_successful_stop
+                                type: if
+                                condition: "${{ steps.stop_instance.error == nil }}"
+                                steps:
+                                  - name: initialize_post_stop_verification
+                                    type: data.set
+                                    with:
+                                      post_stop_verification_state: pending
+                                      stop_request_id: "{{ steps.stop_instance.output.data | split: '<requestId>' | last | split: '</requestId>' | first | strip }}"
+                                      post_stop_verification_request_id: ""
+                                      post_stop_verification_error: ""
+
+                                  # Poll only DescribeInstances. StopInstances is never retried.
+                                  - name: poll_post_stop_until_stopped
+                                    type: while
+                                    condition: "${{ variables.post_stop_verification_state == 'pending' }}"
+                                    max-iterations:
+                                      limit: 12
+                                      on-limit: continue
+                                    steps:
+                                      - name: post_stop_verification_backoff
+                                        type: wait
+                                        with:
+                                          duration: 10s
+
+                                      - name: describe_instance_post_stop
+                                        type: aws.request
+                                        connector-id: __install__.aws-connector
+                                        on-failure:
+                                          continue: true
+                                        with:
+                                          service: ec2
+                                          region: "{{ variables.region }}"
+                                          query:
+                                            Action: DescribeInstances
+                                            Version: "2016-11-15"
+                                            InstanceId.1: "{{ variables.instance_id }}"
+
+                                      - name: classify_post_stop_verification
+                                        type: data.set
+                                        with:
+                                          post_stop_verification_state: >-
+                                            {% assign response = steps.describe_instance_post_stop.output.data | default: "" %}{% assign instance_marker = '<instanceId>' | append: variables.instance_id | append: '</instanceId>' %}{% assign owner_marker = '<ownerId>' | append: consts.expected_account_id | append: '</ownerId>' %}{% assign state_block = response | split: '<instanceState>' | last | split: '</instanceState>' | first %}{% if steps.describe_instance_post_stop.error != blank %}pending{% elsif response contains instance_marker and response contains owner_marker %}{% if state_block contains '<code>80</code>' and state_block contains '<name>stopped</name>' %}stopped{% elsif state_block contains '<code>64</code>' and state_block contains '<name>stopping</name>' %}pending{% else %}unexpected{% endif %}{% else %}identity_mismatch{% endif %}
+                                          post_stop_verification_request_id: "{{ steps.describe_instance_post_stop.output.data | default: '' | split: '<requestId>' | last | split: '</requestId>' | first | strip }}"
+                                          post_stop_verification_error: "{{ steps.describe_instance_post_stop.error | default: '' | json }}"
+
+                                  - name: report_post_stop_verification
+                                    type: if
+                                    condition: "${{ variables.post_stop_verification_state == 'stopped' }}"
+                                    steps:
+                                      - name: log_stopped_audit_result
+                                        type: console
+                                        with:
+                                          message: |-
+                                            Outcome: stopped; StopInstances completed without a connector error and bounded DescribeInstances polling verified the exact state as stopped.
+                                            Account: {{ consts.expected_account_id }}.
+                                            Instance ID: {{ variables.instance_id }}.
+                                            Region: {{ variables.region }}.
+                                            Alert: {{ variables.alert_id }}.
+                                            Stop request ID: {{ variables.stop_request_id | default: '(not reported)' }}.
+                                            Verification request ID: {{ variables.post_stop_verification_request_id | default: '(not reported)' }}.
+                                            Responder: {{ steps.request_approval.output.respondedBy }}.
+                                            Notes: {{ steps.request_approval.output.response.notes | default: '(none)' }}.
+                                            Recovery guidance: a separately authorized StartInstances request can restore compute availability, but it cannot recover volatile memory, instance-store data, or transient runtime or network state. Check Auto Scaling and other orchestration first.
+                                    else:
+                                      - name: log_post_stop_verification_failed
+                                        type: console
+                                        with:
+                                          message: |-
+                                            Outcome: verification_failed; StopInstances was not retried, and bounded DescribeInstances polling did not verify the exact state as stopped.
+                                            Verification state: {{ variables.post_stop_verification_state }}.
+                                            Account: {{ consts.expected_account_id }}.
+                                            Instance ID: {{ variables.instance_id }}.
+                                            Region: {{ variables.region }}.
+                                            Alert: {{ variables.alert_id }}.
+                                            Stop request ID: {{ variables.stop_request_id | default: '(not reported)' }}.
+                                            Verification request ID: {{ variables.post_stop_verification_request_id | default: '(not reported)' }}.
+                                            Last verification error: {{ variables.post_stop_verification_error | default: '(none)' }}.
+                                            Responder: {{ steps.request_approval.output.respondedBy }}.
+                                            Notes: {{ steps.request_approval.output.response.notes | default: '(none)' }}.
+                                      - name: fail_post_stop_verification
+                                        type: workflow.fail
+                                        with:
+                                          message: "StopInstances completed, but stopped state was not verified for {{ variables.instance_id }}."
+                                          reason: instance_not_verified_stopped
+                                else:
+                                  - name: log_stop_attempt_failed
+                                    type: console
+                                    with:
+                                      message: |-
+                                        Outcome: mutation_failed; StopInstances reported an error, so AWS acceptance is not established and the mutation was not retried.
+                                        Account: {{ consts.expected_account_id }}.
+                                        Instance ID: {{ variables.instance_id }}.
+                                        Region: {{ variables.region }}.
+                                        Alert: {{ variables.alert_id }}.
+                                        Responder: {{ steps.request_approval.output.respondedBy }}.
+                                        Notes: {{ steps.request_approval.output.response.notes | default: '(none)' }}.
+                                        Error: {{ steps.stop_instance.error | json }}.
+                                  - name: fail_stop_attempt
+                                    type: workflow.fail
+                                    with:
+                                      message: "StopInstances failed for {{ variables.instance_id }}."
+                                      reason: stop_instances_failed
+                            else:
+                              - name: log_stale_instance_context
+                                type: console
+                                with:
+                                  message: |-
+                                    Outcome: no_change; the fresh pre-mutation read did not verify the same account, instance ID, and running state, so StopInstances was skipped.
+                                    Account: {{ consts.expected_account_id }}.
+                                    Instance ID: {{ variables.instance_id }}.
+                                    Region: {{ variables.region }}.
+                                    Alert: {{ variables.alert_id }}.
+                                    Fresh identity verified: {{ steps.classify_fresh_pre_change.output.identity_verified }}.
+                                    Fresh state: {{ steps.classify_fresh_pre_change.output.state }}.
+                                    Responder: {{ steps.request_approval.output.respondedBy }}.
+                                    Notes: {{ steps.request_approval.output.response.notes | default: '(none)' }}.
+                              - name: fail_stale_instance_context
+                                type: workflow.fail
+                                with:
+                                  message: "The approved EC2 state was stale; StopInstances was not called."
+                                  reason: stale_approved_instance_state
+                        else:
+                          - name: log_fresh_account_mismatch
+                            type: console
+                            with:
+                              message: |-
+                                Outcome: no_change; the fresh connector identity did not match expected account {{ consts.expected_account_id }}, so no EC2 request or mutation followed.
+                                Instance ID: {{ variables.instance_id }}.
+                                Region: {{ variables.region }}.
+                                Alert: {{ variables.alert_id }}.
+                                Responder: {{ steps.request_approval.output.respondedBy }}.
+                                Notes: {{ steps.request_approval.output.response.notes | default: '(none)' }}.
+                          - name: fail_fresh_account_mismatch
+                            type: workflow.fail
+                            with:
+                              message: "The post-approval AWS connector account did not match."
+                              reason: fresh_connector_account_mismatch
+                    else:
+                      - name: log_rejected_audit_result
+                        type: console
+                        with:
+                          message: |-
+                            Outcome: no_change; no StopInstances request was made because stopping was rejected.
+                            Account: {{ consts.expected_account_id }}.
+                            Instance ID: {{ variables.instance_id }}.
+                            Region: {{ variables.region }}.
+                            Responder: {{ steps.request_approval.output.respondedBy }}.
+                            Notes: {{ steps.request_approval.output.response.notes | default: '(none)' }}.
+                            Rollback: none is needed because no mutation was attempted.
+                else:
+                  - name: classify_non_running_pre_state
+                    type: if
+                    condition: "${{ steps.classify_pre_change.output.identity_verified != 'true' }}"
+                    steps:
+                      - name: log_unverified_instance_identity
+                        type: console
+                        with:
+                          message: |-
+                            Outcome: no_change; DescribeInstances did not verify both expected account {{ consts.expected_account_id }} and instance {{ variables.instance_id }}, so approval was skipped.
+                            Region: {{ variables.region }}.
+                      - name: fail_unverified_instance_identity
+                        type: workflow.fail
+                        with:
+                          message: "DescribeInstances did not verify the requested instance and owner."
+                          reason: instance_identity_not_verified
+                    else:
+                      - name: classify_known_non_running_pre_state
+                        type: if
+                        condition: "${{ steps.classify_pre_change.output.state == 'stopped' }}"
+                        steps:
+                          - name: log_already_stopped
+                            type: console
+                            with:
+                              message: |-
+                                Outcome: no_change_success; the instance is already stopped, so approval and StopInstances were skipped.
+                                Account: {{ consts.expected_account_id }}.
+                                Instance ID: {{ variables.instance_id }}.
+                                Region: {{ variables.region }}.
+                                Alert: {{ variables.alert_id }}.
+                        else:
+                          - name: classify_stopping_pre_state
+                            type: if
+                            condition: "${{ steps.classify_pre_change.output.state == 'stopping' }}"
+                            steps:
+                              - name: initialize_initial_stopping_verification
+                                type: data.set
+                                with:
+                                  initial_stopping_verification_state: pending
+                                  initial_stopping_verification_request_id: ""
+                                  initial_stopping_verification_error: ""
+
+                              # The stop is already in progress. Poll reads only;
+                              # this path never issues StopInstances.
+                              - name: poll_initial_stopping_until_stopped
+                                type: while
+                                condition: "${{ variables.initial_stopping_verification_state == 'pending' }}"
+                                max-iterations:
+                                  limit: 12
+                                  on-limit: continue
+                                steps:
+                                  - name: initial_stopping_verification_backoff
+                                    type: wait
+                                    with:
+                                      duration: 10s
+
+                                  - name: describe_initially_stopping_instance
+                                    type: aws.request
+                                    connector-id: __install__.aws-connector
+                                    on-failure:
+                                      continue: true
+                                    with:
+                                      service: ec2
+                                      region: "{{ variables.region }}"
+                                      query:
+                                        Action: DescribeInstances
+                                        Version: "2016-11-15"
+                                        InstanceId.1: "{{ variables.instance_id }}"
+
+                                  - name: classify_initial_stopping_verification
+                                    type: data.set
+                                    with:
+                                      initial_stopping_verification_state: >-
+                                        {% assign response = steps.describe_initially_stopping_instance.output.data | default: "" %}{% assign instance_marker = '<instanceId>' | append: variables.instance_id | append: '</instanceId>' %}{% assign owner_marker = '<ownerId>' | append: consts.expected_account_id | append: '</ownerId>' %}{% assign state_block = response | split: '<instanceState>' | last | split: '</instanceState>' | first %}{% if steps.describe_initially_stopping_instance.error != blank %}pending{% elsif response contains instance_marker and response contains owner_marker %}{% if state_block contains '<code>80</code>' and state_block contains '<name>stopped</name>' %}stopped{% elsif state_block contains '<code>64</code>' and state_block contains '<name>stopping</name>' %}pending{% else %}unexpected{% endif %}{% else %}identity_mismatch{% endif %}
+                                      initial_stopping_verification_request_id: "{{ steps.describe_initially_stopping_instance.output.data | default: '' | split: '<requestId>' | last | split: '</requestId>' | first | strip }}"
+                                      initial_stopping_verification_error: "{{ steps.describe_initially_stopping_instance.error | default: '' | json }}"
+
+                              - name: report_initial_stopping_verification
+                                type: if
+                                condition: "${{ variables.initial_stopping_verification_state == 'stopped' }}"
+                                steps:
+                                  - name: log_initial_stopping_reached_stopped
+                                    type: console
+                                    with:
+                                      message: |-
+                                        Outcome: no_change_success; the instance was already stopping, so StopInstances was skipped, and bounded DescribeInstances polling verified that it reached stopped.
+                                        Account: {{ consts.expected_account_id }}.
+                                        Instance ID: {{ variables.instance_id }}.
+                                        Region: {{ variables.region }}.
+                                        Alert: {{ variables.alert_id }}.
+                                        Verification request ID: {{ variables.initial_stopping_verification_request_id | default: '(not reported)' }}.
+                                else:
+                                  - name: log_initial_stopping_verification_failed
+                                    type: console
+                                    with:
+                                      message: |-
+                                        Outcome: verification_failed; the instance was already stopping, StopInstances was skipped, and bounded DescribeInstances polling did not verify stopped.
+                                        Verification state: {{ variables.initial_stopping_verification_state }}.
+                                        Account: {{ consts.expected_account_id }}.
+                                        Instance ID: {{ variables.instance_id }}.
+                                        Region: {{ variables.region }}.
+                                        Alert: {{ variables.alert_id }}.
+                                        Verification request ID: {{ variables.initial_stopping_verification_request_id | default: '(not reported)' }}.
+                                        Last verification error: {{ variables.initial_stopping_verification_error | default: '(none)' }}.
+                                  - name: fail_initial_stopping_verification
+                                    type: workflow.fail
+                                    with:
+                                      message: "The initially stopping EC2 instance did not verify as stopped."
+                                      reason: initial_stopping_not_verified_stopped
+                            else:
+                              - name: log_unexpected_pre_state
+                                type: console
+                                with:
+                                  message: |-
+                                    Outcome: no_change; the exact pre-change state was not running, stopping, or stopped, so approval and StopInstances were skipped.
+                                    Account: {{ consts.expected_account_id }}.
+                                    Instance ID: {{ variables.instance_id }}.
+                                    Region: {{ variables.region }}.
+                                    Classified state: {{ steps.classify_pre_change.output.state }}.
+                              - name: fail_unexpected_pre_state
+                                type: workflow.fail
+                                with:
+                                  message: "The EC2 instance pre-change state was unexpected."
+                                  reason: unexpected_instance_pre_state
+            else:
+              - name: log_account_mismatch
+                type: console
+                with:
+                  message: |-
+                    Outcome: no_change; the connector identity did not match expected account {{ consts.expected_account_id }}, so no EC2 instance was described or stopped.
+                    Instance ID: {{ variables.instance_id }}.
+                    Region: {{ variables.region }}.
+              - name: fail_account_mismatch
+                type: workflow.fail
+                with:
+                  message: "The AWS connector account did not match the expected account."
+                  reason: connector_account_mismatch
+        else:
+          - name: log_invalid_target
+            type: console
+            with:
+              message: |-
+                Outcome: no_change; EC2 instance stopping was skipped because the instance ID, Region, or expected account ID failed validation.
+                Instance ID: {{ variables.instance_id | default: '(missing)' }}.
+                Distinct target count: {{ variables.target_count }}.
+                Region: {{ variables.region | default: '(missing)' }}.
+                Resource account: {{ variables.account_id | default: '(missing)' }}.
+                Expected account: {{ consts.expected_account_id | default: '(missing)' }}.
+          - name: fail_invalid_target
+            type: workflow.fail
+            with:
+              message: >-
+                EC2 stopping requires exactly one valid instance ID, a valid
+                Region, and a resource account matching the expected account.
+              reason: invalid_or_ambiguous_ec2_target
+    else:
+      - name: log_alert_batch_rejected
+        type: console
+        with:
+          message: |-
+            Outcome: no_change; this workflow requires per-alert execution and rejected a batch containing {{ variables.alert_count }} alerts.
+            Configure the alert rule to invoke the workflow once for each alert.
+      - name: fail_alert_batch
+        type: workflow.fail
+        with:
+          message: "EC2 stopping rejected a multi-alert batch."
+          reason: multi_alert_batch_rejected
