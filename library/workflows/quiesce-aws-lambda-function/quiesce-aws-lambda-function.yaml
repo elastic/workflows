@@ -44,7 +44,10 @@ description: |
   immediately after approval, and mutates only if the approved state is still
   current. It never calls GetFunctionConfiguration, whose response can contain
   Environment.Variables. Restore the prior integer to roll back, or delete the
-  concurrency configuration when it was previously unconfigured.
+  concurrency configuration when it was previously unconfigured. Approval is
+  bound to the function occupying the canonical ARN; the safe Lambda APIs used
+  here expose no lifecycle marker that can distinguish delete-and-recreate at
+  the same ARN without also recording sensitive function configuration.
 
 consts:
   expected_account_id: "__install__.expected-account-id"
@@ -69,6 +72,7 @@ steps:
     type: data.set
     with:
       alert_count: "{% if event.alerts %}{{ event.alerts.size }}{% else %}0{% endif %}"
+      has_alert_batch: "{% if event.alerts and event.alerts.size > 1 %}true{% else %}false{% endif %}"
       has_alert: "{% if event.alerts[0] != nil %}true{% else %}false{% endif %}"
       is_cloudtrail: >-
         {%- assign alert = event.alerts[0] -%}
@@ -91,7 +95,7 @@ steps:
 
   - name: reject_alert_batch
     type: if
-    condition: "${{ steps.collect_context.output.alert_count > 1 }}"
+    condition: "${{ steps.collect_context.output.has_alert_batch == 'true' }}"
     steps:
       - name: log_alert_batch_rejected
         type: console
@@ -100,6 +104,7 @@ steps:
             Outcome: no_change; received
             {{ steps.collect_context.output.alert_count }} alerts, but this
             destructive workflow accepts at most one alert per execution.
+            Alert: {{ steps.collect_context.output.alert_id }}.
       - name: fail_alert_batch_rejected
         type: workflow.fail
         with:
@@ -108,125 +113,220 @@ steps:
             the rule action to run per alert.
           reason: alert_batch_rejected
 
-  # Each record is state|bare-name|embedded-account|embedded-region. Qualifiers
-  # are validated structurally and intentionally removed because reserved
-  # concurrency is configured only at the unqualified function level.
-  - name: normalize_cloudtrail_target
+  # Validate before extracting structured fields. Qualifiers are intentionally
+  # removed because reserved concurrency applies to the unqualified function.
+  - name: validate_cloudtrail_target
     type: data.set
     with:
-      record: >-
+      state: >-
         {%- assign raw = steps.collect_context.output.cloudtrail_name -%}
         {%- assign parts = raw | split: ':' -%}
-        {%- assign name = '' -%}
-        {%- assign account = '' -%}
-        {%- assign region = '' -%}
-        {%- assign qualifier = '' -%}
+        {%- assign last_character = raw | slice: -1, 1 -%}
         {%- assign valid = false -%}
         {%- if raw == blank -%}
         {%- elsif parts.size == 1 -%}
           {%- assign name = parts[0] -%}
           {%- if name != blank and name.size <= 64 -%}{%- assign valid = true -%}{%- endif -%}
         {%- elsif parts.size == 2 -%}
-          {%- assign name = parts[0] -%}{%- assign qualifier = parts[1] -%}
+          {%- assign name = parts[0] -%}
+          {%- assign qualifier = parts[1] -%}
           {%- if name != blank and name.size <= 64 and qualifier != blank and qualifier.size <= 128 -%}{%- assign valid = true -%}{%- endif -%}
         {%- elsif parts.size == 3 or parts.size == 4 -%}
-          {%- assign account = parts[0] -%}{%- assign name = parts[2] -%}{%- assign qualifier = parts[3] | default: 'unqualified' -%}
-          {%- if account.size == 12 and parts[1] == 'function' and name != blank and name.size <= 64 and qualifier != blank and qualifier.size <= 128 -%}{%- assign valid = true -%}{%- endif -%}
+          {%- assign account = parts[0] -%}
+          {%- assign account_nondigits = account | remove: '0' | remove: '1' | remove: '2' | remove: '3' | remove: '4' | remove: '5' | remove: '6' | remove: '7' | remove: '8' | remove: '9' -%}
+          {%- assign name = parts[2] -%}
+          {%- if account.size == 12 and account_nondigits == blank and parts[1] == 'function' and name != blank and name.size <= 64 -%}
+            {%- if parts.size == 3 or parts[3] != blank and parts[3].size <= 128 -%}{%- assign valid = true -%}{%- endif -%}
+          {%- endif -%}
         {%- elsif parts.size == 7 or parts.size == 8 -%}
-          {%- assign account = parts[4] -%}{%- assign region = parts[3] | downcase -%}{%- assign name = parts[6] -%}{%- assign qualifier = parts[7] | default: 'unqualified' -%}
-          {%- if parts[0] == 'arn' and parts[2] == 'lambda' and parts[5] == 'function' and account.size == 12 and region != blank and name != blank and name.size <= 64 and qualifier != blank and qualifier.size <= 128 -%}
-            {%- if parts[1] == 'aws' or parts[1] == 'aws-us-gov' -%}{%- assign valid = true -%}{%- endif -%}
+          {%- assign partition = parts[1] -%}
+          {%- assign region = parts[3] | downcase -%}
+          {%- assign region_parts = region | split: '-' -%}
+          {%- assign account = parts[4] -%}
+          {%- assign account_nondigits = account | remove: '0' | remove: '1' | remove: '2' | remove: '3' | remove: '4' | remove: '5' | remove: '6' | remove: '7' | remove: '8' | remove: '9' -%}
+          {%- assign name = parts[6] -%}
+          {%- assign region_valid = false -%}
+          {%- assign region_prefix_valid = false -%}
+          {%- assign region_number_valid = false -%}
+          {%- if region_parts[0] == 'af' or region_parts[0] == 'ap' or region_parts[0] == 'ca' or region_parts[0] == 'eu' or region_parts[0] == 'il' or region_parts[0] == 'me' or region_parts[0] == 'mx' or region_parts[0] == 'sa' or region_parts[0] == 'us' -%}{%- assign region_prefix_valid = true -%}{%- endif -%}
+          {%- if region_parts[2] == '1' or region_parts[2] == '2' or region_parts[2] == '3' -%}{%- assign region_number_valid = true -%}{%- endif -%}
+          {%- if partition == 'aws-us-gov' -%}
+            {%- if region == 'us-gov-east-1' or region == 'us-gov-west-1' -%}{%- assign region_valid = true -%}{%- endif -%}
+          {%- elsif partition == 'aws' -%}
+            {%- if region_parts.size == 3 and region_prefix_valid and region_parts[1] != blank and region_number_valid -%}{%- assign region_valid = true -%}{%- endif -%}
+          {%- endif -%}
+          {%- if parts[0] == 'arn' and parts[2] == 'lambda' and parts[5] == 'function' and account.size == 12 and account_nondigits == blank and region_valid and name != blank and name.size <= 64 -%}
+            {%- if parts.size == 7 or parts[7] != blank and parts[7].size <= 128 -%}{%- assign valid = true -%}{%- endif -%}
           {%- endif -%}
         {%- endif -%}
+        {%- if last_character == ':' or raw contains '|' -%}{%- assign valid = false -%}{%- endif -%}
         {%- if name contains '|' or name contains '/' or name contains '?' or name contains '#' or name contains '%' or name contains ' ' -%}{%- assign valid = false -%}{%- endif -%}
-        {%- if raw == blank -%}absent|||{%- elsif valid -%}valid|{{ name }}|{{ account }}|{{ region }}{%- else -%}invalid|||{%- endif -%}
+        {%- if raw == blank -%}absent{%- elsif valid -%}valid{%- else -%}invalid{%- endif -%}
+
+  - name: normalize_cloudtrail_target
+    type: data.set
+    if: "${{ steps.validate_cloudtrail_target.output.state == 'valid' }}"
+    with:
+      name: >-
+        {%- assign parts = steps.collect_context.output.cloudtrail_name | split: ':' -%}
+        {%- if parts.size <= 2 -%}{{ parts[0] }}{%- elsif parts.size <= 4 -%}{{ parts[2] }}{%- else -%}{{ parts[6] }}{%- endif -%}
+      account: >-
+        {%- assign parts = steps.collect_context.output.cloudtrail_name | split: ':' -%}
+        {%- if parts.size == 3 or parts.size == 4 -%}{{ parts[0] }}{%- elsif parts.size == 7 or parts.size == 8 -%}{{ parts[4] }}{%- endif -%}
+      region: >-
+        {%- assign parts = steps.collect_context.output.cloudtrail_name | split: ':' -%}
+        {%- if parts.size == 7 or parts.size == 8 -%}{{ parts[3] | downcase }}{%- endif -%}
+      partition: >-
+        {%- assign parts = steps.collect_context.output.cloudtrail_name | split: ':' -%}
+        {%- if parts.size == 7 or parts.size == 8 -%}{{ parts[1] }}{%- endif -%}
+
+  - name: validate_ecs_target
+    type: data.set
+    with:
+      state: >-
+        {%- assign raw = steps.collect_context.output.normalized_name -%}
+        {%- assign parts = raw | split: ':' -%}
+        {%- assign last_character = raw | slice: -1, 1 -%}
+        {%- assign valid = false -%}
+        {%- if raw == blank -%}
+        {%- elsif parts.size == 1 -%}
+          {%- assign name = parts[0] -%}
+          {%- if name != blank and name.size <= 64 -%}{%- assign valid = true -%}{%- endif -%}
+        {%- elsif parts.size == 2 -%}
+          {%- assign name = parts[0] -%}
+          {%- assign qualifier = parts[1] -%}
+          {%- if name != blank and name.size <= 64 and qualifier != blank and qualifier.size <= 128 -%}{%- assign valid = true -%}{%- endif -%}
+        {%- elsif parts.size == 3 or parts.size == 4 -%}
+          {%- assign account = parts[0] -%}
+          {%- assign account_nondigits = account | remove: '0' | remove: '1' | remove: '2' | remove: '3' | remove: '4' | remove: '5' | remove: '6' | remove: '7' | remove: '8' | remove: '9' -%}
+          {%- assign name = parts[2] -%}
+          {%- if account.size == 12 and account_nondigits == blank and parts[1] == 'function' and name != blank and name.size <= 64 -%}
+            {%- if parts.size == 3 or parts[3] != blank and parts[3].size <= 128 -%}{%- assign valid = true -%}{%- endif -%}
+          {%- endif -%}
+        {%- elsif parts.size == 7 or parts.size == 8 -%}
+          {%- assign partition = parts[1] -%}
+          {%- assign region = parts[3] | downcase -%}
+          {%- assign region_parts = region | split: '-' -%}
+          {%- assign account = parts[4] -%}
+          {%- assign account_nondigits = account | remove: '0' | remove: '1' | remove: '2' | remove: '3' | remove: '4' | remove: '5' | remove: '6' | remove: '7' | remove: '8' | remove: '9' -%}
+          {%- assign name = parts[6] -%}
+          {%- assign region_valid = false -%}
+          {%- assign region_prefix_valid = false -%}
+          {%- assign region_number_valid = false -%}
+          {%- if region_parts[0] == 'af' or region_parts[0] == 'ap' or region_parts[0] == 'ca' or region_parts[0] == 'eu' or region_parts[0] == 'il' or region_parts[0] == 'me' or region_parts[0] == 'mx' or region_parts[0] == 'sa' or region_parts[0] == 'us' -%}{%- assign region_prefix_valid = true -%}{%- endif -%}
+          {%- if region_parts[2] == '1' or region_parts[2] == '2' or region_parts[2] == '3' -%}{%- assign region_number_valid = true -%}{%- endif -%}
+          {%- if partition == 'aws-us-gov' -%}
+            {%- if region == 'us-gov-east-1' or region == 'us-gov-west-1' -%}{%- assign region_valid = true -%}{%- endif -%}
+          {%- elsif partition == 'aws' -%}
+            {%- if region_parts.size == 3 and region_prefix_valid and region_parts[1] != blank and region_number_valid -%}{%- assign region_valid = true -%}{%- endif -%}
+          {%- endif -%}
+          {%- if parts[0] == 'arn' and parts[2] == 'lambda' and parts[5] == 'function' and account.size == 12 and account_nondigits == blank and region_valid and name != blank and name.size <= 64 -%}
+            {%- if parts.size == 7 or parts[7] != blank and parts[7].size <= 128 -%}{%- assign valid = true -%}{%- endif -%}
+          {%- endif -%}
+        {%- endif -%}
+        {%- if last_character == ':' or raw contains '|' -%}{%- assign valid = false -%}{%- endif -%}
+        {%- if name contains '|' or name contains '/' or name contains '?' or name contains '#' or name contains '%' or name contains ' ' -%}{%- assign valid = false -%}{%- endif -%}
+        {%- if raw == blank -%}absent{%- elsif valid -%}valid{%- else -%}invalid{%- endif -%}
 
   - name: normalize_ecs_target
     type: data.set
+    if: "${{ steps.validate_ecs_target.output.state == 'valid' }}"
     with:
-      record: >-
-        {%- assign raw = steps.collect_context.output.normalized_name -%}
+      name: >-
+        {%- assign parts = steps.collect_context.output.normalized_name | split: ':' -%}
+        {%- if parts.size <= 2 -%}{{ parts[0] }}{%- elsif parts.size <= 4 -%}{{ parts[2] }}{%- else -%}{{ parts[6] }}{%- endif -%}
+      account: >-
+        {%- assign parts = steps.collect_context.output.normalized_name | split: ':' -%}
+        {%- if parts.size == 3 or parts.size == 4 -%}{{ parts[0] }}{%- elsif parts.size == 7 or parts.size == 8 -%}{{ parts[4] }}{%- endif -%}
+      region: >-
+        {%- assign parts = steps.collect_context.output.normalized_name | split: ':' -%}
+        {%- if parts.size == 7 or parts.size == 8 -%}{{ parts[3] | downcase }}{%- endif -%}
+      partition: >-
+        {%- assign parts = steps.collect_context.output.normalized_name | split: ':' -%}
+        {%- if parts.size == 7 or parts.size == 8 -%}{{ parts[1] }}{%- endif -%}
+
+  - name: validate_manual_target
+    type: data.set
+    with:
+      state: >-
+        {%- assign raw = steps.collect_context.output.manual_name -%}
         {%- assign parts = raw | split: ':' -%}
-        {%- assign name = '' -%}
-        {%- assign account = '' -%}
-        {%- assign region = '' -%}
-        {%- assign qualifier = '' -%}
+        {%- assign last_character = raw | slice: -1, 1 -%}
         {%- assign valid = false -%}
         {%- if raw == blank -%}
         {%- elsif parts.size == 1 -%}
           {%- assign name = parts[0] -%}
           {%- if name != blank and name.size <= 64 -%}{%- assign valid = true -%}{%- endif -%}
         {%- elsif parts.size == 2 -%}
-          {%- assign name = parts[0] -%}{%- assign qualifier = parts[1] -%}
+          {%- assign name = parts[0] -%}
+          {%- assign qualifier = parts[1] -%}
           {%- if name != blank and name.size <= 64 and qualifier != blank and qualifier.size <= 128 -%}{%- assign valid = true -%}{%- endif -%}
         {%- elsif parts.size == 3 or parts.size == 4 -%}
-          {%- assign account = parts[0] -%}{%- assign name = parts[2] -%}{%- assign qualifier = parts[3] | default: 'unqualified' -%}
-          {%- if account.size == 12 and parts[1] == 'function' and name != blank and name.size <= 64 and qualifier != blank and qualifier.size <= 128 -%}{%- assign valid = true -%}{%- endif -%}
+          {%- assign account = parts[0] -%}
+          {%- assign account_nondigits = account | remove: '0' | remove: '1' | remove: '2' | remove: '3' | remove: '4' | remove: '5' | remove: '6' | remove: '7' | remove: '8' | remove: '9' -%}
+          {%- assign name = parts[2] -%}
+          {%- if account.size == 12 and account_nondigits == blank and parts[1] == 'function' and name != blank and name.size <= 64 -%}
+            {%- if parts.size == 3 or parts[3] != blank and parts[3].size <= 128 -%}{%- assign valid = true -%}{%- endif -%}
+          {%- endif -%}
         {%- elsif parts.size == 7 or parts.size == 8 -%}
-          {%- assign account = parts[4] -%}{%- assign region = parts[3] | downcase -%}{%- assign name = parts[6] -%}{%- assign qualifier = parts[7] | default: 'unqualified' -%}
-          {%- if parts[0] == 'arn' and parts[2] == 'lambda' and parts[5] == 'function' and account.size == 12 and region != blank and name != blank and name.size <= 64 and qualifier != blank and qualifier.size <= 128 -%}
-            {%- if parts[1] == 'aws' or parts[1] == 'aws-us-gov' -%}{%- assign valid = true -%}{%- endif -%}
+          {%- assign partition = parts[1] -%}
+          {%- assign region = parts[3] | downcase -%}
+          {%- assign region_parts = region | split: '-' -%}
+          {%- assign account = parts[4] -%}
+          {%- assign account_nondigits = account | remove: '0' | remove: '1' | remove: '2' | remove: '3' | remove: '4' | remove: '5' | remove: '6' | remove: '7' | remove: '8' | remove: '9' -%}
+          {%- assign name = parts[6] -%}
+          {%- assign region_valid = false -%}
+          {%- assign region_prefix_valid = false -%}
+          {%- assign region_number_valid = false -%}
+          {%- if region_parts[0] == 'af' or region_parts[0] == 'ap' or region_parts[0] == 'ca' or region_parts[0] == 'eu' or region_parts[0] == 'il' or region_parts[0] == 'me' or region_parts[0] == 'mx' or region_parts[0] == 'sa' or region_parts[0] == 'us' -%}{%- assign region_prefix_valid = true -%}{%- endif -%}
+          {%- if region_parts[2] == '1' or region_parts[2] == '2' or region_parts[2] == '3' -%}{%- assign region_number_valid = true -%}{%- endif -%}
+          {%- if partition == 'aws-us-gov' -%}
+            {%- if region == 'us-gov-east-1' or region == 'us-gov-west-1' -%}{%- assign region_valid = true -%}{%- endif -%}
+          {%- elsif partition == 'aws' -%}
+            {%- if region_parts.size == 3 and region_prefix_valid and region_parts[1] != blank and region_number_valid -%}{%- assign region_valid = true -%}{%- endif -%}
+          {%- endif -%}
+          {%- if parts[0] == 'arn' and parts[2] == 'lambda' and parts[5] == 'function' and account.size == 12 and account_nondigits == blank and region_valid and name != blank and name.size <= 64 -%}
+            {%- if parts.size == 7 or parts[7] != blank and parts[7].size <= 128 -%}{%- assign valid = true -%}{%- endif -%}
           {%- endif -%}
         {%- endif -%}
+        {%- if last_character == ':' or raw contains '|' -%}{%- assign valid = false -%}{%- endif -%}
         {%- if name contains '|' or name contains '/' or name contains '?' or name contains '#' or name contains '%' or name contains ' ' -%}{%- assign valid = false -%}{%- endif -%}
-        {%- if raw == blank -%}absent|||{%- elsif valid -%}valid|{{ name }}|{{ account }}|{{ region }}{%- else -%}invalid|||{%- endif -%}
+        {%- if raw == blank -%}absent{%- elsif valid -%}valid{%- else -%}invalid{%- endif -%}
 
   - name: normalize_manual_target
     type: data.set
+    if: "${{ steps.validate_manual_target.output.state == 'valid' }}"
     with:
-      record: >-
-        {%- assign raw = steps.collect_context.output.manual_name -%}
-        {%- assign parts = raw | split: ':' -%}
-        {%- assign name = '' -%}
-        {%- assign account = '' -%}
-        {%- assign region = '' -%}
-        {%- assign qualifier = '' -%}
-        {%- assign valid = false -%}
-        {%- if raw == blank -%}
-        {%- elsif parts.size == 1 -%}
-          {%- assign name = parts[0] -%}
-          {%- if name != blank and name.size <= 64 -%}{%- assign valid = true -%}{%- endif -%}
-        {%- elsif parts.size == 2 -%}
-          {%- assign name = parts[0] -%}{%- assign qualifier = parts[1] -%}
-          {%- if name != blank and name.size <= 64 and qualifier != blank and qualifier.size <= 128 -%}{%- assign valid = true -%}{%- endif -%}
-        {%- elsif parts.size == 3 or parts.size == 4 -%}
-          {%- assign account = parts[0] -%}{%- assign name = parts[2] -%}{%- assign qualifier = parts[3] | default: 'unqualified' -%}
-          {%- if account.size == 12 and parts[1] == 'function' and name != blank and name.size <= 64 and qualifier != blank and qualifier.size <= 128 -%}{%- assign valid = true -%}{%- endif -%}
-        {%- elsif parts.size == 7 or parts.size == 8 -%}
-          {%- assign account = parts[4] -%}{%- assign region = parts[3] | downcase -%}{%- assign name = parts[6] -%}{%- assign qualifier = parts[7] | default: 'unqualified' -%}
-          {%- if parts[0] == 'arn' and parts[2] == 'lambda' and parts[5] == 'function' and account.size == 12 and region != blank and name != blank and name.size <= 64 and qualifier != blank and qualifier.size <= 128 -%}
-            {%- if parts[1] == 'aws' or parts[1] == 'aws-us-gov' -%}{%- assign valid = true -%}{%- endif -%}
-          {%- endif -%}
-        {%- endif -%}
-        {%- if name contains '|' or name contains '/' or name contains '?' or name contains '#' or name contains '%' or name contains ' ' -%}{%- assign valid = false -%}{%- endif -%}
-        {%- if raw == blank -%}absent|||{%- elsif valid -%}valid|{{ name }}|{{ account }}|{{ region }}{%- else -%}invalid|||{%- endif -%}
+      name: >-
+        {%- assign parts = steps.collect_context.output.manual_name | split: ':' -%}
+        {%- if parts.size <= 2 -%}{{ parts[0] }}{%- elsif parts.size <= 4 -%}{{ parts[2] }}{%- else -%}{{ parts[6] }}{%- endif -%}
+      account: >-
+        {%- assign parts = steps.collect_context.output.manual_name | split: ':' -%}
+        {%- if parts.size == 3 or parts.size == 4 -%}{{ parts[0] }}{%- elsif parts.size == 7 or parts.size == 8 -%}{{ parts[4] }}{%- endif -%}
+      region: >-
+        {%- assign parts = steps.collect_context.output.manual_name | split: ':' -%}
+        {%- if parts.size == 7 or parts.size == 8 -%}{{ parts[3] | downcase }}{%- endif -%}
+      partition: >-
+        {%- assign parts = steps.collect_context.output.manual_name | split: ':' -%}
+        {%- if parts.size == 7 or parts.size == 8 -%}{{ parts[1] }}{%- endif -%}
 
   - name: resolve_target
     type: data.set
     with:
       parse_state: >-
-        {%- assign ct = steps.normalize_cloudtrail_target.output.record | split: '|' -%}
-        {%- assign ecs = steps.normalize_ecs_target.output.record | split: '|' -%}
-        {%- assign manual = steps.normalize_manual_target.output.record | split: '|' -%}
-        {%- if ct[0] == 'invalid' or ecs[0] == 'invalid' or manual[0] == 'invalid' -%}invalid{%- else -%}valid{%- endif -%}
+        {%- if steps.validate_cloudtrail_target.output.state == 'invalid' or steps.validate_ecs_target.output.state == 'invalid' or steps.validate_manual_target.output.state == 'invalid' -%}invalid{%- else -%}valid{%- endif -%}
       function_name: >-
         {%- assign names = '' | split: '' -%}
-        {%- assign ct = steps.normalize_cloudtrail_target.output.record | split: '|' -%}
-        {%- assign ecs = steps.normalize_ecs_target.output.record | split: '|' -%}
-        {%- assign manual = steps.normalize_manual_target.output.record | split: '|' -%}
-        {%- if ct[0] == 'valid' -%}{%- assign names = names | push: ct[1] -%}{%- endif -%}
-        {%- if ecs[0] == 'valid' -%}{%- assign names = names | push: ecs[1] -%}{%- endif -%}
-        {%- if manual[0] == 'valid' -%}{%- assign names = names | push: manual[1] -%}{%- endif -%}
+        {%- if steps.validate_cloudtrail_target.output.state == 'valid' -%}{%- assign names = names | push: steps.normalize_cloudtrail_target.output.name -%}{%- endif -%}
+        {%- if steps.validate_ecs_target.output.state == 'valid' -%}{%- assign names = names | push: steps.normalize_ecs_target.output.name -%}{%- endif -%}
+        {%- if steps.validate_manual_target.output.state == 'valid' -%}{%- assign names = names | push: steps.normalize_manual_target.output.name -%}{%- endif -%}
         {%- assign names = names | compact | uniq -%}{{ names | first | default: '' }}
-      function_name_count: >-
+      function_name_ambiguous: >-
         {%- assign names = '' | split: '' -%}
-        {%- assign ct = steps.normalize_cloudtrail_target.output.record | split: '|' -%}
-        {%- assign ecs = steps.normalize_ecs_target.output.record | split: '|' -%}
-        {%- assign manual = steps.normalize_manual_target.output.record | split: '|' -%}
-        {%- if ct[0] == 'valid' -%}{%- assign names = names | push: ct[1] -%}{%- endif -%}
-        {%- if ecs[0] == 'valid' -%}{%- assign names = names | push: ecs[1] -%}{%- endif -%}
-        {%- if manual[0] == 'valid' -%}{%- assign names = names | push: manual[1] -%}{%- endif -%}
-        {{- names | compact | uniq | size -}}
+        {%- if steps.validate_cloudtrail_target.output.state == 'valid' -%}{%- assign names = names | push: steps.normalize_cloudtrail_target.output.name -%}{%- endif -%}
+        {%- if steps.validate_ecs_target.output.state == 'valid' -%}{%- assign names = names | push: steps.normalize_ecs_target.output.name -%}{%- endif -%}
+        {%- if steps.validate_manual_target.output.state == 'valid' -%}{%- assign names = names | push: steps.normalize_manual_target.output.name -%}{%- endif -%}
+        {%- assign names = names | compact | uniq -%}{%- if names.size > 1 -%}true{%- else -%}false{%- endif -%}
       target_account_id: >-
         {%- if steps.collect_context.output.has_alert == 'false' -%}{{ steps.collect_context.output.expected_account_id }}
         {%- elsif steps.collect_context.output.is_cloudtrail == 'true' -%}{{ steps.collect_context.output.recipient_account_id }}
@@ -235,66 +335,61 @@ steps:
         {%- if steps.collect_context.output.has_alert == 'false' -%}manual expected account
         {%- elsif steps.collect_context.output.is_cloudtrail == 'true' -%}aws.cloudtrail.recipient_account_id
         {%- else -%}cloud.account.id{%- endif -%}
-      embedded_account_count: >-
+      embedded_account_ambiguous: >-
         {%- assign accounts = '' | split: '' -%}
-        {%- assign ct = steps.normalize_cloudtrail_target.output.record | split: '|' -%}
-        {%- assign ecs = steps.normalize_ecs_target.output.record | split: '|' -%}
-        {%- assign manual = steps.normalize_manual_target.output.record | split: '|' -%}
-        {%- if ct[2] != blank -%}{%- assign accounts = accounts | push: ct[2] -%}{%- endif -%}
-        {%- if ecs[2] != blank -%}{%- assign accounts = accounts | push: ecs[2] -%}{%- endif -%}
-        {%- if manual[2] != blank -%}{%- assign accounts = accounts | push: manual[2] -%}{%- endif -%}
-        {{- accounts | compact | uniq | size -}}
+        {%- if steps.normalize_cloudtrail_target.output.account != blank -%}{%- assign accounts = accounts | push: steps.normalize_cloudtrail_target.output.account -%}{%- endif -%}
+        {%- if steps.normalize_ecs_target.output.account != blank -%}{%- assign accounts = accounts | push: steps.normalize_ecs_target.output.account -%}{%- endif -%}
+        {%- if steps.normalize_manual_target.output.account != blank -%}{%- assign accounts = accounts | push: steps.normalize_manual_target.output.account -%}{%- endif -%}
+        {%- assign accounts = accounts | compact | uniq -%}{%- if accounts.size > 1 -%}true{%- else -%}false{%- endif -%}
       embedded_account_id: >-
         {%- assign accounts = '' | split: '' -%}
-        {%- assign ct = steps.normalize_cloudtrail_target.output.record | split: '|' -%}
-        {%- assign ecs = steps.normalize_ecs_target.output.record | split: '|' -%}
-        {%- assign manual = steps.normalize_manual_target.output.record | split: '|' -%}
-        {%- if ct[2] != blank -%}{%- assign accounts = accounts | push: ct[2] -%}{%- endif -%}
-        {%- if ecs[2] != blank -%}{%- assign accounts = accounts | push: ecs[2] -%}{%- endif -%}
-        {%- if manual[2] != blank -%}{%- assign accounts = accounts | push: manual[2] -%}{%- endif -%}
+        {%- if steps.normalize_cloudtrail_target.output.account != blank -%}{%- assign accounts = accounts | push: steps.normalize_cloudtrail_target.output.account -%}{%- endif -%}
+        {%- if steps.normalize_ecs_target.output.account != blank -%}{%- assign accounts = accounts | push: steps.normalize_ecs_target.output.account -%}{%- endif -%}
+        {%- if steps.normalize_manual_target.output.account != blank -%}{%- assign accounts = accounts | push: steps.normalize_manual_target.output.account -%}{%- endif -%}
         {{- accounts | compact | uniq | first | default: '' -}}
       region: >-
         {%- assign regions = '' | split: '' -%}
         {%- if steps.collect_context.output.observed_region != blank -%}{%- assign regions = regions | push: steps.collect_context.output.observed_region -%}{%- endif -%}
-        {%- assign ct = steps.normalize_cloudtrail_target.output.record | split: '|' -%}
-        {%- assign ecs = steps.normalize_ecs_target.output.record | split: '|' -%}
-        {%- assign manual = steps.normalize_manual_target.output.record | split: '|' -%}
-        {%- if ct[3] != blank -%}{%- assign regions = regions | push: ct[3] -%}{%- endif -%}
-        {%- if ecs[3] != blank -%}{%- assign regions = regions | push: ecs[3] -%}{%- endif -%}
-        {%- if manual[3] != blank -%}{%- assign regions = regions | push: manual[3] -%}{%- endif -%}
+        {%- if steps.normalize_cloudtrail_target.output.region != blank -%}{%- assign regions = regions | push: steps.normalize_cloudtrail_target.output.region -%}{%- endif -%}
+        {%- if steps.normalize_ecs_target.output.region != blank -%}{%- assign regions = regions | push: steps.normalize_ecs_target.output.region -%}{%- endif -%}
+        {%- if steps.normalize_manual_target.output.region != blank -%}{%- assign regions = regions | push: steps.normalize_manual_target.output.region -%}{%- endif -%}
         {{- regions | compact | uniq | first | default: '' -}}
-      region_count: >-
+      region_ambiguous: >-
         {%- assign regions = '' | split: '' -%}
         {%- if steps.collect_context.output.observed_region != blank -%}{%- assign regions = regions | push: steps.collect_context.output.observed_region -%}{%- endif -%}
-        {%- assign ct = steps.normalize_cloudtrail_target.output.record | split: '|' -%}
-        {%- assign ecs = steps.normalize_ecs_target.output.record | split: '|' -%}
-        {%- assign manual = steps.normalize_manual_target.output.record | split: '|' -%}
-        {%- if ct[3] != blank -%}{%- assign regions = regions | push: ct[3] -%}{%- endif -%}
-        {%- if ecs[3] != blank -%}{%- assign regions = regions | push: ecs[3] -%}{%- endif -%}
-        {%- if manual[3] != blank -%}{%- assign regions = regions | push: manual[3] -%}{%- endif -%}
-        {{- regions | compact | uniq | size -}}
+        {%- if steps.normalize_cloudtrail_target.output.region != blank -%}{%- assign regions = regions | push: steps.normalize_cloudtrail_target.output.region -%}{%- endif -%}
+        {%- if steps.normalize_ecs_target.output.region != blank -%}{%- assign regions = regions | push: steps.normalize_ecs_target.output.region -%}{%- endif -%}
+        {%- if steps.normalize_manual_target.output.region != blank -%}{%- assign regions = regions | push: steps.normalize_manual_target.output.region -%}{%- endif -%}
+        {%- assign regions = regions | compact | uniq -%}{%- if regions.size > 1 -%}true{%- else -%}false{%- endif -%}
+      partition: >-
+        {%- assign partitions = '' | split: '' -%}
+        {%- if steps.normalize_cloudtrail_target.output.partition != blank -%}{%- assign partitions = partitions | push: steps.normalize_cloudtrail_target.output.partition -%}{%- endif -%}
+        {%- if steps.normalize_ecs_target.output.partition != blank -%}{%- assign partitions = partitions | push: steps.normalize_ecs_target.output.partition -%}{%- endif -%}
+        {%- if steps.normalize_manual_target.output.partition != blank -%}{%- assign partitions = partitions | push: steps.normalize_manual_target.output.partition -%}{%- endif -%}
+        {%- assign supplied = partitions | compact | uniq | first -%}
+        {%- if supplied != blank -%}{{ supplied }}{%- elsif steps.collect_context.output.observed_region contains 'us-gov-' -%}aws-us-gov{%- else -%}aws{%- endif -%}
+      partition_ambiguous: >-
+        {%- assign partitions = '' | split: '' -%}
+        {%- if steps.normalize_cloudtrail_target.output.partition != blank -%}{%- assign partitions = partitions | push: steps.normalize_cloudtrail_target.output.partition -%}{%- endif -%}
+        {%- if steps.normalize_ecs_target.output.partition != blank -%}{%- assign partitions = partitions | push: steps.normalize_ecs_target.output.partition -%}{%- endif -%}
+        {%- if steps.normalize_manual_target.output.partition != blank -%}{%- assign partitions = partitions | push: steps.normalize_manual_target.output.partition -%}{%- endif -%}
+        {%- assign partitions = partitions | compact | uniq -%}{%- if partitions.size > 1 -%}true{%- else -%}false{%- endif -%}
 
-  - name: reject_invalid_or_ambiguous_target
+  - name: reject_invalid_target
     type: if
-    condition: >-
-      ${{ steps.resolve_target.output.parse_state != 'valid' or
-      steps.resolve_target.output.function_name_count != 1 or
-      steps.resolve_target.output.region_count != 1 or
-      steps.resolve_target.output.embedded_account_count > 1 }}
+    condition: "${{ steps.resolve_target.output.parse_state != 'valid' }}"
     steps:
-      - name: log_invalid_or_ambiguous_target
+      - name: log_invalid_target
         type: console
         with:
           message: >-
-            Outcome: no_change; target identifiers were invalid or resolved to
-            distinct function names, accounts, or Regions.
-      - name: fail_invalid_or_ambiguous_target
+            Outcome: no_change; one or more target identifiers were malformed.
+            Alert: {{ steps.collect_context.output.alert_id }}.
+      - name: fail_invalid_target
         type: workflow.fail
         with:
-          message: >-
-            Provide one unambiguous Lambda target. Identical normalized values
-            are accepted; distinct values are rejected.
-          reason: invalid_or_ambiguous_target
+          message: Provide structurally valid Lambda target identifiers.
+          reason: invalid_target
 
   - name: reject_missing_target
     type: if
@@ -310,11 +405,35 @@ steps:
             Outcome: no_change; function, Region, or resource-side account is
             missing. CloudTrail alerts require
             aws.cloudtrail.recipient_account_id even when faas.name is present.
+            Alert: {{ steps.collect_context.output.alert_id }}.
       - name: fail_missing_target
         type: workflow.fail
         with:
           message: Lambda quiescing requires a function, Region, and resource-side account.
           reason: missing_target
+
+  - name: reject_ambiguous_target
+    type: if
+    condition: >-
+      ${{ steps.resolve_target.output.function_name_ambiguous == 'true' or
+      steps.resolve_target.output.region_ambiguous == 'true' or
+      steps.resolve_target.output.embedded_account_ambiguous == 'true' or
+      steps.resolve_target.output.partition_ambiguous == 'true' }}
+    steps:
+      - name: log_ambiguous_target
+        type: console
+        with:
+          message: >-
+            Outcome: no_change; target evidence resolved to distinct function
+            names, accounts, Regions, or partitions. Alert:
+            {{ steps.collect_context.output.alert_id }}.
+      - name: fail_ambiguous_target
+        type: workflow.fail
+        with:
+          message: >-
+            Provide one unambiguous Lambda target. Identical normalized values
+            are accepted; distinct values are rejected.
+          reason: ambiguous_target
 
   - name: reject_account_mismatch
     type: if
@@ -334,6 +453,7 @@ steps:
             Resource-side target: {{ steps.resolve_target.output.target_account_id | default: '(missing)' }}.
             Source: {{ steps.resolve_target.output.account_source }}.
             ARN/partial-ARN account: {{ steps.resolve_target.output.embedded_account_id | default: '(none)' }}.
+            Alert: {{ steps.collect_context.output.alert_id }}.
       - name: fail_account_mismatch
         type: workflow.fail
         with:
@@ -344,8 +464,39 @@ steps:
     type: data.set
     with:
       function_arn: >-
-        {%- if steps.resolve_target.output.region contains 'us-gov-' -%}arn:aws-us-gov
-        {%- else -%}arn:aws{%- endif -%}:lambda:{{ steps.resolve_target.output.region }}:{{ steps.resolve_target.output.target_account_id }}:function:{{ steps.resolve_target.output.function_name }}
+        arn:{{ steps.resolve_target.output.partition }}:lambda:{{ steps.resolve_target.output.region }}:{{ steps.resolve_target.output.target_account_id }}:function:{{ steps.resolve_target.output.function_name }}
+
+  - name: run_target_regression_assertions
+    type: data.set
+    with:
+      status: >-
+        {%- assign valid = 'arn:aws:lambda:us-east-1:123456789012:function:valid-name' | split: ':' -%}
+        {%- assign malformed = 'arn:aws:s3:us-east-1:123456789012:function:valid-name' | split: ':' -%}
+        {%- assign empty_qualifier = 'arn:aws:lambda:us-east-1:123456789012:function:valid-name:' -%}
+        {%- assign empty_qualifier_last_character = empty_qualifier | slice: -1, 1 -%}
+        {%- assign delimiter_region = 'arn:aws:lambda:us-east-1|truncated:123456789012:function:valid-name' | split: ':' -%}
+        {%- assign partition_conflict = 'arn:aws-us-gov:lambda:us-east-1:123456789012:function:valid-name' | split: ':' -%}
+        {%- assign empty_names = '' | split: '' -%}
+        {%- assign names = empty_names | push: 'one-name' -%}
+        {%- assign conflicting_names = names | push: 'other-name' | uniq -%}
+        {%- assign rendered_count = names.size | append: '' -%}
+        {%- if valid.size == 7 and valid[2] == 'lambda' and malformed[2] != 'lambda' and empty_qualifier_last_character == ':' and delimiter_region[3] contains '|' and partition_conflict[1] == 'aws-us-gov' and partition_conflict[3] == 'us-east-1' and empty_names.size == 0 and names.size == 1 and conflicting_names.size > 1 and rendered_count == '1' and rendered_count != 1 -%}passed{%- else -%}failed{%- endif -%}
+
+  - name: reject_target_regression_failure
+    type: if
+    condition: "${{ steps.run_target_regression_assertions.output.status != 'passed' }}"
+    steps:
+      - name: log_target_regression_failure
+        type: console
+        with:
+          message: >-
+            Outcome: no_change; pre-AWS Liquid target regression assertions
+            failed. Alert: {{ steps.collect_context.output.alert_id }}.
+      - name: fail_target_regression_failure
+        type: workflow.fail
+        with:
+          message: Pre-AWS Liquid target regression assertions failed.
+          reason: target_regression_failure
 
   - name: get_connector_identity
     type: aws.request
@@ -379,6 +530,7 @@ steps:
             Outcome: no_change; connector identity could not be verified.
             Target account: {{ steps.resolve_target.output.target_account_id }}.
             Connector account: {{ steps.capture_connector_identity.output.connector_account_id | default: '(unverified)' }}.
+            Alert: {{ steps.collect_context.output.alert_id }}.
       - name: fail_connector_account_mismatch
         type: workflow.fail
         with:
@@ -416,7 +568,8 @@ steps:
         with:
           message: >-
             Outcome: failed; GetFunctionConcurrency could not establish the
-            canonical target's current reserved concurrency.
+            canonical target's current reserved concurrency. Alert:
+            {{ steps.collect_context.output.alert_id }}.
       - name: fail_pre_read_failure
         type: workflow.fail
         with:
@@ -429,7 +582,8 @@ steps:
     with:
       message: >-
         Outcome: already_safe; reserved concurrency is already exact numeric
-        zero for {{ steps.build_canonical_target.output.function_arn }}.
+        zero for {{ steps.build_canonical_target.output.function_arn }}. Alert:
+        {{ steps.collect_context.output.alert_id }}.
 
   - name: request_approval
     type: waitForInput
@@ -441,6 +595,8 @@ steps:
 
         Function: {{ steps.build_canonical_target.output.function_arn }}
         Current reserved concurrency: {{ steps.classify_pre_read.output.concurrency_token }}
+        Alert: {{ steps.collect_context.output.alert_id }}
+        Approval scope: whichever Lambda function occupies this canonical ARN when the approved mutation runs. GetFunctionConcurrency exposes no non-sensitive lifecycle marker that can distinguish delete-and-recreate at the same ARN.
 
         WARNING: This blocks new invocations but does not stop invocations that are already running. Asynchronous events can be retried and may ultimately be lost or sent to a dead-letter queue or on-failure destination; restoring concurrency does not recover them.
         Rollback: {% if steps.classify_pre_read.output.concurrency_token == 'unconfigured' %}delete the concurrency configuration{% else %}restore reserved concurrency to {{ steps.classify_pre_read.output.concurrency_token }}{% endif %}.
@@ -465,7 +621,9 @@ steps:
     with:
       message: >-
         Outcome: no_change; the analyst did not approve quiescing
-        {{ steps.build_canonical_target.output.function_arn }}.
+        {{ steps.build_canonical_target.output.function_arn }}. Alert:
+        {{ steps.collect_context.output.alert_id }}. Responder:
+        {{ steps.request_approval.output.respondedBy | default: '(unavailable)' }}.
 
   # Revalidate identity and mutable state immediately after approval.
   - name: get_connector_identity_fresh
@@ -520,7 +678,9 @@ steps:
           message: >-
             Outcome: no_change; connector identity or reserved concurrency
             changed or could not be revalidated after approval. No mutation was
-            requested.
+            requested. Approval remains scoped to the canonical ARN occupant.
+            Alert: {{ steps.collect_context.output.alert_id }}. Responder:
+            {{ steps.request_approval.output.respondedBy | default: '(unavailable)' }}.
       - name: fail_stale_approved_state
         type: workflow.fail
         with:
@@ -552,7 +712,9 @@ steps:
         with:
           message: >-
             Outcome: mutation_failed; PutFunctionConcurrency returned an error.
-            Verify current concurrency before attempting rollback.
+            Verify current concurrency before attempting rollback. Alert:
+            {{ steps.collect_context.output.alert_id }}. Responder:
+            {{ steps.request_approval.output.respondedBy | default: '(unavailable)' }}.
       - name: fail_mutation_failure
         type: workflow.fail
         with:
@@ -599,7 +761,9 @@ steps:
         Outcome: verified; reserved concurrency is exact numeric zero.
         Function: {{ steps.build_canonical_target.output.function_arn }}.
         Previous state: {{ steps.classify_pre_read.output.concurrency_token }}.
-        Responder: {{ steps.request_approval.output.respondedBy }}.
+        Approval scope: canonical ARN occupant at mutation time.
+        Alert: {{ steps.collect_context.output.alert_id }}.
+        Responder: {{ steps.request_approval.output.respondedBy | default: '(unavailable)' }}.
         Notes: {{ steps.request_approval.output.response.notes | default: '(none)' }}.
 
   - name: reject_unverified_result
@@ -615,7 +779,9 @@ steps:
           message: >-
             Outcome: verification_failed; PutFunctionConcurrency succeeded, but
             exact numeric zero was not verified after three reads. Verify the
-            current state before rollback.
+            current state before rollback. Alert:
+            {{ steps.collect_context.output.alert_id }}. Responder:
+            {{ steps.request_approval.output.respondedBy | default: '(unavailable)' }}.
       - name: fail_unverified_result
         type: workflow.fail
         with:
