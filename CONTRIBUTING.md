@@ -182,7 +182,7 @@ The catalog generator derives `stepTypes` and `triggerTypes` for each template â
 
 ### Common review findings
 
-Reviewers flag these again and again. Schema validation and `npm run build:catalog` pass on templates that have every one of them, so **go through this list before you open a PR**. Optionally, also install the template from its file and run it: on Kibana 9.6 or later (or Serverless), open the Template library, choose **Import template**, and select the YAML file. The install form and `__install__.*` substitution work as they do for catalog templates.
+Reviewers flag these again and again. Schema validation and `npm run build:catalog` pass on templates that have every one of them, so **go through this list before you open a PR**. Optionally, also install the template from its file and run it in a test deployment with test data and connectors, because the run does the template's real actions: on Kibana 9.6 or later (or Serverless), open the Template library, choose **Import template**, and select the YAML file. The install form and `__install__.*` substitution work as they do for catalog templates.
 
 #### Liquid and rendering
 
