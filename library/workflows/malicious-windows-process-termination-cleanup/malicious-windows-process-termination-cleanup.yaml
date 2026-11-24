@@ -1,0 +1,783 @@
+template-metadata:
+  slug: malicious-windows-process-termination-cleanup
+  version: "1.0.0"
+  availability: ">=9.5.0"
+  name: "Malicious Windows Process Termination and Cleanup"
+  description: >-
+    From a Windows alert with process.executable and process.entity_id,
+    terminate that process and its tree, then delete files it created and
+    registry values it modified. An analyst must approve the run before any
+    process is killed or any file or registry value is deleted. Opens a
+    Security case with the process, agent, and each deleted path. Requires
+    Elastic Defend and the Execute response action.
+  solutions: [security]
+  categories: [response, case-management]
+
+name: Malicious Windows Process Termination and Cleanup
+description: >
+  Requires Elastic Defend on Windows and permission to submit the Execute
+  response action. Run it from a security alert whose process.executable and
+  process.entity_id are set, or fill those inputs manually. An analyst must
+  approve the run before any process is killed or any file or registry value
+  is deleted. The approval step waits up to 4 hours. The workflow kills the
+  process tree with taskkill /F /T when process.pid is known.
+  Otherwise it submits the Defend kill-process action for that entity id,
+  which does not include child processes. It then queries file creation
+  events and registry modification events for the same process.entity_id
+  and agent, and deletes each file path and registry value. Registry keys
+  are never deleted. A modification with no value name is skipped. Drive
+  roots, Windows directories, and short registry keys are skipped. At the
+  end it opens a Security case titled Malicious Process Termination and
+  Cleanup - agent.id - process.entity_id. The case lists the termination
+  result and every file and
+  registry value submitted for deletion. The lookback window and row caps are
+  consts.lookback, consts.max_files, and consts.max_registry.
+enabled: true
+tags:
+  - security
+  - elastic-defend
+  - response
+  - process-termination
+
+triggers:
+  - type: alert
+  - type: manual
+    inputs:
+      - name: agent_id
+        type: string
+        required: false
+        default: ""
+        description: >-
+          Elastic Agent ID of the Windows endpoint. Leave empty to use the
+          alert's agent.id.
+      - name: process_executable
+        type: string
+        required: false
+        default: ""
+        description: >-
+          Full process executable path. Leave empty to use the alert's
+          process.executable. The run stops when this is empty.
+      - name: process_entity_id
+        type: string
+        required: false
+        default: ""
+        description: >-
+          process.entity_id of the process to terminate and clean up. Leave
+          empty to use the alert.
+      - name: process_pid
+        type: string
+        required: false
+        default: ""
+        description: >-
+          Optional process.pid. When it is a real pid, taskkill /F /T ends
+          the process and its children. Leave empty to use the alert, then
+          a process-event lookup.
+
+settings:
+  timeout: 5h
+  concurrency:
+    # One run per endpoint. A second alert for a different agent is not dropped.
+    key: "{{ workflow.id }}:{{ event.alerts[0].agent.id | default: event.alerts[0].elastic.agent.id | default: inputs.agent_id | join: ',' | split: ',' | first | strip }}"
+    strategy: drop
+    max: 1
+
+consts:
+  # Edit these in the workflow body. They bound the cleanup queries.
+  lookback: 7 days
+  max_files: 25
+  max_registry: 25
+  file_index: logs-endpoint.events.file-*
+  registry_index: logs-endpoint.events.registry-*
+  process_index: logs-endpoint.events.process-*
+
+steps:
+  # A typed input overrides the alert. The Run dialog placeholder is empty.
+  - name: set_alert_context
+    type: data.set
+    with:
+      agent_id: |
+        {%- assign typed = inputs.agent_id | default: '' | append: '' | strip -%}
+        {%- if typed == '<your_input>' -%}{%- assign typed = '' -%}{%- endif -%}
+        {%- if typed != '' -%}
+        {{ typed }}
+        {%- else -%}
+        {%- assign alert_agent = event.alerts[0].agent.id | default: '' | join: ',' | strip -%}
+        {%- if alert_agent == '' -%}{%- assign alert_agent = event.alerts[0].elastic.agent.id | default: '' | join: ',' | strip -%}{%- endif -%}
+        {%- if alert_agent contains ',' -%}{%- assign alert_agent = alert_agent | split: ',' | first | strip -%}{%- endif -%}
+        {{ alert_agent }}
+        {%- endif -%}
+      process_executable: |
+        {%- assign typed = inputs.process_executable | default: '' | append: '' | strip -%}
+        {%- if typed == '<your_input>' -%}{%- assign typed = '' -%}{%- endif -%}
+        {%- if typed != '' -%}
+        {{ typed }}
+        {%- else -%}
+        {%- assign alert_exe = event.alerts[0].process.executable | default: '' | join: ',' | strip -%}
+        {%- if alert_exe contains ',' -%}{%- assign alert_exe = alert_exe | split: ',' | first | strip -%}{%- endif -%}
+        {{ alert_exe }}
+        {%- endif -%}
+      process_entity_id: |
+        {%- assign typed = inputs.process_entity_id | default: '' | append: '' | strip -%}
+        {%- if typed == '<your_input>' -%}{%- assign typed = '' -%}{%- endif -%}
+        {%- if typed != '' -%}
+        {{ typed }}
+        {%- else -%}
+        {%- assign alert_entity = event.alerts[0].process.entity_id | default: '' | join: ',' | strip -%}
+        {%- if alert_entity contains ',' -%}{%- assign alert_entity = alert_entity | split: ',' | first | strip -%}{%- endif -%}
+        {{ alert_entity }}
+        {%- endif -%}
+      process_pid: |
+        {%- assign typed = inputs.process_pid | default: '' | append: '' | strip -%}
+        {%- if typed == '<your_input>' -%}{%- assign typed = '' -%}{%- endif -%}
+        {%- if typed != '' -%}
+        {{ typed }}
+        {%- else -%}
+        {%- assign alert_pid = event.alerts[0].process.pid | default: '' | join: ',' | strip -%}
+        {%- if alert_pid contains ',' -%}{%- assign alert_pid = alert_pid | split: ',' | first | strip -%}{%- endif -%}
+        {{ alert_pid }}
+        {%- endif -%}
+      host_os: |
+        {%- assign host_os = event.alerts[0].host.os.type | default: '' | join: ',' | downcase | strip -%}
+        {%- if host_os contains ',' -%}{%- assign host_os = host_os | split: ',' | first | strip -%}{%- endif -%}
+        {{ host_os }}
+
+  - name: normalize_inputs
+    type: data.set
+    with:
+      agent_id: "{{ steps.set_alert_context.output.agent_id | downcase | strip }}"
+      process_executable: "{{ steps.set_alert_context.output.process_executable | strip }}"
+      process_entity_id: "{{ steps.set_alert_context.output.process_entity_id | strip }}"
+      process_pid: |-
+        {%- assign raw = steps.set_alert_context.output.process_pid | append: '' | strip | split: '.' | first -%}
+        {%- assign leftover = raw | remove: '0' | remove: '1' | remove: '2' | remove: '3' | remove: '4' | remove: '5' | remove: '6' | remove: '7' | remove: '8' | remove: '9' -%}
+        {%- assign pid_num = raw | plus: 0 -%}
+        {%- if leftover == '' and pid_num > 4 -%}{{ raw }}{%- endif -%}
+      host_os: "{{ steps.set_alert_context.output.host_os | strip }}"
+
+  - name: decide_cleanup
+    type: data.set
+    with:
+      decision: |
+        {%- assign agent_id = steps.normalize_inputs.output.agent_id -%}
+        {%- assign executable = steps.normalize_inputs.output.process_executable -%}
+        {%- assign entity_id = steps.normalize_inputs.output.process_entity_id -%}
+        {%- assign host_os = steps.normalize_inputs.output.host_os -%}
+        {%- assign exe_size = executable | size -%}
+        {%- assign entity_size = entity_id | size -%}
+        {%- assign entity_leftover = entity_id | remove: 'a' | remove: 'b' | remove: 'c' | remove: 'd' | remove: 'e' | remove: 'f' | remove: 'g' | remove: 'h' | remove: 'i' | remove: 'j' | remove: 'k' | remove: 'l' | remove: 'm' | remove: 'n' | remove: 'o' | remove: 'p' | remove: 'q' | remove: 'r' | remove: 's' | remove: 't' | remove: 'u' | remove: 'v' | remove: 'w' | remove: 'x' | remove: 'y' | remove: 'z' | remove: 'A' | remove: 'B' | remove: 'C' | remove: 'D' | remove: 'E' | remove: 'F' | remove: 'G' | remove: 'H' | remove: 'I' | remove: 'J' | remove: 'K' | remove: 'L' | remove: 'M' | remove: 'N' | remove: 'O' | remove: 'P' | remove: 'Q' | remove: 'R' | remove: 'S' | remove: 'T' | remove: 'U' | remove: 'V' | remove: 'W' | remove: 'X' | remove: 'Y' | remove: 'Z' | remove: '0' | remove: '1' | remove: '2' | remove: '3' | remove: '4' | remove: '5' | remove: '6' | remove: '7' | remove: '8' | remove: '9' | remove: '+' | remove: '/' | remove: '=' | remove: '_' | remove: '-' | remove: ':' -%}
+        {%- assign entity_ok = 'no' -%}
+        {%- if entity_leftover == '' -%}
+        {%- if entity_size >= 8 -%}
+        {%- if entity_size <= 256 -%}{%- assign entity_ok = 'yes' -%}{%- endif -%}
+        {%- endif -%}
+        {%- endif -%}
+        {%- assign agent_size = agent_id | size -%}
+        {%- assign agent_leftover = agent_id | remove: '0' | remove: '1' | remove: '2' | remove: '3' | remove: '4' | remove: '5' | remove: '6' | remove: '7' | remove: '8' | remove: '9' | remove: 'a' | remove: 'b' | remove: 'c' | remove: 'd' | remove: 'e' | remove: 'f' | remove: '-' -%}
+        {%- assign agent_body = agent_id | remove: '-' -%}
+        {%- assign agent_ok = 'no' -%}
+        {%- if agent_leftover == '' -%}
+        {%- if agent_body.size > 0 -%}
+        {%- if agent_size >= 8 -%}
+        {%- if agent_size <= 64 -%}{%- assign agent_ok = 'yes' -%}{%- endif -%}
+        {%- endif -%}
+        {%- endif -%}
+        {%- endif -%}
+        {%- assign os_ok = 'no' -%}
+        {%- if host_os == '' -%}{%- assign os_ok = 'yes' -%}{%- endif -%}
+        {%- if host_os == 'windows' -%}{%- assign os_ok = 'yes' -%}{%- endif -%}
+        {%- assign ready = 'no' -%}
+        {%- assign reason = '' -%}
+        {%- if os_ok == 'no' -%}
+        {%- assign reason = 'This workflow terminates processes and cleans up files and registry entries on Windows only.' -%}
+        {%- else -%}
+        {%- if agent_ok == 'no' -%}
+        {%- assign reason = 'agent_id must be an Elastic Agent ID.' -%}
+        {%- else -%}
+        {%- if exe_size == 0 -%}
+        {%- assign reason = 'process.executable and process.entity_id are required.' -%}
+        {%- else -%}
+        {%- if entity_ok == 'no' -%}
+        {%- assign reason = 'process.executable and process.entity_id are required.' -%}
+        {%- else -%}
+        {%- if exe_size > 1024 -%}
+        {%- assign reason = 'process.executable is too long.' -%}
+        {%- else -%}
+        {%- assign ready = 'yes' -%}
+        {%- endif -%}
+        {%- endif -%}
+        {%- endif -%}
+        {%- endif -%}
+        {%- endif -%}
+        {{- ready -}}|{{- reason -}}
+
+  - name: classify_cleanup
+    type: data.set
+    with:
+      ready: "{{ steps.decide_cleanup.output.decision | split: '|' | first | strip }}"
+      reason: "{% assign parts = steps.decide_cleanup.output.decision | split: '|' %}{{ parts[1] | default: '' | strip }}"
+
+  - name: log_request
+    type: console
+    with:
+      message: "Process cleanup ready={{ steps.classify_cleanup.output.ready }} agent={{ steps.normalize_inputs.output.agent_id }} entity={{ steps.normalize_inputs.output.process_entity_id }} pid={{ steps.normalize_inputs.output.process_pid }}{% if steps.classify_cleanup.output.ready != 'yes' %} rejected={{ steps.classify_cleanup.output.reason }}{% endif %}"
+
+  - name: when_ready
+    type: if
+    condition: 'steps.classify_cleanup.output.ready: "yes"'
+    steps:
+      - name: init_case_notes
+        type: data.set
+        with:
+          deleted_files: []
+          skipped_files: []
+          deleted_registry: []
+          skipped_registry: []
+          kill_note: ""
+
+      # A rejection finishes this step with approved: false. The steps below
+      # run only when that value is true.
+      - name: approve_cleanup
+        type: waitForApproval
+        timeout: 4h
+        with:
+          message: |
+            Approve termination and cleanup for this Windows process?
+            agent.id: {{ steps.normalize_inputs.output.agent_id }}
+            process.entity_id: {{ steps.normalize_inputs.output.process_entity_id }}
+            process.executable: {{ steps.normalize_inputs.output.process_executable }}
+            Approving kills the process tree when a pid is known, otherwise
+            submits the Defend kill-process action, then deletes files that
+            process created and registry values it modified.
+          approveLabel: "Terminate and clean up"
+          rejectLabel: "Do not clean up"
+
+      - name: when_approved
+        type: if
+        condition: 'steps.approve_cleanup.output.response.approved: true'
+        steps:
+          # taskkill /T ends the pid and every child. A missing pid falls back to
+          # the Defend kill-process action, which targets only that entity.
+          - name: when_pid_known
+            type: if
+            condition: 'steps.normalize_inputs.output.process_pid: * and not steps.normalize_inputs.output.process_pid: ""'
+            steps:
+              - name: submit_kill_tree
+                type: kibana.request
+                on-failure:
+                  continue: true
+                with:
+                  method: POST
+                  path: /api/endpoint/action/execute
+                  headers:
+                    kbn-xsrf: "true"
+                  body:
+                    agent_type: endpoint
+                    endpoint_ids:
+                      - "{{ steps.normalize_inputs.output.agent_id }}"
+                    comment: "Workflow Malicious Windows Process Termination and Cleanup — kill process tree for entity {{ steps.normalize_inputs.output.process_entity_id }}."
+                    parameters:
+                      command: "cmd.exe /c \"taskkill.exe /F /T /PID {{ steps.normalize_inputs.output.process_pid }} && echo PROCESS_TREE_TERMINATED\""
+                      timeout: 120
+              - name: log_kill_tree
+                type: console
+                with:
+                  message: "{% if steps.submit_kill_tree.output.data.id %}Kill tree submitted ({{ steps.submit_kill_tree.output.data.id }}) for pid {{ steps.normalize_inputs.output.process_pid }}.{% else %}Kill tree was not submitted. {{ steps.submit_kill_tree.error }}{% endif %}"
+              - name: remember_kill_tree
+                type: data.set
+                with:
+                  kill_note: "{% if steps.submit_kill_tree.output.data.id %}Kill tree submitted ({{ steps.submit_kill_tree.output.data.id }}) for pid {{ steps.normalize_inputs.output.process_pid }}.{% else %}Kill tree was not submitted. {{ steps.submit_kill_tree.error }}{% endif %}"
+            else:
+              - name: lookup_pid
+                type: elasticsearch.esql.query
+                on-failure:
+                  continue: true
+                with:
+                  query: |
+                    FROM {{ consts.process_index }}
+                    | WHERE @timestamp > NOW() - {{ consts.lookback }}
+                      AND process.entity_id == "{{ steps.normalize_inputs.output.process_entity_id }}"
+                      AND agent.id == "{{ steps.normalize_inputs.output.agent_id }}"
+                      AND process.pid IS NOT NULL
+                    | STATS pid = MAX(process.pid)
+                    | KEEP pid
+                    | LIMIT 1
+              - name: set_looked_up_pid
+                type: data.set
+                with:
+                  process_pid: |-
+                    {%- assign raw = steps.lookup_pid.output.values[0][0] | append: '' | strip | split: '.' | first -%}
+                    {%- assign leftover = raw | remove: '0' | remove: '1' | remove: '2' | remove: '3' | remove: '4' | remove: '5' | remove: '6' | remove: '7' | remove: '8' | remove: '9' -%}
+                    {%- assign pid_num = raw | plus: 0 -%}
+                    {%- if leftover == '' and pid_num > 4 -%}{{ raw }}{%- endif -%}
+              - name: when_lookup_pid
+                type: if
+                condition: 'steps.set_looked_up_pid.output.process_pid: * and not steps.set_looked_up_pid.output.process_pid: ""'
+                steps:
+                  - name: submit_kill_tree_lookup
+                    type: kibana.request
+                    on-failure:
+                      continue: true
+                    with:
+                      method: POST
+                      path: /api/endpoint/action/execute
+                      headers:
+                        kbn-xsrf: "true"
+                      body:
+                        agent_type: endpoint
+                        endpoint_ids:
+                          - "{{ steps.normalize_inputs.output.agent_id }}"
+                        comment: "Workflow Malicious Windows Process Termination and Cleanup — kill process tree for entity {{ steps.normalize_inputs.output.process_entity_id }}."
+                        parameters:
+                          command: "cmd.exe /c \"taskkill.exe /F /T /PID {{ steps.set_looked_up_pid.output.process_pid }} && echo PROCESS_TREE_TERMINATED\""
+                          timeout: 120
+                  - name: log_kill_tree_lookup
+                    type: console
+                    with:
+                      message: "{% if steps.submit_kill_tree_lookup.output.data.id %}Kill tree submitted ({{ steps.submit_kill_tree_lookup.output.data.id }}) for pid {{ steps.set_looked_up_pid.output.process_pid }}.{% else %}Kill tree was not submitted. {{ steps.submit_kill_tree_lookup.error }}{% endif %}"
+                  - name: remember_kill_tree_lookup
+                    type: data.set
+                    with:
+                      kill_note: "{% if steps.submit_kill_tree_lookup.output.data.id %}Kill tree submitted ({{ steps.submit_kill_tree_lookup.output.data.id }}) for pid {{ steps.set_looked_up_pid.output.process_pid }}.{% else %}Kill tree was not submitted. {{ steps.submit_kill_tree_lookup.error }}{% endif %}"
+                else:
+                  - name: submit_kill_process
+                    type: kibana.request
+                    on-failure:
+                      continue: true
+                    with:
+                      method: POST
+                      path: /api/endpoint/action/kill_process
+                      headers:
+                        kbn-xsrf: "true"
+                      body:
+                        agent_type: endpoint
+                        endpoint_ids:
+                          - "{{ steps.normalize_inputs.output.agent_id }}"
+                        comment: "Workflow Malicious Windows Process Termination and Cleanup — kill entity {{ steps.normalize_inputs.output.process_entity_id }}. No pid was available for a tree kill."
+                        parameters:
+                          entity_id: "{{ steps.normalize_inputs.output.process_entity_id }}"
+                  - name: log_kill_process
+                    type: console
+                    with:
+                      message: "{% if steps.submit_kill_process.output.data.id %}Kill process submitted ({{ steps.submit_kill_process.output.data.id }}) for entity {{ steps.normalize_inputs.output.process_entity_id }}. Child processes are not included.{% else %}Kill process was not submitted. {{ steps.submit_kill_process.error }}{% endif %}"
+                  - name: remember_kill_process
+                    type: data.set
+                    with:
+                      kill_note: "{% if steps.submit_kill_process.output.data.id %}Kill process submitted ({{ steps.submit_kill_process.output.data.id }}) for entity {{ steps.normalize_inputs.output.process_entity_id }}. Child processes are not included.{% else %}Kill process was not submitted. {{ steps.submit_kill_process.error }}{% endif %}"
+
+          # Files created by this process. Deleting a path never recurses.
+          - name: query_created_files
+            type: elasticsearch.esql.query
+            on-failure:
+              continue: true
+            with:
+              query: |
+                FROM {{ consts.file_index }}
+                | WHERE @timestamp > NOW() - {{ consts.lookback }}
+                  AND process.entity_id == "{{ steps.normalize_inputs.output.process_entity_id }}"
+                  AND agent.id == "{{ steps.normalize_inputs.output.agent_id }}"
+                  AND event.action == "creation"
+                  AND file.path IS NOT NULL
+                | STATS BY file.path
+                | LIMIT {{ consts.max_files }}
+
+          - name: when_files_found
+            type: if
+            condition: steps.query_created_files.output.values.length > 0
+            steps:
+              - name: per_file
+                type: foreach
+                foreach: "{{ steps.query_created_files.output.values }}"
+                on-failure:
+                  continue: true
+                steps:
+                  - name: build_file_command
+                    type: data.set
+                    with:
+                      result: |
+                        {%- assign path = foreach.item[0] | append: '' | strip -%}
+                        {%- assign lower = path | downcase -%}
+                        {%- assign bare = lower -%}
+                        {%- assign last = bare | slice: -1, 1 -%}
+                        {%- if last == "\\" -%}{%- assign cut = bare.size | minus: 1 -%}{%- assign bare = bare | slice: 0, cut -%}{%- endif -%}
+                        {%- assign bad = 'no' -%}
+                        {%- if path contains "'" -%}{%- assign bad = 'yes' -%}{%- endif -%}
+                        {%- if path contains '"' -%}{%- assign bad = 'yes' -%}{%- endif -%}
+                        {%- if path contains '`' -%}{%- assign bad = 'yes' -%}{%- endif -%}
+                        {%- if path contains '‘' -%}{%- assign bad = 'yes' -%}{%- endif -%}
+                        {%- if path contains '’' -%}{%- assign bad = 'yes' -%}{%- endif -%}
+                        {%- if path contains '‚' -%}{%- assign bad = 'yes' -%}{%- endif -%}
+                        {%- if path contains '‛' -%}{%- assign bad = 'yes' -%}{%- endif -%}
+                        {%- assign encoded = path | url_encode -%}
+                        {%- if encoded contains '%00' -%}{%- assign bad = 'yes' -%}{%- endif -%}
+                        {%- if encoded contains '%09' -%}{%- assign bad = 'yes' -%}{%- endif -%}
+                        {%- if encoded contains '%0A' -%}{%- assign bad = 'yes' -%}{%- endif -%}
+                        {%- if encoded contains '%0D' -%}{%- assign bad = 'yes' -%}{%- endif -%}
+                        {%- if path contains '$' -%}{%- assign bad = 'yes' -%}{%- endif -%}
+                        {%- if path contains '%' -%}{%- assign bad = 'yes' -%}{%- endif -%}
+                        {%- if path contains '&' -%}{%- assign bad = 'yes' -%}{%- endif -%}
+                        {%- if path contains '|' -%}{%- assign bad = 'yes' -%}{%- endif -%}
+                        {%- if path contains '<' -%}{%- assign bad = 'yes' -%}{%- endif -%}
+                        {%- if path contains '>' -%}{%- assign bad = 'yes' -%}{%- endif -%}
+                        {%- if path contains '^' -%}{%- assign bad = 'yes' -%}{%- endif -%}
+                        {%- if path contains '..' -%}{%- assign bad = 'yes' -%}{%- endif -%}
+                        {%- assign path_size = path | size -%}
+                        {%- assign letter = lower | slice: 0, 1 -%}
+                        {%- assign colon = path | slice: 1, 1 -%}
+                        {%- assign slash = path | slice: 2, 1 -%}
+                        {%- assign letter_left = letter | remove: 'a' | remove: 'b' | remove: 'c' | remove: 'd' | remove: 'e' | remove: 'f' | remove: 'g' | remove: 'h' | remove: 'i' | remove: 'j' | remove: 'k' | remove: 'l' | remove: 'm' | remove: 'n' | remove: 'o' | remove: 'p' | remove: 'q' | remove: 'r' | remove: 's' | remove: 't' | remove: 'u' | remove: 'v' | remove: 'w' | remove: 'x' | remove: 'y' | remove: 'z' -%}
+                        {%- assign drive_ok = 'no' -%}
+                        {%- if letter_left == '' -%}
+                        {%- if colon == ':' -%}
+                        {%- if slash == "\\" -%}
+                        {%- if path_size >= 4 -%}{%- assign drive_ok = 'yes' -%}{%- endif -%}
+                        {%- endif -%}
+                        {%- endif -%}
+                        {%- endif -%}
+                        {%- assign unc = 'no' -%}
+                        {%- assign head = path | slice: 0, 2 -%}
+                        {%- if head == "\\\\" -%}
+                        {%- if path_size > 8 -%}{%- assign unc = 'yes' -%}{%- endif -%}
+                        {%- endif -%}
+                        {%- assign protected = 'no' -%}
+                        {%- if bare == 'c:' -%}{%- assign protected = 'yes' -%}{%- endif -%}
+                        {%- if bare == "c:\\windows" -%}{%- assign protected = 'yes' -%}{%- endif -%}
+                        {%- if bare == "c:\\windows\\system32" -%}{%- assign protected = 'yes' -%}{%- endif -%}
+                        {%- if bare == "c:\\windows\\syswow64" -%}{%- assign protected = 'yes' -%}{%- endif -%}
+                        {%- if bare == "c:\\windows\\system32\\drivers" -%}{%- assign protected = 'yes' -%}{%- endif -%}
+                        {%- if bare == "c:\\users" -%}{%- assign protected = 'yes' -%}{%- endif -%}
+                        {%- if bare == "c:\\program files" -%}{%- assign protected = 'yes' -%}{%- endif -%}
+                        {%- if bare == "c:\\program files (x86)" -%}{%- assign protected = 'yes' -%}{%- endif -%}
+                        {%- if bare == "c:\\programdata" -%}{%- assign protected = 'yes' -%}{%- endif -%}
+                        {%- assign safe = 'no' -%}
+                        {%- assign reason = '' -%}
+                        {%- if path == '' -%}
+                        {%- assign reason = 'file.path is empty.' -%}
+                        {%- else -%}
+                        {%- if bad == 'yes' -%}
+                        {%- assign reason = 'file.path contains a character that cannot be passed to the delete command.' -%}
+                        {%- else -%}
+                        {%- if protected == 'yes' -%}
+                        {%- assign reason = 'file.path is a protected directory and was not deleted.' -%}
+                        {%- else -%}
+                        {%- assign path_ok = 'no' -%}
+                        {%- if drive_ok == 'yes' -%}{%- assign path_ok = 'yes' -%}{%- endif -%}
+                        {%- if unc == 'yes' -%}{%- assign path_ok = 'yes' -%}{%- endif -%}
+                        {%- if path_ok == 'yes' -%}
+                        {%- assign safe = 'yes' -%}
+                        {%- else -%}
+                        {%- assign reason = 'file.path must be a drive path or a UNC path.' -%}
+                        {%- endif -%}
+                        {%- endif -%}
+                        {%- endif -%}
+                        {%- endif -%}
+                        {%- assign command = '' -%}
+                        {%- if safe == 'yes' -%}
+                        {%- assign command = "powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command \"Remove-Item -LiteralPath '" | append: path | append: "' -Force -ErrorAction Stop; Write-Output 'FILE_DELETED'\"" -%}
+                        {%- endif -%}
+                        {{- safe -}}%%{{- reason -}}%%{{- command -}}
+                  - name: read_file_command
+                    type: data.set
+                    with:
+                      safe: "{{ steps.build_file_command.output.result | split: '%%' | first | strip }}"
+                      reason: "{% assign parts = steps.build_file_command.output.result | split: '%%' %}{{ parts[1] | default: '' | strip }}"
+                      command: "{% assign parts = steps.build_file_command.output.result | split: '%%' %}{{ parts[2] | default: '' }}"
+                  - name: when_file_safe
+                    type: if
+                    condition: 'steps.read_file_command.output.safe: "yes"'
+                    steps:
+                      - name: delete_file
+                        type: kibana.request
+                        on-failure:
+                          continue: true
+                        with:
+                          method: POST
+                          path: /api/endpoint/action/execute
+                          headers:
+                            kbn-xsrf: "true"
+                          body:
+                            agent_type: endpoint
+                            endpoint_ids:
+                              - "{{ steps.normalize_inputs.output.agent_id }}"
+                            comment: "Workflow Malicious Windows Process Termination and Cleanup — delete file created by entity {{ steps.normalize_inputs.output.process_entity_id }}."
+                            parameters:
+                              command: "{{ steps.read_file_command.output.command }}"
+                              timeout: 120
+                      - name: log_file_delete
+                        type: console
+                        with:
+                          message: "{% if steps.delete_file.output.data.id %}Delete submitted ({{ steps.delete_file.output.data.id }}) for {{ foreach.item[0] }}.{% else %}Delete was not submitted for {{ foreach.item[0] }}. {{ steps.delete_file.error }}{% endif %}"
+                      - name: note_deleted_file
+                        type: data.set
+                        with:
+                          line: "{% if steps.delete_file.output.data.id %}- `{{ foreach.item[0] }}` (action {{ steps.delete_file.output.data.id }}){% else %}- `{{ foreach.item[0] }}` was not submitted. {{ steps.delete_file.error }}{% endif %}"
+                      - name: record_deleted_file
+                        type: data.set
+                        with:
+                          deleted_files: "${{ variables.deleted_files | push: steps.note_deleted_file.output.line }}"
+                    else:
+                      - name: log_file_skipped
+                        type: console
+                        with:
+                          message: "Skipped file {{ foreach.item[0] }}. {{ steps.read_file_command.output.reason }}"
+                      - name: note_skipped_file
+                        type: data.set
+                        with:
+                          line: "- `{{ foreach.item[0] }}` — {{ steps.read_file_command.output.reason }}"
+                      - name: record_skipped_file
+                        type: data.set
+                        with:
+                          skipped_files: "${{ variables.skipped_files | push: steps.note_skipped_file.output.line }}"
+            else:
+              - name: log_no_files
+                type: console
+                with:
+                  message: "No file creation events for entity {{ steps.normalize_inputs.output.process_entity_id }} in {{ consts.lookback }}. {{ steps.query_created_files.error }}"
+
+          # Only registry values are deleted. registry.path often ends in the value
+          # name, so the delete uses hive + key plus registry.value.
+          - name: query_registry
+            type: elasticsearch.esql.query
+            on-failure:
+              continue: true
+            with:
+              query: |
+                FROM {{ consts.registry_index }}
+                | WHERE @timestamp > NOW() - {{ consts.lookback }}
+                  AND process.entity_id == "{{ steps.normalize_inputs.output.process_entity_id }}"
+                  AND agent.id == "{{ steps.normalize_inputs.output.agent_id }}"
+                  AND event.action == "modification"
+                  AND registry.path IS NOT NULL
+                  AND registry.value IS NOT NULL
+                | EVAL reg_key = CASE(registry.hive IS NOT NULL AND registry.key IS NOT NULL, CONCAT(registry.hive, "\\", registry.key), registry.path)
+                | STATS BY reg_key, registry.value
+                | LIMIT {{ consts.max_registry }}
+
+          - name: when_registry_found
+            type: if
+            condition: steps.query_registry.output.values.length > 0
+            steps:
+              - name: per_registry
+                type: foreach
+                foreach: "{{ steps.query_registry.output.values }}"
+                on-failure:
+                  continue: true
+                steps:
+                  - name: build_registry_command
+                    type: data.set
+                    with:
+                      result: |
+                        {%- assign key = foreach.item[0] | append: '' | strip -%}
+                        {%- assign value = foreach.item[1] | append: '' | strip -%}
+                        {%- if value != '' -%}
+                        {%- assign suffix = "\\" | append: value -%}
+                        {%- assign cut = key.size | minus: suffix.size -%}
+                        {%- if cut > 0 -%}
+                        {%- assign tail = key | slice: cut, suffix.size -%}
+                        {%- if tail == suffix -%}{%- assign key = key | slice: 0, cut -%}{%- endif -%}
+                        {%- endif -%}
+                        {%- endif -%}
+                        {%- assign lower = key | downcase -%}
+                        {%- assign bad = 'no' -%}
+                        {%- if key contains "'" -%}{%- assign bad = 'yes' -%}{%- endif -%}
+                        {%- if value contains "'" -%}{%- assign bad = 'yes' -%}{%- endif -%}
+                        {%- if key contains '"' -%}{%- assign bad = 'yes' -%}{%- endif -%}
+                        {%- if value contains '"' -%}{%- assign bad = 'yes' -%}{%- endif -%}
+                        {%- if key contains '`' -%}{%- assign bad = 'yes' -%}{%- endif -%}
+                        {%- if value contains '`' -%}{%- assign bad = 'yes' -%}{%- endif -%}
+                        {%- if key contains '‘' -%}{%- assign bad = 'yes' -%}{%- endif -%}
+                        {%- if value contains '‘' -%}{%- assign bad = 'yes' -%}{%- endif -%}
+                        {%- if key contains '’' -%}{%- assign bad = 'yes' -%}{%- endif -%}
+                        {%- if value contains '’' -%}{%- assign bad = 'yes' -%}{%- endif -%}
+                        {%- if key contains '‚' -%}{%- assign bad = 'yes' -%}{%- endif -%}
+                        {%- if value contains '‚' -%}{%- assign bad = 'yes' -%}{%- endif -%}
+                        {%- if key contains '‛' -%}{%- assign bad = 'yes' -%}{%- endif -%}
+                        {%- if value contains '‛' -%}{%- assign bad = 'yes' -%}{%- endif -%}
+                        {%- assign key_encoded = key | url_encode -%}
+                        {%- assign value_encoded = value | url_encode -%}
+                        {%- if key_encoded contains '%00' -%}{%- assign bad = 'yes' -%}{%- endif -%}
+                        {%- if value_encoded contains '%00' -%}{%- assign bad = 'yes' -%}{%- endif -%}
+                        {%- if key_encoded contains '%09' -%}{%- assign bad = 'yes' -%}{%- endif -%}
+                        {%- if value_encoded contains '%09' -%}{%- assign bad = 'yes' -%}{%- endif -%}
+                        {%- if key_encoded contains '%0A' -%}{%- assign bad = 'yes' -%}{%- endif -%}
+                        {%- if value_encoded contains '%0A' -%}{%- assign bad = 'yes' -%}{%- endif -%}
+                        {%- if key_encoded contains '%0D' -%}{%- assign bad = 'yes' -%}{%- endif -%}
+                        {%- if value_encoded contains '%0D' -%}{%- assign bad = 'yes' -%}{%- endif -%}
+                        {%- if key contains '$' -%}{%- assign bad = 'yes' -%}{%- endif -%}
+                        {%- if value contains '$' -%}{%- assign bad = 'yes' -%}{%- endif -%}
+                        {%- if key contains '%' -%}{%- assign bad = 'yes' -%}{%- endif -%}
+                        {%- if value contains '%' -%}{%- assign bad = 'yes' -%}{%- endif -%}
+                        {%- if key contains '&' -%}{%- assign bad = 'yes' -%}{%- endif -%}
+                        {%- if value contains '&' -%}{%- assign bad = 'yes' -%}{%- endif -%}
+                        {%- if key contains '|' -%}{%- assign bad = 'yes' -%}{%- endif -%}
+                        {%- if value contains '|' -%}{%- assign bad = 'yes' -%}{%- endif -%}
+                        {%- if key contains '..' -%}{%- assign bad = 'yes' -%}{%- endif -%}
+                        {%- assign hive_ok = 'no' -%}
+                        {%- assign prefix5 = lower | slice: 0, 5 -%}
+                        {%- assign prefix4 = lower | slice: 0, 4 -%}
+                        {%- if prefix5 == "hklm\\" -%}{%- assign hive_ok = 'yes' -%}{%- endif -%}
+                        {%- if prefix5 == "hkcu\\" -%}{%- assign hive_ok = 'yes' -%}{%- endif -%}
+                        {%- if prefix5 == "hkcr\\" -%}{%- assign hive_ok = 'yes' -%}{%- endif -%}
+                        {%- if prefix5 == "hkcc\\" -%}{%- assign hive_ok = 'yes' -%}{%- endif -%}
+                        {%- if prefix4 == "hku\\" -%}{%- assign hive_ok = 'yes' -%}{%- endif -%}
+                        {%- if prefix5 == 'hkey_' -%}{%- assign hive_ok = 'yes' -%}{%- endif -%}
+                        {%- assign protected = 'no' -%}
+                        {%- if lower == 'hklm' -%}{%- assign protected = 'yes' -%}{%- endif -%}
+                        {%- if lower == 'hkcu' -%}{%- assign protected = 'yes' -%}{%- endif -%}
+                        {%- if lower == 'hku' -%}{%- assign protected = 'yes' -%}{%- endif -%}
+                        {%- if lower == 'hkcr' -%}{%- assign protected = 'yes' -%}{%- endif -%}
+                        {%- if lower == 'hkcc' -%}{%- assign protected = 'yes' -%}{%- endif -%}
+                        {%- if lower == 'hkey_local_machine' -%}{%- assign protected = 'yes' -%}{%- endif -%}
+                        {%- if lower == 'hkey_current_user' -%}{%- assign protected = 'yes' -%}{%- endif -%}
+                        {%- if lower == 'hkey_users' -%}{%- assign protected = 'yes' -%}{%- endif -%}
+                        {%- if lower == 'hkey_classes_root' -%}{%- assign protected = 'yes' -%}{%- endif -%}
+                        {%- if lower == 'hkey_current_config' -%}{%- assign protected = 'yes' -%}{%- endif -%}
+                        {%- if lower == "hklm\\software" -%}{%- assign protected = 'yes' -%}{%- endif -%}
+                        {%- if lower == "hklm\\system" -%}{%- assign protected = 'yes' -%}{%- endif -%}
+                        {%- if lower == "hklm\\sam" -%}{%- assign protected = 'yes' -%}{%- endif -%}
+                        {%- if lower == "hklm\\security" -%}{%- assign protected = 'yes' -%}{%- endif -%}
+                        {%- if lower == "hkey_local_machine\\software" -%}{%- assign protected = 'yes' -%}{%- endif -%}
+                        {%- if lower == "hkey_local_machine\\system" -%}{%- assign protected = 'yes' -%}{%- endif -%}
+                        {%- if lower == "hkey_local_machine\\sam" -%}{%- assign protected = 'yes' -%}{%- endif -%}
+                        {%- if lower == "hkey_local_machine\\security" -%}{%- assign protected = 'yes' -%}{%- endif -%}
+                        {%- assign safe = 'no' -%}
+                        {%- assign reason = '' -%}
+                        {%- assign command = '' -%}
+                        {%- if key == '' -%}
+                        {%- assign reason = 'registry key is empty.' -%}
+                        {%- else -%}
+                        {%- if bad == 'yes' -%}
+                        {%- assign reason = 'registry path contains a character that cannot be passed to the delete command.' -%}
+                        {%- else -%}
+                        {%- assign key_blocked = 'no' -%}
+                        {%- if hive_ok == 'no' -%}{%- assign key_blocked = 'yes' -%}{%- endif -%}
+                        {%- if protected == 'yes' -%}{%- assign key_blocked = 'yes' -%}{%- endif -%}
+                        {%- if key_blocked == 'yes' -%}
+                        {%- assign reason = 'registry key is not a deletable Windows key.' -%}
+                        {%- else -%}
+                        {%- if value != '' -%}
+                        {%- assign safe = 'yes' -%}
+                        {%- capture command -%}powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "Remove-ItemProperty -LiteralPath 'Registry::{{ key }}' -Name '{{ value }}' -Force -ErrorAction Stop; Write-Output 'REGISTRY_VALUE_DELETED'"{%- endcapture -%}
+                        {%- else -%}
+                        {%- assign reason = 'registry modification has no value name, so the key was not deleted.' -%}
+                        {%- endif -%}
+                        {%- endif -%}
+                        {%- endif -%}
+                        {%- endif -%}
+                        {{- safe -}}%%{{- reason -}}%%{{- command | strip -}}
+                  - name: read_registry_command
+                    type: data.set
+                    with:
+                      safe: "{{ steps.build_registry_command.output.result | split: '%%' | first | strip }}"
+                      reason: "{% assign parts = steps.build_registry_command.output.result | split: '%%' %}{{ parts[1] | default: '' | strip }}"
+                      command: "{% assign parts = steps.build_registry_command.output.result | split: '%%' %}{{ parts[2] | default: '' }}"
+                  - name: when_registry_safe
+                    type: if
+                    condition: 'steps.read_registry_command.output.safe: "yes"'
+                    steps:
+                      - name: delete_registry
+                        type: kibana.request
+                        on-failure:
+                          continue: true
+                        with:
+                          method: POST
+                          path: /api/endpoint/action/execute
+                          headers:
+                            kbn-xsrf: "true"
+                          body:
+                            agent_type: endpoint
+                            endpoint_ids:
+                              - "{{ steps.normalize_inputs.output.agent_id }}"
+                            comment: "Workflow Malicious Windows Process Termination and Cleanup — delete registry entry modified by entity {{ steps.normalize_inputs.output.process_entity_id }}."
+                            parameters:
+                              command: "{{ steps.read_registry_command.output.command }}"
+                              timeout: 120
+                      - name: log_registry_delete
+                        type: console
+                        with:
+                          message: "{% if steps.delete_registry.output.data.id %}Registry delete submitted ({{ steps.delete_registry.output.data.id }}) for {{ foreach.item[0] }} value {{ foreach.item[1] }}.{% else %}Registry delete was not submitted for {{ foreach.item[0] }}. {{ steps.delete_registry.error }}{% endif %}"
+                      - name: note_deleted_registry
+                        type: data.set
+                        with:
+                          line: "{% if steps.delete_registry.output.data.id %}- `{{ foreach.item[0] }}` value `{{ foreach.item[1] }}` (action {{ steps.delete_registry.output.data.id }}){% else %}- `{{ foreach.item[0] }}` value `{{ foreach.item[1] }}` was not submitted. {{ steps.delete_registry.error }}{% endif %}"
+                      - name: record_deleted_registry
+                        type: data.set
+                        with:
+                          deleted_registry: "${{ variables.deleted_registry | push: steps.note_deleted_registry.output.line }}"
+                    else:
+                      - name: log_registry_skipped
+                        type: console
+                        with:
+                          message: "Skipped registry {{ foreach.item[0] }} value {{ foreach.item[1] }}. {{ steps.read_registry_command.output.reason }}"
+                      - name: note_skipped_registry
+                        type: data.set
+                        with:
+                          line: "- `{{ foreach.item[0] }}` value `{{ foreach.item[1] }}` — {{ steps.read_registry_command.output.reason }}"
+                      - name: record_skipped_registry
+                        type: data.set
+                        with:
+                          skipped_registry: "${{ variables.skipped_registry | push: steps.note_skipped_registry.output.line }}"
+            else:
+              - name: log_no_registry
+                type: console
+                with:
+                  message: "No registry modification events for entity {{ steps.normalize_inputs.output.process_entity_id }} in {{ consts.lookback }}. {{ steps.query_registry.error }}"
+
+          - name: set_case_summary
+            type: data.set
+            with:
+              summary: |
+                Termination and cleanup for one Windows process. Delete actions are submitted to Elastic Defend. Confirm each action in Security → Endpoints → Response actions history.
+
+                - agent.id: `{{ steps.normalize_inputs.output.agent_id }}`
+                - process.entity_id: `{{ steps.normalize_inputs.output.process_entity_id }}`
+                - process.executable: `{{ steps.normalize_inputs.output.process_executable | replace: '`', '' | truncate: 300, '' }}`
+                - process.pid: `{{ steps.normalize_inputs.output.process_pid | default: steps.set_looked_up_pid.output.process_pid | default: 'unknown' }}`
+
+                ## Termination
+
+                {{ variables.kill_note | default: 'No termination action was recorded.' }}
+
+                ## Files deleted
+
+                {% assign files = variables.deleted_files %}{% if files.size == 0 %}None.
+                {% else %}{{ files | join: "\n" }}
+                {% endif %}
+
+                ## Registry values deleted
+
+                {% assign registry = variables.deleted_registry %}{% if registry.size == 0 %}None.
+                {% else %}{{ registry | join: "\n" }}
+                {% endif %}
+
+                ## Skipped
+
+                {% assign skipped_files = variables.skipped_files %}{% assign skipped_registry = variables.skipped_registry %}{% if skipped_files.size == 0 and skipped_registry.size == 0 %}None.
+                {% else %}{{ skipped_files | join: "\n" }}
+                {{ skipped_registry | join: "\n" }}
+                {% endif %}
+
+          - name: create_cleanup_case
+            type: cases.createCase
+            with:
+              title: "Malicious Process Termination and Cleanup - {{ steps.normalize_inputs.output.agent_id }} - {{ steps.normalize_inputs.output.process_entity_id }}"
+              description: "{{ steps.set_case_summary.output.summary }}"
+              owner: securitySolution
+              severity: medium
+              tags: [process-termination, cleanup]
+              settings:
+                syncAlerts: false
+
+          - name: log_case
+            type: console
+            with:
+              message: "Cleanup case {{ steps.create_cleanup_case.output.case.id }} — {{ steps.create_cleanup_case.output.case.title }}. {{ kibanaUrl }}/app/security/cases/{{ steps.create_cleanup_case.output.case.id }}"
+        else:
+          - name: log_not_approved
+            type: console
+            with:
+              message: "Cleanup was not approved. No process was killed and no files or registry values were deleted."
+    else:
+      - name: log_rejected
+        type: console
+        with:
+          message: "Process cleanup was not run. {{ steps.classify_cleanup.output.reason }}"
