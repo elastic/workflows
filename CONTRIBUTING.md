@@ -182,7 +182,7 @@ The catalog generator derives `stepTypes` and `triggerTypes` for each template â
 
 ### Common review findings
 
-Reviewers flag these again and again. Schema validation and `npm run build:catalog` pass on templates that have every one of them, so **go through this list before you open a PR**.
+Reviewers flag these again and again. Schema validation and `npm run build:catalog` pass on templates that have every one of them, so **go through this list before you open a PR**. Optionally, also install the template from its file and run it: on Kibana 9.6 or later (or Serverless), open the Template library, choose **Import template**, and select the YAML file. The install form and `__install__.*` substitution work as they do for catalog templates.
 
 #### Liquid and rendering
 
@@ -195,7 +195,7 @@ Reviewers flag these again and again. Schema validation and `npm run build:catal
 #### Conditions and settings
 
 - **`if:` conditions are KQL.** Liquid can build the KQL, but a bare rendered value like `"{{ steps.get_dashboard.error }}"` is not a condition, and the gated step never runs.
-- **Check a 404 on the start of `error.message`.** A failed `kibana.request` has no `statusCode`; its message starts with `HTTP <status>: `. The KQL wildcard `HTTP*404*` also matches a 500 whose body mentions `404`, and KQL can't match the exact prefix, so compute the flag in Liquid and gate on it. That way a 401, 500, or timeout never falls through to a create:
+- **Check a 404 on the start of `error.message`.** A failed `kibana.request` has no `statusCode`; its message starts with `HTTP <status>: `. The KQL wildcard `HTTP*404*` also matches a 500 whose body mentions `404`, and KQL can't match the exact prefix, so compute the state in Liquid and gate on it. That way a 401, 500, or timeout fails the run instead of falling through to a create:
 
   ```yaml
   - name: get_dashboard
@@ -208,13 +208,19 @@ Reviewers flag these again and again. Schema validation and `npm run build:catal
   - name: check_dashboard
     type: data.set
     with:
-      missing: "{% assign status = steps.get_dashboard.error.message | default: '' | slice: 0, 9 %}{% if status == 'HTTP 404:' %}yes{% else %}no{% endif %}"
+      state: "{% if steps.get_dashboard.error %}{% assign status = steps.get_dashboard.error.message | default: '' | slice: 0, 9 %}{% if status == 'HTTP 404:' %}missing{% else %}failed{% endif %}{% else %}found{% endif %}"
+  - name: fail_on_get_error
+    type: workflow.fail
+    if: 'steps.check_dashboard.output.state: "failed"'
+    with:
+      message: "Could not check the dashboard: {{ steps.get_dashboard.error.message }}"
   - name: create_dashboard
     type: kibana.request
-    if: 'steps.check_dashboard.output.missing: "yes"'
+    if: 'steps.check_dashboard.output.state: "missing"'
     with:
       method: PUT
       path: /api/dashboards/auto-dbmon-postgresql
+      # body: the dashboard definition (omitted here)
   ```
 - **`concurrency` needs a `key`.** Without one the engine ignores the block. `cancel-in-progress` is not a valid property.
 
@@ -227,7 +233,7 @@ Reviewers flag these again and again. Schema validation and `npm run build:catal
   ```
 
 - **Step timeouts must fit inside `settings.timeout`.** Two agents with `timeout: 25m` and `timeout: 20m` in a workflow with `timeout: 30m` get the second one killed mid-run.
-- **Use `on-failure: continue: true` only on optional steps, or on a step whose failure a later step handles**, like the `GET` above. Then make every other failure visible, e.g. a `workflow.fail` step when the `GET` failed with anything but a 404. On every step, and especially on agents, a broken run still shows as completed.
+- **Use `on-failure: continue: true` only on optional steps, or on a step whose failure a later step handles**, like the `GET` above. Then make every other failure visible, like the `workflow.fail` step above. On every step, and especially on agents, a broken run still shows as completed.
 - **Manual inputs go under the manual trigger** (`triggers[type=manual].inputs`), not at the workflow root.
 
 #### ES|QL

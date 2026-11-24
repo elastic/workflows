@@ -17,7 +17,7 @@ Templates live at `library/workflows/<slug>/<slug>.yaml` — one directory per s
 
 1. `{{ steps.x.output }}` inside a string renders `[object Object]`, and arrays render with no separator. Use `| json` and `| join: ", "`.
 2. A scheduled `ai.agent` with no deterministic gate, or with `create-conversation: true`.
-3. A full `PUT` of dashboards or other saved objects on every run, which overwrites user edits. `GET` first and create only when `error.message` starts with `HTTP 404:` (`HTTP*404*` also matches other errors).
+3. A full `PUT` of dashboards or other saved objects on every run, which overwrites user edits. `GET` first and create only when `error.message` starts with `HTTP 404:` (`HTTP*404*` also matches other errors), and `workflow.fail` on any other error.
 4. Demo, promotional, or Serverless-only copy, and an `availability` range that doesn't match the features the template uses.
 5. An alert path that only reads `event.alerts[0]`, reads `inputs.*`, or reads fields that the target rule's alerts don't carry.
 6. `concurrency` without a `key`, and step timeouts that don't fit inside `settings.timeout`.
