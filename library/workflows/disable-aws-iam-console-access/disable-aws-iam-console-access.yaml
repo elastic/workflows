@@ -371,7 +371,7 @@ steps:
 
                               - name: mutate_only_when_evidence_matches
                                 type: if
-                                condition: "${{ steps.compare_fresh_evidence.output.state == 'unchanged' }}"
+                                condition: "${{ steps.classify_fresh_connector_identity.output.state == 'matched' and steps.compare_fresh_evidence.output.state == 'unchanged' }}"
                                 steps:
                                   - name: delete_login_profile
                                     type: aws.request
