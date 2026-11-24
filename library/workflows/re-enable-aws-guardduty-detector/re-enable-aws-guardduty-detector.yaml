@@ -1,0 +1,423 @@
+template-metadata:
+  slug: re-enable-aws-guardduty-detector
+  version: "1.0.0"
+  availability: ">=9.7.0"
+  name: "Re-enable AWS GuardDuty Detector"
+  description: >-
+    Re-enable an AWS GuardDuty detector after verifying the connector account,
+    confirming that its current status is DISABLED, and receiving explicit
+    analyst approval. Alert-driven CloudTrail runs require request-parameter
+    retention mode All or Flattened. UpdateDetector with enable:true changes
+    detector status only; it does not enable individually disabled GuardDuty
+    features.
+  solutions: [security]
+  categories: [response]
+  install:
+    form:
+      - name: aws-connector
+        label: "AWS connector"
+        description: >-
+          AWS connector with sts:GetCallerIdentity, guardduty:GetDetector, and
+          guardduty:UpdateDetector. If a detector uses service roles, also
+          grant iam:GetRole on those exact role ARNs, including the GuardDuty
+          malware-protection service role when that feature is enabled.
+        inputType: connector
+        connectorType: .aws
+        required: true
+      - name: expected-account-id
+        label: "Expected AWS account ID"
+        description: >-
+          Twelve-digit AWS account ID that must match the selected connector
+          before any GuardDuty detector is read or updated.
+        inputType: text
+        required: true
+
+consts:
+  expected_account_id: "__install__.expected-account-id"
+
+name: Re-enable AWS GuardDuty Detector
+description: |
+  Resolve one GuardDuty detector ID and Region from one alert or manual input,
+  validate its resource account and Region, verify the connector account,
+  confirm DISABLED, require analyst approval, repeat account and state checks,
+  and attribute success only when UpdateDetector succeeds and a bounded
+  GetDetector retry verifies exact status ENABLED. UpdateDetector enable:true
+  changes detector status only and does not enable individually disabled
+  GuardDuty features. Batches containing more than one alert fail closed.
+
+triggers:
+  - type: alert
+  - type: manual
+    inputs:
+      - name: detector_id
+        type: string
+        description: AWS GuardDuty detector ID to re-enable.
+        required: true
+        default: ""
+      - name: region
+        type: string
+        description: AWS Region containing the GuardDuty detector.
+        required: true
+        default: ""
+
+steps:
+  - name: resolve_target
+    type: data.set
+    with:
+      detector_id: "{{ event.alerts[0].aws.cloudtrail.flattened.request_parameters.detectorId | default: event.alerts[0].aws.guardduty.service.detector_id | default: inputs.detector_id }}"
+      region: "{{ event.alerts[0].cloud.region | default: inputs.region }}"
+      target_source: >-
+        {% if event.alerts[0].aws.cloudtrail.flattened.request_parameters.detectorId != blank %}cloudtrail{% elsif event.alerts[0].aws.guardduty.service.detector_id != blank %}guardduty_native{% else %}manual{% endif %}
+      resource_account_id: >-
+        {% if event.alerts[0].aws.cloudtrail.flattened.request_parameters.detectorId != blank %}{{ event.alerts[0].aws.cloudtrail.recipient_account_id | default: '' }}{% elsif event.alerts[0].aws.guardduty.service.detector_id != blank %}{{ event.alerts[0].cloud.account.id | default: '' }}{% else %}{{ consts.expected_account_id }}{% endif %}
+      alert_count: "{{ event.alerts | size }}"
+
+  - name: validate_context
+    type: data.set
+    with:
+      single_alert: >-
+        {% assign count = event.alerts | size %}{% if count <= 1 %}true{% else %}false{% endif %}
+      target_valid: >-
+        {% assign detector = variables.detector_id | strip %}{% assign detector_size = detector | size %}{% assign region = variables.region | strip %}{% assign expected_account = consts.expected_account_id | strip %}{% assign resource_account = variables.resource_account_id | strip %}{% assign account_remainder = expected_account | remove: '0' | remove: '1' | remove: '2' | remove: '3' | remove: '4' | remove: '5' | remove: '6' | remove: '7' | remove: '8' | remove: '9' %}{% if detector_size > 0 and detector_size <= 300 and expected_account.size == 12 and account_remainder == blank and resource_account != blank and resource_account == expected_account and region contains '-' %}{% unless detector contains '/' or detector contains '?' or detector contains '#' or detector contains ' ' or region contains '/' or region contains ':' or region contains ' ' %}true{% else %}false{% endunless %}{% else %}false{% endif %}
+
+  - name: continue_for_single_alert
+    type: if
+    condition: "${{ steps.validate_context.output.single_alert == 'true' }}"
+    steps:
+      - name: continue_for_valid_target
+        type: if
+        condition: "${{ steps.validate_context.output.target_valid == 'true' }}"
+        steps:
+          - name: get_caller_identity
+            type: aws.request
+            connector-id: __install__.aws-connector
+            on-failure:
+              continue: true
+            with:
+              service: sts
+              region: "{{ variables.region }}"
+              query:
+                Action: GetCallerIdentity
+                Version: "2011-06-15"
+
+          - name: verify_connector_account
+            type: data.set
+            with:
+              verified: "{% if steps.get_caller_identity.output.data.GetCallerIdentityResponse.GetCallerIdentityResult.Account == consts.expected_account_id %}true{% else %}false{% endif %}"
+
+          - name: continue_for_verified_account
+            type: if
+            condition: "${{ steps.get_caller_identity.error == nil and steps.verify_connector_account.output.verified == 'true' }}"
+            steps:
+              - name: get_detector_before
+                type: aws.request
+                connector-id: __install__.aws-connector
+                on-failure:
+                  continue: true
+                with:
+                  service: guardduty
+                  region: "{{ variables.region }}"
+                  method: GET
+                  path: "/detector/{{ variables.detector_id }}"
+
+              - name: continue_for_successful_pre_read
+                type: if
+                condition: "${{ steps.get_detector_before.error == nil }}"
+                steps:
+                  - name: continue_only_when_disabled
+                    type: if
+                    condition: "${{ steps.get_detector_before.output.data.status == 'DISABLED' }}"
+                    steps:
+                      - name: request_approval
+                        type: waitForInput
+                        timeout: 1h
+                        with:
+                          message: |-
+                            Approve re-enabling AWS GuardDuty detector
+                            {{ variables.detector_id }}?
+
+                            Account: {{ variables.resource_account_id }}
+                            Region: {{ variables.region }}
+                            Current status: {{ steps.get_detector_before.output.data.status }}
+                            Finding publishing frequency: {{ steps.get_detector_before.output.data.findingPublishingFrequency | default: '(not reported)' }}
+
+                            UpdateDetector with enable:true changes detector status
+                            only. It does not enable individually disabled
+                            GuardDuty features; review feature configuration
+                            separately after this workflow.
+                          schema:
+                            type: object
+                            properties:
+                              approved:
+                                type: boolean
+                                title: Re-enable GuardDuty detector
+                                default: false
+                              notes:
+                                type: string
+                                title: Analyst notes
+                            required:
+                              - approved
+
+                      - name: apply_when_approved
+                        type: if
+                        condition: "${{ steps.request_approval.output.response.approved == true }}"
+                        steps:
+                          - name: get_caller_identity_fresh
+                            type: aws.request
+                            connector-id: __install__.aws-connector
+                            on-failure:
+                              continue: true
+                            with:
+                              service: sts
+                              region: "{{ variables.region }}"
+                              query:
+                                Action: GetCallerIdentity
+                                Version: "2011-06-15"
+
+                          - name: continue_for_fresh_account
+                            type: if
+                            condition: "${{ steps.get_caller_identity_fresh.error == nil and steps.get_caller_identity_fresh.output.data.GetCallerIdentityResponse.GetCallerIdentityResult.Account == consts.expected_account_id and variables.resource_account_id == consts.expected_account_id }}"
+                            steps:
+                              - name: get_detector_fresh
+                                type: aws.request
+                                connector-id: __install__.aws-connector
+                                on-failure:
+                                  continue: true
+                                with:
+                                  service: guardduty
+                                  region: "{{ variables.region }}"
+                                  method: GET
+                                  path: "/detector/{{ variables.detector_id }}"
+
+                              - name: continue_for_fresh_disabled_state
+                                type: if
+                                condition: "${{ steps.get_detector_fresh.error == nil and steps.get_detector_fresh.output.data.status == 'DISABLED' }}"
+                                steps:
+                                  - name: enable_detector
+                                    type: aws.request
+                                    connector-id: __install__.aws-connector
+                                    on-failure:
+                                      continue: true
+                                    with:
+                                      service: guardduty
+                                      region: "{{ variables.region }}"
+                                      method: POST
+                                      path: "/detector/{{ variables.detector_id }}"
+                                      body:
+                                        enable: true
+
+                                  - name: continue_after_successful_mutation
+                                    type: if
+                                    condition: "${{ steps.enable_detector.error == nil }}"
+                                    steps:
+                                      - name: initialize_verification
+                                        type: data.set
+                                        with:
+                                          verification_state: pending
+
+                                      # Retry only GetDetector; never retry UpdateDetector.
+                                      - name: verify_detector_enabled
+                                        type: while
+                                        condition: "${{ variables.verification_state != 'enabled' }}"
+                                        max-iterations:
+                                          limit: 3
+                                          on-limit: continue
+                                        steps:
+                                          - name: verification_backoff
+                                            type: wait
+                                            with:
+                                              duration: 2s
+                                          - name: get_detector_after
+                                            type: aws.request
+                                            connector-id: __install__.aws-connector
+                                            on-failure:
+                                              continue: true
+                                            with:
+                                              service: guardduty
+                                              region: "{{ variables.region }}"
+                                              method: GET
+                                              path: "/detector/{{ variables.detector_id }}"
+                                          - name: classify_verification_read
+                                            type: data.set
+                                            with:
+                                              verification_state: "{% if steps.get_detector_after.error == nil and steps.get_detector_after.output.data.status == 'ENABLED' %}enabled{% else %}pending{% endif %}"
+
+                                      - name: classify_verification_result
+                                        type: if
+                                        condition: "${{ variables.verification_state == 'enabled' }}"
+                                        steps:
+                                          - name: log_verified_audit_result
+                                            type: console
+                                            with:
+                                              message: |-
+                                                Outcome: verified; UpdateDetector returned without a connector error and GetDetector verified exact status ENABLED.
+                                                Account: {{ consts.expected_account_id }}.
+                                                Detector ID: {{ variables.detector_id }}.
+                                                Region: {{ variables.region }}.
+                                                Responder: {{ steps.request_approval.output.respondedBy }}.
+                                                Notes: {{ steps.request_approval.output.response.notes | default: '(none)' }}.
+                                                UpdateDetector enable:true changed detector status only; it did not enable individually disabled GuardDuty features.
+                                                Rollback guidance: enable=false requires separate authorization and recreates a monitoring gap.
+                                        else:
+                                          - name: log_verification_failure
+                                            type: console
+                                            with:
+                                              message: |-
+                                                Outcome: verification_failed; UpdateDetector returned without a connector error, but three GetDetector reads did not verify exact status ENABLED.
+                                                Any later ENABLED state is not attributed to this execution.
+                                                Detector ID: {{ variables.detector_id }}.
+                                                Observed status: {{ steps.get_detector_after.output.data.status | default: '(unavailable)' }}.
+                                                Verification error: {{ steps.get_detector_after.error | default: '(none)' | json }}.
+                                                Recovery guidance: inspect detector and feature status before any separately authorized follow-up.
+                                          - name: fail_verification
+                                            type: workflow.fail
+                                            with:
+                                              message: GuardDuty detector was not verified ENABLED after three GetDetector attempts.
+                                              reason: guardduty_enable_not_verified
+                                    else:
+                                      - name: log_mutation_failure
+                                        type: console
+                                        with:
+                                          message: |-
+                                            Outcome: mutation_failed; UpdateDetector reported an error. No observed ENABLED state is attributed to this execution.
+                                            Detector ID: {{ variables.detector_id }}.
+                                            Region: {{ variables.region }}.
+                                            Mutation error: {{ steps.enable_detector.error | json }}.
+                                            Recovery guidance: inspect detector and feature status before any separately authorized retry.
+                                      - name: fail_mutation
+                                        type: workflow.fail
+                                        with:
+                                          message: UpdateDetector failed; detector status was not attributed to this workflow.
+                                          reason: guardduty_update_failed
+                                else:
+                                  - name: log_stale_detector_state
+                                    type: console
+                                    with:
+                                      message: |-
+                                        Outcome: no_change; the fresh pre-mutation read no longer reported DISABLED, so UpdateDetector was skipped.
+                                        Account: {{ consts.expected_account_id }}.
+                                        Detector ID: {{ variables.detector_id }}.
+                                        Region: {{ variables.region }}.
+                                        Fresh status: {{ steps.get_detector_fresh.output.data.status | default: '(missing)' }}.
+                                        Fresh read error: {{ steps.get_detector_fresh.error | default: '(none)' | json }}.
+                                        Rollback: none is needed because no mutation was attempted.
+                                  - name: fail_stale_detector_state
+                                    type: workflow.fail
+                                    with:
+                                      message: The approved GuardDuty detector state was stale or unreadable.
+                                      reason: guardduty_approved_state_stale
+                            else:
+                              - name: log_fresh_account_mismatch
+                                type: console
+                                with:
+                                  message: |-
+                                    Outcome: no_change; the fresh connector identity did not match expected account {{ consts.expected_account_id }}, so no GuardDuty request or mutation followed.
+                                    Detector ID: {{ variables.detector_id }}.
+                                    Region: {{ variables.region }}.
+                                    Connector error: {{ steps.get_caller_identity_fresh.error | default: '(none)' | json }}.
+                                    Rollback: none is needed because no mutation was attempted.
+                              - name: fail_fresh_account_mismatch
+                                type: workflow.fail
+                                with:
+                                  message: The connector account could not be revalidated after approval.
+                                  reason: guardduty_fresh_account_mismatch
+                        else:
+                          - name: log_rejected_audit_result
+                            type: console
+                            with:
+                              message: |-
+                                Outcome: no_change; no UpdateDetector request was made because re-enabling was explicitly rejected.
+                                Account: {{ consts.expected_account_id }}.
+                                Detector ID: {{ variables.detector_id }}.
+                                Region: {{ variables.region }}.
+                                Responder: {{ steps.request_approval.output.respondedBy }}.
+                                Notes: {{ steps.request_approval.output.response.notes | default: '(none)' }}.
+                                Rollback: none is needed because no mutation was attempted.
+                    else:
+                      - name: classify_non_disabled_status
+                        type: if
+                        condition: "${{ steps.get_detector_before.output.data.status == 'ENABLED' }}"
+                        steps:
+                          - name: log_already_enabled
+                            type: console
+                            with:
+                              message: |-
+                                Outcome: no_change_success; the GuardDuty detector is already ENABLED, so approval and UpdateDetector were skipped.
+                                Account: {{ consts.expected_account_id }}.
+                                Detector ID: {{ variables.detector_id }}.
+                                Region: {{ variables.region }}.
+                                Individually disabled GuardDuty features remain unchanged and must be reviewed separately.
+                        else:
+                          - name: log_unexpected_status
+                            type: console
+                            with:
+                              message: |-
+                                Outcome: no_change_failed; GetDetector returned an unexpected status.
+                                Detector ID: {{ variables.detector_id }}.
+                                Observed status: {{ steps.get_detector_before.output.data.status | default: '(missing)' }}.
+                                Rollback: none is needed because no mutation was attempted.
+                          - name: fail_unexpected_status
+                            type: workflow.fail
+                            with:
+                              message: GetDetector did not report DISABLED or ENABLED.
+                              reason: guardduty_unexpected_status
+                else:
+                  - name: log_pre_read_failure
+                    type: console
+                    with:
+                      message: |-
+                        Outcome: no_change_failed; GetDetector failed before approval.
+                        Detector ID: {{ variables.detector_id }}.
+                        Region: {{ variables.region }}.
+                        Error: {{ steps.get_detector_before.error | json }}.
+                        Rollback: none is needed because no mutation was attempted.
+                  - name: fail_pre_read
+                    type: workflow.fail
+                    with:
+                      message: GetDetector failed before approval.
+                      reason: guardduty_pre_read_failed
+            else:
+              - name: log_account_mismatch
+                type: console
+                with:
+                  message: |-
+                    Outcome: no_change; the connector identity did not match expected account {{ consts.expected_account_id }}, so no GuardDuty detector was read or updated.
+                    Detector ID: {{ variables.detector_id }}.
+                    Region: {{ variables.region }}.
+                    Connector error: {{ steps.get_caller_identity.error | default: '(none)' | json }}.
+                    Rollback: none is needed because no mutation was attempted.
+              - name: fail_account_mismatch
+                type: workflow.fail
+                with:
+                  message: The connector account was absent, unreadable, or mismatched.
+                  reason: guardduty_connector_account_mismatch
+        else:
+          - name: log_invalid_target
+            type: console
+            with:
+              message: |-
+                Outcome: no_change; GuardDuty detector re-enablement was skipped because the detector ID, Region, or expected account ID failed validation.
+                Detector ID: {{ variables.detector_id | default: '(missing)' }}.
+                Region: {{ variables.region | default: '(missing)' }}.
+                Expected account: {{ consts.expected_account_id | default: '(missing)' }}.
+                Resource account: {{ variables.resource_account_id | default: '(missing)' }}.
+                Target source: {{ variables.target_source }}.
+                Rollback: none is needed because no mutation was attempted.
+          - name: fail_invalid_target
+            type: workflow.fail
+            with:
+              message: The GuardDuty detector ID, Region, expected account, or resource account failed validation.
+              reason: guardduty_invalid_target
+    else:
+      - name: log_alert_batch_rejected
+        type: console
+        with:
+          message: |-
+            Outcome: no_change; this workflow requires per-alert execution and rejected a batch containing {{ variables.alert_count }} alerts.
+            Configure the alert rule to invoke the workflow once for each alert.
+            Rollback: none is needed because no mutation was attempted.
+      - name: fail_alert_batch
+        type: workflow.fail
+        with:
+          message: GuardDuty remediation rejected a multi-alert batch.
+          reason: guardduty_batch_rejected
