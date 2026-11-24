@@ -16,8 +16,10 @@ template-metadata:
       - name: aws-connector
         label: "AWS connector"
         description: >-
-          AWS connector with sts:GetCallerIdentity, kms:DescribeKey, and
-          kms:CancelKeyDeletion, scoped to the expected account and KMS keys.
+          AWS connector whose credentials belong to the expected account.
+          GetCallerIdentity requires no IAM allow; grant kms:DescribeKey and
+          kms:CancelKeyDeletion only on the KMS key ARNs this workflow may
+          remediate, and ensure the KMS key policies permit those actions.
         inputType: connector
         connectorType: .aws
         required: true
@@ -66,31 +68,77 @@ steps:
         {% if event.alerts %}{{ event.alerts.size }}{% else %}0{% endif %}
 
   - name: resolve_target
+    type: data.parseJson
+    source: |
+      {% assign alert_present = false -%}
+      {% if event.alerts and event.alerts.size > 0 -%}
+        {% assign alert_present = true -%}
+      {% endif -%}
+      {% assign requested_key_id = inputs.key_id | default: "" | strip -%}
+      {% assign region = inputs.region | default: "" | strip | downcase -%}
+      {% assign recipient_account_id = consts.expected_account_id | default: "" | strip -%}
+      {% assign fallback_candidates = "" | split: "" -%}
+      {% assign fallback_valid = false -%}
+      {% assign direct_key_supplied = false -%}
+      {% if alert_present -%}
+        {% assign requested_key_id = event.alerts[0].aws.cloudtrail.flattened.request_parameters.keyId | default: "" | strip -%}
+        {% if requested_key_id != "" -%}
+          {% assign direct_key_supplied = true -%}
+        {% endif -%}
+        {% assign region = event.alerts[0].cloud.region | default: "" | strip | downcase -%}
+        {% assign recipient_account_id = event.alerts[0].aws.cloudtrail.recipient_account_id | default: "" | strip -%}
+        {% if requested_key_id == "" and event.alerts[0].aws.cloudtrail.resources -%}
+          {% for resource in event.alerts[0].aws.cloudtrail.resources -%}
+            {% assign resource_type = resource.type | default: "" | strip -%}
+            {% assign resource_arn = resource.arn | default: "" | strip -%}
+            {% if resource_type == "AWS::KMS::Key" and resource_arn != "" -%}
+              {% assign fallback_candidates = fallback_candidates | push: resource_arn -%}
+            {% endif -%}
+          {% endfor -%}
+          {% assign fallback_candidates = fallback_candidates | uniq -%}
+          {% if fallback_candidates.size == 1 -%}
+            {% assign candidate_arn = fallback_candidates | first -%}
+            {% assign candidate_parts = candidate_arn | split: ":" -%}
+            {% assign candidate_resource = candidate_parts[5] | default: "" | split: "/" -%}
+            {% if candidate_parts.size == 6 and candidate_parts[0] == "arn" and candidate_parts[1] != blank and candidate_parts[2] == "kms" and candidate_parts[3] == region and candidate_parts[4] == recipient_account_id and candidate_resource.size == 2 and candidate_resource[0] == "key" and candidate_resource[1] != blank -%}
+              {% assign requested_key_id = candidate_arn -%}
+              {% assign fallback_valid = true -%}
+            {% endif -%}
+          {% endif -%}
+        {% endif -%}
+      {% endif -%}
+      {
+        "requested_key_id": {{ requested_key_id | json }},
+        "region": {{ region | json }},
+        "recipient_account_id": {{ recipient_account_id | json }},
+        "expected_account_id": {{ consts.expected_account_id | default: "" | strip | json }},
+        "invocation_kind": {% if alert_present %}"cloudtrail_alert"{% else %}"manual"{% endif %},
+        "fallback_candidate_count": {{ fallback_candidates.size | json }},
+        "target_resolution_valid": "{% if requested_key_id != "" %}{% if alert_present and direct_key_supplied == false %}{{ fallback_valid }}{% else %}true{% endif %}{% else %}false{% endif %}"
+      }
+
+  - name: normalize_target
     type: data.set
     with:
-      key_id: >-
-        {%- assign resolved_key_id = event.alerts[0].aws.cloudtrail.flattened.request_parameters.keyId | default: "" -%}
-        {%- if resolved_key_id == "" and event.alerts[0].aws.cloudtrail.resources -%}
-          {%- for resource in event.alerts[0].aws.cloudtrail.resources -%}
-            {%- if resolved_key_id == "" and resource.type == "AWS::KMS::Key" -%}
-              {%- assign resolved_key_id = resource.arn | default: "" -%}
-            {%- endif -%}
-          {%- endfor -%}
-        {%- endif -%}
-        {{- resolved_key_id | default: inputs.key_id -}}
-      region: "{{ event.alerts[0].cloud.region | default: inputs.region }}"
-      resource_account_id: "{% if event.alerts and event.alerts.size > 0 %}{{ event.alerts[0].aws.cloudtrail.recipient_account_id | default: '' }}{% else %}{{ consts.expected_account_id }}{% endif %}"
-      invocation_kind: "{% if event.alerts and event.alerts.size > 0 %}cloudtrail_alert{% else %}manual{% endif %}"
+      requested_key_id: "{{ steps.resolve_target.output.requested_key_id }}"
+      region: "{{ steps.resolve_target.output.region }}"
+      recipient_account_id: "{{ steps.resolve_target.output.recipient_account_id }}"
+      expected_account_id: "{{ steps.resolve_target.output.expected_account_id }}"
+      invocation_kind: "{{ steps.resolve_target.output.invocation_kind }}"
+      fallback_candidate_count: "{{ steps.resolve_target.output.fallback_candidate_count }}"
+      target_resolution_valid: "{{ steps.resolve_target.output.target_resolution_valid }}"
 
   - name: get_caller_identity
     type: aws.request
-    if: "${{ steps.classify_invocation.output.batch_status == 'single_or_manual' and variables.key_id != blank and variables.region != blank and variables.resource_account_id != blank }}"
+    if: "${{ steps.classify_invocation.output.batch_status == 'single_or_manual' and variables.target_resolution_valid == 'true' and variables.requested_key_id != blank and variables.region != blank and variables.recipient_account_id != blank and variables.expected_account_id != blank }}"
     connector-id: __install__.aws-connector
     on-failure:
       continue: true
     with:
       service: sts
       region: "{{ variables.region }}"
+      headers:
+        Accept: application/json
       query:
         Action: GetCallerIdentity
         Version: "2011-06-15"
@@ -98,11 +146,11 @@ steps:
   - name: parse_caller_identity
     type: data.set
     with:
-      caller_account_id: "{{ steps.get_caller_identity.output.data.GetCallerIdentityResponse.GetCallerIdentityResult.Account | default: '' }}"
+      connector_account_id: "{{ steps.get_caller_identity.output.data.GetCallerIdentityResponse.GetCallerIdentityResult.Account | default: '' | strip }}"
 
   - name: validate_target
     type: if
-    condition: "${{ steps.classify_invocation.output.batch_status == 'single_or_manual' and variables.key_id != blank and variables.region != blank and variables.resource_account_id != blank and variables.resource_account_id == consts.expected_account_id and steps.get_caller_identity.error == nil and steps.parse_caller_identity.output.caller_account_id == consts.expected_account_id }}"
+    condition: "${{ steps.classify_invocation.output.batch_status == 'single_or_manual' and variables.target_resolution_valid == 'true' and variables.requested_key_id != blank and variables.region != blank and variables.recipient_account_id != blank and variables.recipient_account_id == variables.expected_account_id and steps.get_caller_identity.error == nil and variables.connector_account_id == variables.expected_account_id }}"
     steps:
       - name: describe_key_before
         type: aws.request
@@ -117,7 +165,7 @@ steps:
             Content-Type: application/x-amz-json-1.1
             X-Amz-Target: TrentService.DescribeKey
           body:
-            KeyId: "{{ variables.key_id }}"
+            KeyId: "{{ variables.requested_key_id }}"
 
       - name: canonicalize_key_before
         type: data.set
@@ -125,7 +173,7 @@ steps:
           trusted_arn: "{{ steps.describe_key_before.output.data.KeyMetadata.Arn | default: '' }}"
           metadata_account_id: "{{ steps.describe_key_before.output.data.KeyMetadata.AWSAccountId | default: '' }}"
           key_state: "{{ steps.describe_key_before.output.data.KeyMetadata.KeyState | default: '' }}"
-          key_id: "{{ steps.describe_key_before.output.data.KeyMetadata.KeyId | default: '' }}"
+          metadata_key_id: "{{ steps.describe_key_before.output.data.KeyMetadata.KeyId | default: '' }}"
           arn_partition: "{% assign parts = steps.describe_key_before.output.data.KeyMetadata.Arn | default: '' | split: ':' %}{{ parts[1] | default: '' }}"
           arn_service: "{% assign parts = steps.describe_key_before.output.data.KeyMetadata.Arn | default: '' | split: ':' %}{{ parts[2] | default: '' }}"
           arn_region: "{% assign parts = steps.describe_key_before.output.data.KeyMetadata.Arn | default: '' | split: ':' %}{{ parts[3] | default: '' }}"
@@ -136,7 +184,7 @@ steps:
             {% assign arn = steps.describe_key_before.output.data.KeyMetadata.Arn | default: '' -%}
             {% assign parts = arn | split: ':' -%}
             {% assign resource = parts[5] | default: '' | split: '/' -%}
-            {% if parts.size == 6 and parts[0] == 'arn' and parts[1] != blank and parts[2] == 'kms' and parts[3] == variables.region and parts[4] == consts.expected_account_id and resource.size == 2 and resource[0] == 'key' and resource[1] != blank and resource[1] == steps.describe_key_before.output.data.KeyMetadata.KeyId and steps.describe_key_before.output.data.KeyMetadata.AWSAccountId == consts.expected_account_id and variables.resource_account_id == consts.expected_account_id and steps.parse_caller_identity.output.caller_account_id == consts.expected_account_id %}true{% else %}false{% endif %}
+            {% if parts.size == 6 and parts[0] == 'arn' and parts[1] != blank and parts[2] == 'kms' and parts[3] == variables.region and parts[4] == variables.expected_account_id and resource.size == 2 and resource[0] == 'key' and resource[1] != blank and resource[1] == variables.metadata_key_id and variables.metadata_account_id == variables.expected_account_id and variables.recipient_account_id == variables.expected_account_id and variables.connector_account_id == variables.expected_account_id %}true{% else %}false{% endif %}
 
       - name: continue_for_successful_pre_read
         type: if
@@ -188,13 +236,20 @@ steps:
                     with:
                       service: sts
                       region: "{{ variables.region }}"
+                      headers:
+                        Accept: application/json
                       query:
                         Action: GetCallerIdentity
                         Version: "2011-06-15"
 
+                  - name: parse_caller_identity_fresh
+                    type: data.set
+                    with:
+                      fresh_connector_account_id: "{{ steps.get_caller_identity_fresh.output.data.GetCallerIdentityResponse.GetCallerIdentityResult.Account | default: '' | strip }}"
+
                   - name: describe_key_fresh
                     type: aws.request
-                    if: "${{ steps.get_caller_identity_fresh.error == nil and steps.get_caller_identity_fresh.output.data.GetCallerIdentityResponse.GetCallerIdentityResult.Account == consts.expected_account_id }}"
+                    if: "${{ steps.get_caller_identity_fresh.error == nil and variables.fresh_connector_account_id == variables.expected_account_id }}"
                     connector-id: __install__.aws-connector
                     on-failure:
                       continue: true
@@ -216,7 +271,7 @@ steps:
                         {% assign parts = fresh_arn | split: ':' -%}
                         {% assign resource = parts[5] | default: '' | split: '/' -%}
                         {% assign fresh_state = steps.describe_key_fresh.output.data.KeyMetadata.KeyState | default: '' -%}
-                        {% if steps.get_caller_identity_fresh.error == nil and steps.get_caller_identity_fresh.output.data.GetCallerIdentityResponse.GetCallerIdentityResult.Account == consts.expected_account_id and steps.describe_key_fresh.error == nil and fresh_arn == variables.trusted_arn and parts.size == 6 and parts[0] == 'arn' and parts[1] == variables.arn_partition and parts[2] == 'kms' and parts[3] == variables.arn_region and parts[4] == variables.arn_account_id and resource.size == 2 and resource[0] == 'key' and resource[1] == variables.arn_key_id and steps.describe_key_fresh.output.data.KeyMetadata.KeyId == variables.key_id and steps.describe_key_fresh.output.data.KeyMetadata.AWSAccountId == variables.metadata_account_id and variables.metadata_account_id == consts.expected_account_id and variables.resource_account_id == consts.expected_account_id and (fresh_state == 'PendingDeletion' or fresh_state == 'PendingReplicaDeletion') and fresh_state == variables.key_state and steps.describe_key_fresh.output.data.KeyMetadata.DeletionDate == steps.describe_key_before.output.data.KeyMetadata.DeletionDate and steps.describe_key_fresh.output.data.KeyMetadata.PendingDeletionWindowInDays == steps.describe_key_before.output.data.KeyMetadata.PendingDeletionWindowInDays %}true{% else %}false{% endif %}
+                        {% if steps.get_caller_identity_fresh.error == nil and variables.fresh_connector_account_id == variables.expected_account_id and steps.describe_key_fresh.error == nil and fresh_arn == variables.trusted_arn and parts.size == 6 and parts[0] == 'arn' and parts[1] == variables.arn_partition and parts[2] == 'kms' and parts[3] == variables.arn_region and parts[4] == variables.arn_account_id and resource.size == 2 and resource[0] == 'key' and resource[1] == variables.arn_key_id and steps.describe_key_fresh.output.data.KeyMetadata.KeyId == variables.metadata_key_id and steps.describe_key_fresh.output.data.KeyMetadata.AWSAccountId == variables.metadata_account_id and variables.metadata_account_id == variables.expected_account_id and variables.recipient_account_id == variables.expected_account_id and fresh_state == variables.key_state and steps.describe_key_fresh.output.data.KeyMetadata.DeletionDate == steps.describe_key_before.output.data.KeyMetadata.DeletionDate and steps.describe_key_fresh.output.data.KeyMetadata.PendingDeletionWindowInDays == steps.describe_key_before.output.data.KeyMetadata.PendingDeletionWindowInDays %}true{% else %}false{% endif %}
 
                   - name: continue_for_unchanged_approved_tuple
                     type: if
@@ -275,7 +330,7 @@ steps:
                               - name: classify_verification_read
                                 type: data.set
                                 with:
-                                  verification_state: "{% if steps.describe_key_after.error == nil and steps.describe_key_after.output.data.KeyMetadata.Arn == variables.trusted_arn and steps.describe_key_after.output.data.KeyMetadata.AWSAccountId == consts.expected_account_id and steps.describe_key_after.output.data.KeyMetadata.KeyState == 'Disabled' and steps.describe_key_after.output.data.KeyMetadata.DeletionDate == nil and steps.describe_key_after.output.data.KeyMetadata.PendingDeletionWindowInDays == nil %}verified{% else %}pending{% endif %}"
+                                  verification_state: "{% if steps.describe_key_after.error == nil and steps.describe_key_after.output.data.KeyMetadata.Arn == variables.trusted_arn and steps.describe_key_after.output.data.KeyMetadata.KeyId == variables.metadata_key_id and steps.describe_key_after.output.data.KeyMetadata.AWSAccountId == variables.expected_account_id and steps.describe_key_after.output.data.KeyMetadata.KeyState == 'Disabled' and steps.describe_key_after.output.data.KeyMetadata.DeletionDate == nil and steps.describe_key_after.output.data.KeyMetadata.PendingDeletionWindowInDays == nil %}verified{% else %}pending{% endif %}"
 
                           - name: classify_verification_result
                             type: if
@@ -287,7 +342,7 @@ steps:
                                   message: |-
                                     Outcome: verified; CancelKeyDeletion returned the trusted ARN and DescribeKey confirmed Disabled with no deletion date or pending deletion window.
                                     Key ARN: {{ variables.trusted_arn }}.
-                                    Account: {{ consts.expected_account_id }}.
+                                    Account: {{ variables.expected_account_id }}.
                                     Region: {{ variables.region }}.
                                     Responder: {{ steps.request_approval.output.respondedBy }}.
                                     Notes: {{ steps.request_approval.output.response.notes | default: '(none)' }}.
@@ -382,7 +437,7 @@ steps:
             with:
               message: |-
                 Outcome: no_change_failed; DescribeKey failed or returned KeyMetadata whose ARN, AWSAccountId, Region, account, or key identity did not match the approved expected tuple.
-                Requested key: {{ variables.key_id }}.
+                Requested key: {{ variables.requested_key_id }}.
                 Returned ARN: {{ steps.describe_key_before.output.data.KeyMetadata.Arn | default: '(missing)' }}.
                 Error: {{ steps.describe_key_before.error | default: '(none)' | json }}.
                 Rollback: none is needed because no mutation was attempted.
@@ -400,12 +455,15 @@ steps:
             validation failed before any KMS resource request or approval.
             Alert count: {{ steps.classify_invocation.output.alert_count }}
             (configure the Run Workflow action with summaryMode:false); key:
-            {{ variables.key_id | default: '(missing)' }}; Region:
+            {{ variables.requested_key_id | default: '(missing)' }}; Region:
             {{ variables.region | default: '(missing)' }}; expected account:
-            {{ consts.expected_account_id }}; connector account:
-            {{ steps.parse_caller_identity.output.caller_account_id | default: '(missing)' }};
-            resource account:
-            {{ variables.resource_account_id | default: '(missing)' }}.
+            {{ variables.expected_account_id | default: '(missing)' }};
+            connector account:
+            {{ variables.connector_account_id | default: '(missing)' }};
+            CloudTrail recipient account:
+            {{ variables.recipient_account_id | default: '(missing)' }};
+            fallback KMS ARN candidates:
+            {{ variables.fallback_candidate_count | default: 0 }}.
             Rollback: none is needed because no mutation was attempted.
       - name: fail_unsafe_target
         type: workflow.fail
