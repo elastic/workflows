@@ -26,10 +26,12 @@ template-metadata:
           whenever the deployment has a fixed remediation boundary. If Malware
           Protection or service-linked-role verification requires iam:GetRole,
           scope it to
-          arn:aws:iam::*:role/*AWSServiceRoleForAmazonGuardDutyMalwareProtection.
-          Add iam:CreateServiceLinkedRole only if separately enabling a feature
-          requires first creating its service-linked role; ordinary detector
-          re-enablement does not enable features or require that permission.
+          arn:<partition>:iam::<account-id>:role/aws-service-role/malware-protection.guardduty.amazonaws.com/AWSServiceRoleForAmazonGuardDutyMalwareProtection,
+          substituting the connector's exact partition and account ID. The
+          workflow connector does not require iam:CreateServiceLinkedRole. If
+          separate feature setup requires creating this role, grant that action
+          only to the setup identity and restrict it with
+          iam:AWSServiceName=malware-protection.guardduty.amazonaws.com.
         inputType: connector
         connectorType: .aws
         required: true
