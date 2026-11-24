@@ -184,7 +184,7 @@ steps:
             {% assign arn = steps.describe_key_before.output.data.KeyMetadata.Arn | default: '' -%}
             {% assign parts = arn | split: ':' -%}
             {% assign resource = parts[5] | default: '' | split: '/' -%}
-            {% if parts.size == 6 and parts[0] == 'arn' and parts[1] != blank and parts[2] == 'kms' and parts[3] == variables.region and parts[4] == variables.expected_account_id and resource.size == 2 and resource[0] == 'key' and resource[1] != blank and resource[1] == variables.metadata_key_id and variables.metadata_account_id == variables.expected_account_id and variables.recipient_account_id == variables.expected_account_id and variables.connector_account_id == variables.expected_account_id %}true{% else %}false{% endif %}
+            {% if parts.size == 6 and parts[0] == 'arn' and parts[1] != blank and parts[2] == 'kms' and parts[3] == variables.region and parts[4] == variables.expected_account_id and resource.size == 2 and resource[0] == 'key' and resource[1] != blank and resource[1] == steps.describe_key_before.output.data.KeyMetadata.KeyId and steps.describe_key_before.output.data.KeyMetadata.AWSAccountId == variables.expected_account_id and variables.recipient_account_id == variables.expected_account_id and variables.connector_account_id == variables.expected_account_id %}true{% else %}false{% endif %}
 
       - name: continue_for_successful_pre_read
         type: if
