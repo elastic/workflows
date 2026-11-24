@@ -23,7 +23,13 @@ template-metadata:
           identity-based permission, including when an explicit deny exists;
           it is used only to identify the connector account. Scope GuardDuty
           permissions to approved detector ARN(s), accounts, and Regions
-          whenever the deployment has a fixed remediation boundary.
+          whenever the deployment has a fixed remediation boundary. If Malware
+          Protection or service-linked-role verification requires iam:GetRole,
+          scope it to
+          arn:aws:iam::*:role/*AWSServiceRoleForAmazonGuardDutyMalwareProtection.
+          Add iam:CreateServiceLinkedRole only if separately enabling a feature
+          requires first creating its service-linked role; ordinary detector
+          re-enablement does not enable features or require that permission.
         inputType: connector
         connectorType: .aws
         required: true
@@ -301,7 +307,7 @@ steps:
                                             type: console
                                             with:
                                               message: |-
-                                                Outcome: verification_failed; UpdateDetector returned without a connector error, but five GetDetector reads over a bounded 25-second polling window did not verify exact status ENABLED.
+                                                Outcome: verification_failed; UpdateDetector returned without a connector error, but five GetDetector attempts, each preceded by a configured 5-second delay, did not verify exact status ENABLED.
                                                 Any later ENABLED state is not attributed to this execution.
                                                 Detector ID: {{ variables.detector_id }}.
                                                 Observed status: {{ steps.get_detector_after.output.data.status | default: '(unavailable)' }}.
