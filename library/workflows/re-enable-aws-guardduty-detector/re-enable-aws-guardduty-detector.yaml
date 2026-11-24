@@ -17,10 +17,13 @@ template-metadata:
       - name: aws-connector
         label: "AWS connector"
         description: >-
-          AWS connector with sts:GetCallerIdentity, guardduty:GetDetector, and
-          guardduty:UpdateDetector. If a detector uses service roles, also
-          grant iam:GetRole on those exact role ARNs, including the GuardDuty
-          malware-protection service role when that feature is enabled.
+          AWS connector credentials that can call GetCallerIdentity and have
+          guardduty:GetDetector and guardduty:UpdateDetector on the detector
+          ARN(s) this workflow may remediate. GetCallerIdentity requires no
+          identity-based permission, including when an explicit deny exists;
+          it is used only to identify the connector account. Scope GuardDuty
+          permissions to approved detector ARN(s), accounts, and Regions
+          whenever the deployment has a fixed remediation boundary.
         inputType: connector
         connectorType: .aws
         required: true
@@ -61,15 +64,35 @@ triggers:
         default: ""
 
 steps:
+  - name: normalize_target_inputs
+    type: data.set
+    with:
+      cloudtrail_detector_id: "{{ event.alerts[0].aws.cloudtrail.flattened.request_parameters.detectorId | default: '' | strip }}"
+      native_detector_id: "{{ event.alerts[0].aws.guardduty.service.detector_id | default: '' | strip }}"
+      manual_detector_id: "{{ inputs.detector_id | default: '' | strip }}"
+      alert_region: "{{ event.alerts[0].cloud.region | default: '' | strip }}"
+      manual_region: "{{ inputs.region | default: '' | strip }}"
+      cloudtrail_recipient_account_id: "{{ event.alerts[0].aws.cloudtrail.recipient_account_id | default: '' | strip }}"
+      native_account_id: "{{ event.alerts[0].cloud.account.id | default: '' | strip }}"
+      expected_target_account_id: "{{ consts.expected_account_id | default: '' | strip }}"
+
   - name: resolve_target
     type: data.set
     with:
-      detector_id: "{{ event.alerts[0].aws.cloudtrail.flattened.request_parameters.detectorId | default: event.alerts[0].aws.guardduty.service.detector_id | default: inputs.detector_id }}"
-      region: "{{ event.alerts[0].cloud.region | default: inputs.region }}"
+      detector_id: >-
+        {%- if variables.cloudtrail_detector_id != blank -%}{{ variables.cloudtrail_detector_id }}{%- elsif variables.native_detector_id != blank -%}{{ variables.native_detector_id }}{%- else -%}{{ variables.manual_detector_id }}{%- endif -%}
+      detector_resolution: >-
+        {%- assign selected_detector = variables.cloudtrail_detector_id | default: variables.native_detector_id | default: variables.manual_detector_id -%}
+        {%- if selected_detector == blank -%}missing{%- elsif variables.cloudtrail_detector_id != blank and variables.cloudtrail_detector_id != selected_detector -%}ambiguous{%- elsif variables.native_detector_id != blank and variables.native_detector_id != selected_detector -%}ambiguous{%- elsif variables.manual_detector_id != blank and variables.manual_detector_id != selected_detector -%}ambiguous{%- else -%}resolved{%- endif -%}
+      region: >-
+        {%- if variables.alert_region != blank -%}{{ variables.alert_region }}{%- else -%}{{ variables.manual_region }}{%- endif -%}
+      region_resolution: >-
+        {%- assign selected_region = variables.alert_region | default: variables.manual_region -%}
+        {%- if selected_region == blank -%}missing{%- elsif variables.alert_region != blank and variables.manual_region != blank and variables.alert_region != variables.manual_region -%}ambiguous{%- else -%}resolved{%- endif -%}
       target_source: >-
-        {% if event.alerts[0].aws.cloudtrail.flattened.request_parameters.detectorId != blank %}cloudtrail{% elsif event.alerts[0].aws.guardduty.service.detector_id != blank %}guardduty_native{% else %}manual{% endif %}
-      resource_account_id: >-
-        {% if event.alerts[0].aws.cloudtrail.flattened.request_parameters.detectorId != blank %}{{ event.alerts[0].aws.cloudtrail.recipient_account_id | default: '' }}{% elsif event.alerts[0].aws.guardduty.service.detector_id != blank %}{{ event.alerts[0].cloud.account.id | default: '' }}{% else %}{{ consts.expected_account_id }}{% endif %}
+        {%- if variables.cloudtrail_detector_id != blank and variables.native_detector_id != blank -%}cloudtrail+guardduty_native{%- elsif variables.cloudtrail_detector_id != blank -%}cloudtrail{%- elsif variables.native_detector_id != blank -%}guardduty_native{%- else -%}manual{%- endif -%}
+      target_account_id: >-
+        {%- if variables.cloudtrail_detector_id != blank -%}{{ variables.cloudtrail_recipient_account_id }}{%- elsif variables.native_detector_id != blank -%}{{ variables.native_account_id }}{%- else -%}{{ variables.expected_target_account_id }}{%- endif -%}
       alert_count: "{{ event.alerts | size }}"
 
   - name: validate_context
@@ -78,7 +101,7 @@ steps:
       single_alert: >-
         {% assign count = event.alerts | size %}{% if count <= 1 %}true{% else %}false{% endif %}
       target_valid: >-
-        {% assign detector = variables.detector_id | strip %}{% assign detector_size = detector | size %}{% assign region = variables.region | strip %}{% assign expected_account = consts.expected_account_id | strip %}{% assign resource_account = variables.resource_account_id | strip %}{% assign account_remainder = expected_account | remove: '0' | remove: '1' | remove: '2' | remove: '3' | remove: '4' | remove: '5' | remove: '6' | remove: '7' | remove: '8' | remove: '9' %}{% if detector_size > 0 and detector_size <= 300 and expected_account.size == 12 and account_remainder == blank and resource_account != blank and resource_account == expected_account and region contains '-' %}{% unless detector contains '/' or detector contains '?' or detector contains '#' or detector contains ' ' or region contains '/' or region contains ':' or region contains ' ' %}true{% else %}false{% endunless %}{% else %}false{% endif %}
+        {% assign detector = variables.detector_id %}{% assign detector_size = detector | size %}{% assign region = variables.region %}{% assign expected_account = variables.expected_target_account_id %}{% assign target_account = variables.target_account_id %}{% assign account_remainder = expected_account | remove: '0' | remove: '1' | remove: '2' | remove: '3' | remove: '4' | remove: '5' | remove: '6' | remove: '7' | remove: '8' | remove: '9' %}{% if variables.detector_resolution == 'resolved' and variables.region_resolution == 'resolved' and detector_size > 0 and detector_size <= 300 and expected_account.size == 12 and account_remainder == blank and target_account != blank and target_account == expected_account and region contains '-' %}{% unless detector contains '/' or detector contains '?' or detector contains '#' or detector contains ' ' or region contains '/' or region contains ':' or region contains ' ' %}true{% else %}false{% endunless %}{% else %}false{% endif %}
 
   - name: continue_for_single_alert
     type: if
@@ -96,6 +119,8 @@ steps:
             with:
               service: sts
               region: "{{ variables.region }}"
+              headers:
+                Accept: application/json
               query:
                 Action: GetCallerIdentity
                 Version: "2011-06-15"
@@ -103,7 +128,8 @@ steps:
           - name: verify_connector_account
             type: data.set
             with:
-              verified: "{% if steps.get_caller_identity.output.data.GetCallerIdentityResponse.GetCallerIdentityResult.Account == consts.expected_account_id %}true{% else %}false{% endif %}"
+              connector_account_id: "{{ steps.get_caller_identity.output.data.GetCallerIdentityResponse.GetCallerIdentityResult.Account | default: '' | strip }}"
+              verified: "{% assign connector_account = steps.get_caller_identity.output.data.GetCallerIdentityResponse.GetCallerIdentityResult.Account | default: '' | strip %}{% if connector_account != blank and connector_account == variables.expected_target_account_id and connector_account == variables.target_account_id %}true{% else %}false{% endif %}"
 
           - name: continue_for_verified_account
             type: if
@@ -136,7 +162,8 @@ steps:
                             Approve re-enabling AWS GuardDuty detector
                             {{ variables.detector_id }}?
 
-                            Account: {{ variables.resource_account_id }}
+                            Target account: {{ variables.target_account_id }}
+                            Connector account: {{ steps.verify_connector_account.output.connector_account_id }}
                             Region: {{ variables.region }}
                             Current status: {{ steps.get_detector_before.output.data.status }}
                             Finding publishing frequency: {{ steps.get_detector_before.output.data.findingPublishingFrequency | default: '(not reported)' }}
@@ -170,13 +197,21 @@ steps:
                             with:
                               service: sts
                               region: "{{ variables.region }}"
+                              headers:
+                                Accept: application/json
                               query:
                                 Action: GetCallerIdentity
                                 Version: "2011-06-15"
 
+                          - name: verify_fresh_connector_account
+                            type: data.set
+                            with:
+                              connector_account_id: "{{ steps.get_caller_identity_fresh.output.data.GetCallerIdentityResponse.GetCallerIdentityResult.Account | default: '' | strip }}"
+                              verified: "{% assign connector_account = steps.get_caller_identity_fresh.output.data.GetCallerIdentityResponse.GetCallerIdentityResult.Account | default: '' | strip %}{% if connector_account != blank and connector_account == variables.expected_target_account_id and connector_account == variables.target_account_id %}true{% else %}false{% endif %}"
+
                           - name: continue_for_fresh_account
                             type: if
-                            condition: "${{ steps.get_caller_identity_fresh.error == nil and steps.get_caller_identity_fresh.output.data.GetCallerIdentityResponse.GetCallerIdentityResult.Account == consts.expected_account_id and variables.resource_account_id == consts.expected_account_id }}"
+                            condition: "${{ steps.get_caller_identity_fresh.error == nil and steps.verify_fresh_connector_account.output.verified == 'true' }}"
                             steps:
                               - name: get_detector_fresh
                                 type: aws.request
@@ -203,6 +238,8 @@ steps:
                                       region: "{{ variables.region }}"
                                       method: POST
                                       path: "/detector/{{ variables.detector_id }}"
+                                      headers:
+                                        Content-Type: application/json
                                       body:
                                         enable: true
 
@@ -220,13 +257,13 @@ steps:
                                         type: while
                                         condition: "${{ variables.verification_state != 'enabled' }}"
                                         max-iterations:
-                                          limit: 3
+                                          limit: 5
                                           on-limit: continue
                                         steps:
                                           - name: verification_backoff
                                             type: wait
                                             with:
-                                              duration: 2s
+                                              duration: 5s
                                           - name: get_detector_after
                                             type: aws.request
                                             connector-id: __install__.aws-connector
@@ -251,7 +288,8 @@ steps:
                                             with:
                                               message: |-
                                                 Outcome: verified; UpdateDetector returned without a connector error and GetDetector verified exact status ENABLED.
-                                                Account: {{ consts.expected_account_id }}.
+                                                Target account: {{ variables.target_account_id }}.
+                                                Connector account: {{ steps.verify_fresh_connector_account.output.connector_account_id }}.
                                                 Detector ID: {{ variables.detector_id }}.
                                                 Region: {{ variables.region }}.
                                                 Responder: {{ steps.request_approval.output.respondedBy }}.
@@ -263,7 +301,7 @@ steps:
                                             type: console
                                             with:
                                               message: |-
-                                                Outcome: verification_failed; UpdateDetector returned without a connector error, but three GetDetector reads did not verify exact status ENABLED.
+                                                Outcome: verification_failed; UpdateDetector returned without a connector error, but five GetDetector reads over a bounded 25-second polling window did not verify exact status ENABLED.
                                                 Any later ENABLED state is not attributed to this execution.
                                                 Detector ID: {{ variables.detector_id }}.
                                                 Observed status: {{ steps.get_detector_after.output.data.status | default: '(unavailable)' }}.
@@ -272,7 +310,7 @@ steps:
                                           - name: fail_verification
                                             type: workflow.fail
                                             with:
-                                              message: GuardDuty detector was not verified ENABLED after three GetDetector attempts.
+                                              message: GuardDuty detector was not verified ENABLED after five GetDetector attempts.
                                               reason: guardduty_enable_not_verified
                                     else:
                                       - name: log_mutation_failure
@@ -295,7 +333,8 @@ steps:
                                     with:
                                       message: |-
                                         Outcome: no_change; the fresh pre-mutation read no longer reported DISABLED, so UpdateDetector was skipped.
-                                        Account: {{ consts.expected_account_id }}.
+                                        Target account: {{ variables.target_account_id }}.
+                                        Connector account: {{ steps.verify_fresh_connector_account.output.connector_account_id }}.
                                         Detector ID: {{ variables.detector_id }}.
                                         Region: {{ variables.region }}.
                                         Fresh status: {{ steps.get_detector_fresh.output.data.status | default: '(missing)' }}.
@@ -311,7 +350,9 @@ steps:
                                 type: console
                                 with:
                                   message: |-
-                                    Outcome: no_change; the fresh connector identity did not match expected account {{ consts.expected_account_id }}, so no GuardDuty request or mutation followed.
+                                    Outcome: no_change; the fresh connector identity was absent or did not match target account {{ variables.target_account_id }}, so no GuardDuty request or mutation followed.
+                                    Expected target account: {{ variables.expected_target_account_id }}.
+                                    Connector account: {{ steps.verify_fresh_connector_account.output.connector_account_id | default: '(missing)' }}.
                                     Detector ID: {{ variables.detector_id }}.
                                     Region: {{ variables.region }}.
                                     Connector error: {{ steps.get_caller_identity_fresh.error | default: '(none)' | json }}.
@@ -327,7 +368,8 @@ steps:
                             with:
                               message: |-
                                 Outcome: no_change; no UpdateDetector request was made because re-enabling was explicitly rejected.
-                                Account: {{ consts.expected_account_id }}.
+                                Target account: {{ variables.target_account_id }}.
+                                Connector account: {{ steps.verify_connector_account.output.connector_account_id }}.
                                 Detector ID: {{ variables.detector_id }}.
                                 Region: {{ variables.region }}.
                                 Responder: {{ steps.request_approval.output.respondedBy }}.
@@ -343,7 +385,8 @@ steps:
                             with:
                               message: |-
                                 Outcome: no_change_success; the GuardDuty detector is already ENABLED, so approval and UpdateDetector were skipped.
-                                Account: {{ consts.expected_account_id }}.
+                                Target account: {{ variables.target_account_id }}.
+                                Connector account: {{ steps.verify_connector_account.output.connector_account_id }}.
                                 Detector ID: {{ variables.detector_id }}.
                                 Region: {{ variables.region }}.
                                 Individually disabled GuardDuty features remain unchanged and must be reviewed separately.
@@ -381,7 +424,9 @@ steps:
                 type: console
                 with:
                   message: |-
-                    Outcome: no_change; the connector identity did not match expected account {{ consts.expected_account_id }}, so no GuardDuty detector was read or updated.
+                    Outcome: no_change; the connector identity was absent or did not match target account {{ variables.target_account_id }}, so no GuardDuty detector was read or updated.
+                    Expected target account: {{ variables.expected_target_account_id }}.
+                    Connector account: {{ steps.verify_connector_account.output.connector_account_id | default: '(missing)' }}.
                     Detector ID: {{ variables.detector_id }}.
                     Region: {{ variables.region }}.
                     Connector error: {{ steps.get_caller_identity.error | default: '(none)' | json }}.
@@ -399,8 +444,10 @@ steps:
                 Outcome: no_change; GuardDuty detector re-enablement was skipped because the detector ID, Region, or expected account ID failed validation.
                 Detector ID: {{ variables.detector_id | default: '(missing)' }}.
                 Region: {{ variables.region | default: '(missing)' }}.
-                Expected account: {{ consts.expected_account_id | default: '(missing)' }}.
-                Resource account: {{ variables.resource_account_id | default: '(missing)' }}.
+                Detector resolution: {{ variables.detector_resolution }}.
+                Region resolution: {{ variables.region_resolution }}.
+                Expected target account: {{ variables.expected_target_account_id | default: '(missing)' }}.
+                Target account: {{ variables.target_account_id | default: '(missing)' }}.
                 Target source: {{ variables.target_source }}.
                 Rollback: none is needed because no mutation was attempted.
           - name: fail_invalid_target
