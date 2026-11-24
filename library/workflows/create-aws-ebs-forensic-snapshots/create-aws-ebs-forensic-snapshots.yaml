@@ -39,6 +39,16 @@ template-metadata:
           and any alert target processed by this workflow.
         inputType: text
         required: true
+      - name: snapshot-verification-attempts
+        label: "Snapshot verification attempts"
+        description: >-
+          Maximum number of read-only DescribeSnapshots polls after creation.
+          Polls run 30 seconds apart; the default of 120 provides a one-hour
+          completion window. Increase this for environments where snapshots
+          routinely take longer. CreateSnapshots is never retried.
+        inputType: number
+        required: true
+        default: 120
 
 name: Create AWS EBS Forensic Snapshots
 description: |
@@ -58,6 +68,7 @@ description: |
 
 consts:
   expected_account_id: "__install__.expected-account-id"
+  snapshot_verification_attempts: "__install__.snapshot-verification-attempts"
 
 triggers:
   - type: alert
@@ -447,22 +458,38 @@ steps:
                   instance_id: "{{ steps.describe_instance_pre_mutation.output.data | default: '' | split: '<instanceId>' | last | split: '</instanceId>' | first | strip }}"
                   volume_ids: >-
                     {%- assign volume_ids = "" | split: "" -%}
-                    {%- assign volume_segments = steps.describe_instance_pre_mutation.output.data | default: "" | split: "<volumeId>" -%}
-                    {%- for segment in volume_segments -%}
-                      {%- if segment contains "</volumeId>" -%}
-                        {%- assign volume_id = segment | split: "</volumeId>" | first | strip -%}
+                    {%- assign mappings = steps.describe_instance_pre_mutation.output.data | default: "" | split: "<blockDeviceMapping>" | last | split: "</blockDeviceMapping>" | first | split: "<item>" -%}
+                    {%- for mapping in mappings -%}
+                      {%- if mapping contains "<ebs>" and mapping contains "</ebs>" -%}
+                        {%- assign ebs = mapping | split: "<ebs>" | last | split: "</ebs>" | first -%}
+                        {%- assign volume_id = ebs | split: "<volumeId>" | last | split: "</volumeId>" | first | strip -%}
                         {%- if volume_id != "" -%}
                           {%- assign volume_ids = volume_ids | push: volume_id -%}
                         {%- endif -%}
                       {%- endif -%}
                     {%- endfor -%}
                     {{- volume_ids | compact | uniq | sort | join: "," -}}
+                  attachment_states_valid: >-
+                    {%- assign mapping_count = 0 -%}
+                    {%- assign attached_count = 0 -%}
+                    {%- assign mappings = steps.describe_instance_pre_mutation.output.data | default: "" | split: "<blockDeviceMapping>" | last | split: "</blockDeviceMapping>" | first | split: "<item>" -%}
+                    {%- for mapping in mappings -%}
+                      {%- if mapping contains "<ebs>" and mapping contains "</ebs>" -%}
+                        {%- assign mapping_count = mapping_count | plus: 1 -%}
+                        {%- assign ebs = mapping | split: "<ebs>" | last | split: "</ebs>" | first -%}
+                        {%- assign attachment_status = ebs | split: "<status>" | last | split: "</status>" | first | strip -%}
+                        {%- if attachment_status == "attached" -%}
+                          {%- assign attached_count = attached_count | plus: 1 -%}
+                        {%- endif -%}
+                      {%- endif -%}
+                    {%- endfor -%}
+                    {%- if mapping_count > 0 and attached_count == mapping_count -%}true{%- else -%}false{%- endif -%}
 
               # CreateSnapshots is the first mutation and runs only after the
               # exact post-approval and immediate pre-mutation evidence matches.
               - name: continue_only_when_final_evidence_matches
                 type: if
-                condition: "${{ steps.get_caller_identity_final.error == nil and steps.parse_final_caller_identity.output.caller_account_id == variables.target_account_id and steps.describe_instance_final.error == nil and steps.describe_instance_pre_mutation.error == nil and steps.parse_approved_instance_evidence.output.owner_id == variables.target_account_id and steps.parse_final_instance_evidence.output.owner_id == variables.target_account_id and steps.parse_pre_mutation_instance_evidence.output.owner_id == variables.target_account_id and steps.parse_approved_instance_evidence.output.instance_id == variables.instance_id and steps.parse_final_instance_evidence.output.instance_id == variables.instance_id and steps.parse_pre_mutation_instance_evidence.output.instance_id == variables.instance_id and steps.parse_approved_instance_evidence.output.volume_ids != blank and steps.parse_final_instance_evidence.output.volume_ids != blank and steps.parse_pre_mutation_instance_evidence.output.volume_ids != blank and steps.parse_final_instance_evidence.output.volume_ids == steps.parse_approved_instance_evidence.output.volume_ids and steps.parse_pre_mutation_instance_evidence.output.volume_ids == steps.parse_approved_instance_evidence.output.volume_ids and steps.classify_final_volume_evidence.output.final_volume_evidence_valid == 'true' }}"
+                condition: "${{ steps.get_caller_identity_final.error == nil and steps.parse_final_caller_identity.output.caller_account_id == variables.target_account_id and steps.describe_instance_final.error == nil and steps.describe_instance_pre_mutation.error == nil and steps.parse_approved_instance_evidence.output.owner_id == variables.target_account_id and steps.parse_final_instance_evidence.output.owner_id == variables.target_account_id and steps.parse_pre_mutation_instance_evidence.output.owner_id == variables.target_account_id and steps.parse_approved_instance_evidence.output.instance_id == variables.instance_id and steps.parse_final_instance_evidence.output.instance_id == variables.instance_id and steps.parse_pre_mutation_instance_evidence.output.instance_id == variables.instance_id and steps.parse_approved_instance_evidence.output.volume_ids != blank and steps.parse_final_instance_evidence.output.volume_ids != blank and steps.parse_pre_mutation_instance_evidence.output.volume_ids != blank and steps.parse_final_instance_evidence.output.volume_ids == steps.parse_approved_instance_evidence.output.volume_ids and steps.parse_pre_mutation_instance_evidence.output.volume_ids == steps.parse_approved_instance_evidence.output.volume_ids and steps.parse_pre_mutation_instance_evidence.output.attachment_states_valid == 'true' and steps.classify_final_volume_evidence.output.final_volume_evidence_valid == 'true' }}"
                 steps:
                   - name: create_snapshots
                     type: aws.request
@@ -540,13 +567,13 @@ steps:
                         type: while
                         condition: "${{ variables.snapshot_verification_state == 'pending' or variables.snapshot_verification_state == 'read_retry' }}"
                         max-iterations:
-                          limit: 6
+                          limit: "{{ consts.snapshot_verification_attempts }}"
                           on-limit: continue
                         steps:
                           - name: snapshot_verification_backoff
                             type: wait
                             with:
-                              duration: 10s
+                              duration: 30s
 
                           - name: reset_snapshot_observations
                             type: data.set
@@ -610,11 +637,13 @@ steps:
                                 {%- assign failures = observations | where: "request_failed", true -%}
                                 {%- assign missing_responses = observations | where: "response_present", false -%}
                                 {%- assign identity_mismatches = observations | where: "identity_matches", false -%}
+                                {%- assign identity_matches = observations | where: "identity_matches", true -%}
+                                {%- assign terminal_errors = identity_matches | where: "state", "error" -%}
                                 {%- assign expected_snapshot_csv = expected_snapshot_ids | join: "," -%}
                                 {%- assign observed_snapshot_csv = observed_snapshot_ids | join: "," -%}
-                                {%- if failures.size > 0 or missing_responses.size > 0 or observations.size != expected_snapshot_ids.size -%}read_retry
+                                {%- if terminal_errors.size > 0 -%}error
+                                {%- elsif failures.size > 0 or missing_responses.size > 0 or observations.size != expected_snapshot_ids.size -%}read_retry
                                 {%- elsif identity_mismatches.size > 0 or observed_snapshot_csv != expected_snapshot_csv -%}invalid
-                                {%- elsif states contains "error" -%}error
                                 {%- elsif states.size == expected_snapshot_ids.size and unique_states.size == 1 and states contains "completed" -%}completed
                                 {%- else -%}
                                   {%- assign recognized_state_count = 0 -%}
