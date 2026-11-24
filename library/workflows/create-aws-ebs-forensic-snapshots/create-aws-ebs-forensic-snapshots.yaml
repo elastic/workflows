@@ -25,8 +25,8 @@ template-metadata:
           ec2:CreateTags. GetCallerIdentity and the EC2 Describe actions require
           Resource "*". Scope CreateSnapshots to the expected instance, source
           volumes, and snapshot resources where supported. Restrict CreateTags
-          to arn:aws:ec2:*:<expected-account-id>:snapshot/* (use the matching
-          partition ARN) with ec2:CreateAction=CreateSnapshots. The connector
+          to arn:aws:ec2:*::snapshot/* (use the matching partition ARN) with
+          ec2:CreateAction=CreateSnapshots. The connector
           must also be allowed to use the source volumes' KMS keys when
           customer-managed encryption policies require it.
         inputType: connector
@@ -368,6 +368,7 @@ steps:
 
               - name: describe_each_final_volume
                 type: foreach
+                if: "${{ steps.get_caller_identity_final.error == nil and steps.parse_final_caller_identity.output.caller_account_id == variables.target_account_id and steps.describe_instance_final.error == nil and steps.parse_final_instance_evidence.output.owner_id == variables.target_account_id and steps.parse_final_instance_evidence.output.instance_id == variables.instance_id and steps.parse_final_instance_evidence.output.volume_ids != blank and steps.parse_final_instance_evidence.output.volume_ids == steps.parse_approved_instance_evidence.output.volume_ids }}"
                 foreach: "${{ steps.parse_final_instance_evidence.output.volume_ids | split: ',' }}"
                 steps:
                   - name: describe_final_volume
@@ -422,11 +423,46 @@ steps:
                     {%- assign valid_observations = variables.final_volume_observations | where: "valid", true -%}
                     {%- if approved_volume_ids.size > 0 and variables.final_volume_observations.size == approved_volume_ids.size and valid_observations.size == approved_volume_ids.size -%}true{%- else -%}false{%- endif -%}
 
+              # Re-read the complete attachment set after the per-volume reads.
+              # A newly attached or detached volume must fail closed before the
+              # CreateSnapshots request can capture an unapproved set.
+              - name: describe_instance_pre_mutation
+                type: aws.request
+                if: "${{ steps.classify_final_volume_evidence.output.final_volume_evidence_valid == 'true' }}"
+                connector-id: __install__.aws-connector
+                on-failure:
+                  continue: true
+                with:
+                  service: ec2
+                  region: "{{ variables.region }}"
+                  query:
+                    Action: DescribeInstances
+                    Version: "2016-11-15"
+                    InstanceId.1: "{{ variables.instance_id }}"
+
+              - name: parse_pre_mutation_instance_evidence
+                type: data.set
+                with:
+                  owner_id: "{{ steps.describe_instance_pre_mutation.output.data | default: '' | split: '<reservationSet>' | last | split: '<instancesSet>' | first | split: '<ownerId>' | last | split: '</ownerId>' | first | strip }}"
+                  instance_id: "{{ steps.describe_instance_pre_mutation.output.data | default: '' | split: '<instanceId>' | last | split: '</instanceId>' | first | strip }}"
+                  volume_ids: >-
+                    {%- assign volume_ids = "" | split: "" -%}
+                    {%- assign volume_segments = steps.describe_instance_pre_mutation.output.data | default: "" | split: "<volumeId>" -%}
+                    {%- for segment in volume_segments -%}
+                      {%- if segment contains "</volumeId>" -%}
+                        {%- assign volume_id = segment | split: "</volumeId>" | first | strip -%}
+                        {%- if volume_id != "" -%}
+                          {%- assign volume_ids = volume_ids | push: volume_id -%}
+                        {%- endif -%}
+                      {%- endif -%}
+                    {%- endfor -%}
+                    {{- volume_ids | compact | uniq | sort | join: "," -}}
+
               # CreateSnapshots is the first mutation and runs only after the
-              # exact post-approval instance and volume evidence matches.
+              # exact post-approval and immediate pre-mutation evidence matches.
               - name: continue_only_when_final_evidence_matches
                 type: if
-                condition: "${{ steps.get_caller_identity_final.error == nil and steps.parse_final_caller_identity.output.caller_account_id == variables.target_account_id and steps.describe_instance_final.error == nil and steps.parse_approved_instance_evidence.output.owner_id == variables.target_account_id and steps.parse_final_instance_evidence.output.owner_id == variables.target_account_id and steps.parse_approved_instance_evidence.output.instance_id == variables.instance_id and steps.parse_final_instance_evidence.output.instance_id == variables.instance_id and steps.parse_approved_instance_evidence.output.volume_ids != blank and steps.parse_final_instance_evidence.output.volume_ids != blank and steps.parse_final_instance_evidence.output.volume_ids == steps.parse_approved_instance_evidence.output.volume_ids and steps.classify_final_volume_evidence.output.final_volume_evidence_valid == 'true' }}"
+                condition: "${{ steps.get_caller_identity_final.error == nil and steps.parse_final_caller_identity.output.caller_account_id == variables.target_account_id and steps.describe_instance_final.error == nil and steps.describe_instance_pre_mutation.error == nil and steps.parse_approved_instance_evidence.output.owner_id == variables.target_account_id and steps.parse_final_instance_evidence.output.owner_id == variables.target_account_id and steps.parse_pre_mutation_instance_evidence.output.owner_id == variables.target_account_id and steps.parse_approved_instance_evidence.output.instance_id == variables.instance_id and steps.parse_final_instance_evidence.output.instance_id == variables.instance_id and steps.parse_pre_mutation_instance_evidence.output.instance_id == variables.instance_id and steps.parse_approved_instance_evidence.output.volume_ids != blank and steps.parse_final_instance_evidence.output.volume_ids != blank and steps.parse_pre_mutation_instance_evidence.output.volume_ids != blank and steps.parse_final_instance_evidence.output.volume_ids == steps.parse_approved_instance_evidence.output.volume_ids and steps.parse_pre_mutation_instance_evidence.output.volume_ids == steps.parse_approved_instance_evidence.output.volume_ids and steps.classify_final_volume_evidence.output.final_volume_evidence_valid == 'true' }}"
                 steps:
                   - name: create_snapshots
                     type: aws.request
@@ -498,11 +534,11 @@ steps:
                           snapshot_verification_observations: []
 
                       # Poll only DescribeSnapshots. CreateSnapshots is never
-                      # retried. A verified pending/created state is a successful
-                      # bounded outcome; only read failures are retried.
+                      # retried. Exact pending pairs stay in the bounded poll so
+                      # later completed or error transitions are observed.
                       - name: poll_snapshots_to_completion
                         type: while
-                        condition: "${{ variables.snapshot_verification_state == 'pending' }}"
+                        condition: "${{ variables.snapshot_verification_state == 'pending' or variables.snapshot_verification_state == 'read_retry' }}"
                         max-iterations:
                           limit: 6
                           on-limit: continue
@@ -576,7 +612,7 @@ steps:
                                 {%- assign identity_mismatches = observations | where: "identity_matches", false -%}
                                 {%- assign expected_snapshot_csv = expected_snapshot_ids | join: "," -%}
                                 {%- assign observed_snapshot_csv = observed_snapshot_ids | join: "," -%}
-                                {%- if failures.size > 0 or missing_responses.size > 0 or observations.size != expected_snapshot_ids.size -%}pending
+                                {%- if failures.size > 0 or missing_responses.size > 0 or observations.size != expected_snapshot_ids.size -%}read_retry
                                 {%- elsif identity_mismatches.size > 0 or observed_snapshot_csv != expected_snapshot_csv -%}invalid
                                 {%- elsif states contains "error" -%}error
                                 {%- elsif states.size == expected_snapshot_ids.size and unique_states.size == 1 and states contains "completed" -%}completed
@@ -585,18 +621,18 @@ steps:
                                   {%- for state in states -%}
                                     {%- if state == "pending" or state == "completed" -%}{%- assign recognized_state_count = recognized_state_count | plus: 1 -%}{%- endif -%}
                                   {%- endfor -%}
-                                  {%- if recognized_state_count == expected_snapshot_ids.size -%}created_pending{%- else -%}invalid{%- endif -%}
+                                  {%- if recognized_state_count == expected_snapshot_ids.size -%}pending{%- else -%}invalid{%- endif -%}
                                 {%- endif -%}
 
                       - name: report_snapshot_verification
                         type: if
-                        condition: "${{ variables.snapshot_verification_state == 'completed' or variables.snapshot_verification_state == 'created_pending' }}"
+                        condition: "${{ variables.snapshot_verification_state == 'completed' }}"
                         steps:
                           - name: log_snapshots_created
                             type: console
                             with:
                               message: |-
-                                Outcome: {% if variables.snapshot_verification_state == "completed" %}verified_completed{% else %}created_pending{% endif %}; CreateSnapshots returned exact one-to-one snapshot/volume pairs for the approved canonical volume set. {% if variables.snapshot_verification_state == "completed" %}Every explicit snapshot ID reached completed.{% else %}Every explicit snapshot ID was verified in pending or completed state; creation succeeded, but at least one snapshot was still pending and must be checked later.{% endif %}
+                                Outcome: verified_completed; CreateSnapshots returned exact one-to-one snapshot/volume pairs for the approved canonical volume set, and every explicit snapshot ID reached completed.
                                 Account: {{ variables.target_account_id }}.
                                 Instance: {{ variables.instance_id }}.
                                 Region: {{ variables.region }}.
@@ -617,7 +653,7 @@ steps:
                             type: console
                             with:
                               message: |-
-                                Outcome: verification_failed; exact snapshot-to-volume identity, a recognized state, or a successful bounded verification read could not be established.
+                                Outcome: {% if variables.snapshot_verification_state == "pending" %}partial_completion_timeout; exact snapshot-to-volume pairs were verified, but at least one snapshot remained pending after bounded polling, so completion was not established{% elsif variables.snapshot_verification_state == "read_retry" %}verification_read_timeout; bounded polling ended without a complete successful verification read{% elsif variables.snapshot_verification_state == "error" %}snapshot_error; at least one exact snapshot pair transitioned to the AWS error state{% else %}verification_failed; exact snapshot-to-volume identity or a recognized state could not be established{% endif %}.
                                 Verification state: {{ variables.snapshot_verification_state }}.
                                 Account: {{ variables.target_account_id }}.
                                 Instance: {{ variables.instance_id }}.
@@ -632,8 +668,10 @@ steps:
                           - name: fail_snapshot_verification
                             type: workflow.fail
                             with:
-                              message: "EBS snapshots were created, but bounded verification could not establish exact snapshot-to-volume identity in pending or completed state."
-                              reason: snapshot_verification_failed
+                              message: >-
+                                {% if variables.snapshot_verification_state == "pending" %}EBS snapshots were created and exact pairs were verified, but bounded polling timed out before every snapshot completed.{% elsif variables.snapshot_verification_state == "error" %}At least one verified EBS snapshot entered the AWS error state before completion.{% else %}EBS snapshots were created, but bounded verification could not establish a complete exact snapshot-to-volume result.{% endif %}
+                              reason: >-
+                                {% if variables.snapshot_verification_state == "pending" %}snapshot_completion_timeout{% elsif variables.snapshot_verification_state == "read_retry" %}snapshot_verification_read_timeout{% elsif variables.snapshot_verification_state == "error" %}snapshot_error{% else %}snapshot_verification_failed{% endif %}
                     else:
                       - name: log_snapshot_mutation_or_coverage_failed
                         type: console
@@ -665,11 +703,13 @@ steps:
                         Final owner/instance: {{ steps.parse_final_instance_evidence.output.owner_id | default: '(missing)' }} / {{ steps.parse_final_instance_evidence.output.instance_id | default: '(missing)' }}.
                         Approved canonical volume IDs: {{ steps.parse_approved_instance_evidence.output.volume_ids | default: '(missing)' }}.
                         Final canonical volume IDs: {{ steps.parse_final_instance_evidence.output.volume_ids | default: '(missing)' }}.
+                        Immediate pre-mutation canonical volume IDs: {{ steps.parse_pre_mutation_instance_evidence.output.volume_ids | default: '(missing)' }}.
                         Final volume attachment/state observations: {{ variables.final_volume_observations | default: '(missing)' | json }}.
                         Final responder: {{ steps.request_final_approval.output.respondedBy }}.
                         Final notes: {{ steps.request_final_approval.output.response.notes | default: '(none)' }}.
                         STS error: {{ steps.get_caller_identity_final.error | default: '(none)' | json }}.
                         Final DescribeInstances error: {{ steps.describe_instance_final.error | default: '(none)' | json }}.
+                        Immediate pre-mutation DescribeInstances error: {{ steps.describe_instance_pre_mutation.error | default: '(none)' | json }}.
                         Rollback: none is needed because no mutation was attempted.
                   - name: fail_final_evidence_changed
                     type: workflow.fail
