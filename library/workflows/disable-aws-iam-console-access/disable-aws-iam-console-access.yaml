@@ -7,12 +7,13 @@ template-metadata:
     Delete an AWS IAM user's login profile after account and identity checks,
     explicit analyst approval, and a fresh pre-mutation read. Alert-driven runs
     require per-alert action mode and the AWS integration's request-parameter
-    retention mode to be All or Flattened. This blocks new password-based
-    console sign-ins but does not revoke active sessions, assumed-role access,
-    or API credentials. CloudTrail targets use the resource-side recipient
-    account; normalized non-CloudTrail targets use cloud.account.id. The AWS
-    connector uses sts:GetCallerIdentity and requires iam:GetUser,
-    iam:GetLoginProfile, and iam:DeleteLoginProfile.
+    retention mode to be All or Flattened. Flattened userName values require
+    AWS CloudTrail dataset and IAM event-provider provenance. This blocks new
+    password-based console sign-ins but does not revoke active sessions,
+    assumed-role access, or API credentials. CloudTrail targets use the
+    resource-side recipient account; normalized non-CloudTrail targets use
+    cloud.account.id. The AWS connector uses sts:GetCallerIdentity and requires
+    iam:GetUser, iam:GetLoginProfile, and iam:DeleteLoginProfile.
   solutions: [security]
   categories: [response]
   install:
@@ -65,20 +66,51 @@ steps:
     with:
       alert_count: "{% if event.alerts %}{{ event.alerts.size }}{% else %}0{% endif %}"
       batch_state: "{% if event.alerts and event.alerts.size > 1 %}multiple{% else %}safe{% endif %}"
-      user_name: "{{ event.alerts[0].aws.cloudtrail.flattened.request_parameters.userName | default: event.alerts[0].user.target.name | default: inputs.user_name }}"
+      cloudtrail_state: >-
+        {%- assign event_dataset = event.alerts[0].event.dataset | default: '' | strip | downcase -%}
+        {%- assign stream_dataset = event.alerts[0].data_stream.dataset | default: '' | strip | downcase -%}
+        {%- if event_dataset == 'aws.cloudtrail' or stream_dataset == 'aws.cloudtrail' -%}cloudtrail
+        {%- else -%}other{%- endif -%}
+      user_name: >-
+        {%- assign event_dataset = event.alerts[0].event.dataset | default: '' | strip | downcase -%}
+        {%- assign stream_dataset = event.alerts[0].data_stream.dataset | default: '' | strip | downcase -%}
+        {%- assign event_provider = event.alerts[0].event.provider | default: '' | strip | downcase -%}
+        {%- assign flattened_user = event.alerts[0].aws.cloudtrail.flattened.request_parameters.userName | default: '' | strip -%}
+        {%- assign normalized_user = event.alerts[0].user.target.name | default: '' | strip -%}
+        {%- assign manual_user = inputs.user_name | default: '' | strip -%}
+        {%- if event_provider == 'iam.amazonaws.com' and flattened_user != blank -%}
+          {%- if event_dataset == 'aws.cloudtrail' or stream_dataset == 'aws.cloudtrail' -%}{{ flattened_user }}
+          {%- elsif normalized_user != blank -%}{{ normalized_user }}{%- endif -%}
+        {%- elsif normalized_user != blank -%}{{ normalized_user }}
+        {%- elsif event.alerts -%}
+        {%- else -%}{{ manual_user }}{%- endif -%}
       target_source: >-
-        {%- if event.alerts[0].aws.cloudtrail.flattened.request_parameters.userName != blank -%}cloudtrail
-        {%- elsif event.alerts[0].user.target.name != blank -%}normalized
+        {%- assign event_dataset = event.alerts[0].event.dataset | default: '' | strip | downcase -%}
+        {%- assign stream_dataset = event.alerts[0].data_stream.dataset | default: '' | strip | downcase -%}
+        {%- assign event_provider = event.alerts[0].event.provider | default: '' | strip | downcase -%}
+        {%- assign flattened_user = event.alerts[0].aws.cloudtrail.flattened.request_parameters.userName | default: '' | strip -%}
+        {%- if event_provider == 'iam.amazonaws.com' and flattened_user != blank -%}
+          {%- if event_dataset == 'aws.cloudtrail' or stream_dataset == 'aws.cloudtrail' -%}IAM CloudTrail request parameter
+          {%- elsif event.alerts[0].user.target.name != blank -%}normalized alert field
+          {%- else -%}untrusted flattened field rejected{%- endif -%}
+        {%- elsif event.alerts[0].user.target.name != blank -%}normalized alert field
+        {%- elsif event.alerts -%}missing
         {%- else -%}manual{%- endif -%}
-      account_id: >-
-        {%- if event.alerts[0].aws.cloudtrail.flattened.request_parameters.userName != blank -%}{{ event.alerts[0].aws.cloudtrail.recipient_account_id }}
-        {%- elsif event.alerts[0].user.target.name != blank -%}{{ event.alerts[0].cloud.account.id }}
-        {%- elsif event.alerts -%}{%- else -%}{{ consts.expected_account_id }}{%- endif -%}
+      target_account_id: >-
+        {%- assign event_dataset = event.alerts[0].event.dataset | default: '' | strip | downcase -%}
+        {%- assign stream_dataset = event.alerts[0].data_stream.dataset | default: '' | strip | downcase -%}
+        {%- if event_dataset == 'aws.cloudtrail' or stream_dataset == 'aws.cloudtrail' -%}{{ event.alerts[0].aws.cloudtrail.recipient_account_id | default: '' | strip }}
+        {%- elsif event.alerts[0].user.target.name != blank -%}{{ event.alerts[0].cloud.account.id | default: '' | strip }}
+        {%- elsif event.alerts -%}
+        {%- else -%}{{ consts.expected_account_id | default: '' | strip }}{%- endif -%}
       account_source: >-
-        {%- if event.alerts[0].aws.cloudtrail.flattened.request_parameters.userName != blank -%}CloudTrail recipient account
+        {%- assign event_dataset = event.alerts[0].event.dataset | default: '' | strip | downcase -%}
+        {%- assign stream_dataset = event.alerts[0].data_stream.dataset | default: '' | strip | downcase -%}
+        {%- if event_dataset == 'aws.cloudtrail' or stream_dataset == 'aws.cloudtrail' -%}CloudTrail recipient account
         {%- elsif event.alerts[0].user.target.name != blank -%}normalized cloud.account.id
         {%- else -%}manual expected account{%- endif -%}
-      alert_id: "{{ event.alerts[0].kibana.alert.uuid | default: event.alerts[0]._id | default: 'manual' }}"
+      expected_account_id: "{{ consts.expected_account_id | default: '' | strip }}"
+      alert_id: "{{ event.alerts[0].kibana.alert.uuid | default: event.alerts[0]._id | default: 'manual' | strip }}"
 
   - name: enforce_single_alert
     type: if
@@ -87,11 +119,11 @@ steps:
       # Missing targets or account context stop before connector access.
       - name: validate_target
         type: if
-        condition: "${{ variables.user_name != blank and variables.account_id != blank }}"
+        condition: "${{ variables.user_name != blank and variables.target_account_id != blank and variables.expected_account_id != blank }}"
         steps:
           - name: require_expected_alert_account
             type: if
-            condition: "${{ variables.account_id == consts.expected_account_id }}"
+            condition: "${{ variables.target_account_id == variables.expected_account_id }}"
             steps:
               - name: get_connector_identity
                 type: aws.request
@@ -109,11 +141,11 @@ steps:
               - name: parse_connector_account
                 type: data.set
                 with:
-                  account_id: "{{ steps.get_connector_identity.output.data.GetCallerIdentityResponse.GetCallerIdentityResult.Account | default: '' }}"
+                  connector_account_id: "{{ steps.get_connector_identity.output.data.GetCallerIdentityResponse.GetCallerIdentityResult.Account | default: '' | strip }}"
 
               - name: require_expected_connector_account
                 type: if
-                condition: "${{ steps.parse_connector_account.output.account_id == consts.expected_account_id }}"
+                condition: "${{ steps.parse_connector_account.output.connector_account_id == variables.expected_account_id }}"
                 steps:
                   - name: get_user_before
                     type: aws.request
@@ -133,10 +165,11 @@ steps:
                     type: data.set
                     with:
                       user_id: "{{ steps.get_user_before.output.data.GetUserResponse.GetUserResult.User.UserId | default: '' }}"
+                      returned_user_name: "{{ steps.get_user_before.output.data.GetUserResponse.GetUserResult.User.UserName | default: '' | strip }}"
 
                   - name: continue_with_known_user
                     type: if
-                    condition: "${{ steps.parse_user_identity_before.output.user_id != blank }}"
+                    condition: "${{ steps.parse_user_identity_before.output.user_id != blank and steps.parse_user_identity_before.output.returned_user_name == variables.user_name }}"
                     steps:
                       - name: get_login_profile_before
                         type: aws.request
@@ -160,13 +193,13 @@ steps:
                           profile_create_date: "{{ steps.get_login_profile_before.output.data.GetLoginProfileResponse.GetLoginProfileResult.LoginProfile.CreateDate | default: '' }}"
                           profile_password_reset: >-
                             {% assign profile_password_reset = steps.get_login_profile_before.output.data.GetLoginProfileResponse.GetLoginProfileResult.LoginProfile.PasswordResetRequired -%}
-                            {% if profile_password_reset == true %}true{% elsif profile_password_reset == false %}false{% endif %}
+                            {% if profile_password_reset == true %}true{% elsif profile_password_reset == false %}false{% else %}not_returned{% endif %}
                           state: >-
                             {% assign error_message = steps.get_login_profile_before.error.message | default: '' -%}
                             {% assign profile_user_name = steps.get_login_profile_before.output.data.GetLoginProfileResponse.GetLoginProfileResult.LoginProfile.UserName | default: '' -%}
                             {% assign profile_create_date = steps.get_login_profile_before.output.data.GetLoginProfileResponse.GetLoginProfileResult.LoginProfile.CreateDate | default: '' -%}
                             {% assign profile_password_reset = steps.get_login_profile_before.output.data.GetLoginProfileResponse.GetLoginProfileResult.LoginProfile.PasswordResetRequired -%}
-                            {% if steps.get_login_profile_before.error == nil and profile_user_name == variables.user_name and profile_create_date != blank and profile_password_reset != nil %}exists{% elsif error_message contains 'AWS iam request failed with status 404:' and error_message contains 'NoSuchEntity' %}absent{% else %}failed{% endif %}
+                            {% if steps.get_login_profile_before.error == nil and profile_user_name == variables.user_name and profile_create_date != blank %}exists{% elsif error_message contains 'AWS iam request failed with status 404:' and error_message contains 'NoSuchEntity' %}absent{% else %}failed{% endif %}
 
                       - name: continue_only_when_profile_exists
                         type: if
@@ -179,7 +212,9 @@ steps:
                               message: |-
                                 Approve deleting the AWS IAM console login profile?
 
-                                Account: {{ variables.account_id }}
+                                Target account: {{ variables.target_account_id }}
+                                Connector account: {{ steps.parse_connector_account.output.connector_account_id }}
+                                Target evidence: {{ steps.resolve_context.output.target_source }}
                                 Account evidence: {{ steps.resolve_context.output.account_source }}
                                 User: {{ variables.user_name }}
                                 Immutable UserId: {{ steps.parse_user_identity_before.output.user_id }}
@@ -211,6 +246,19 @@ steps:
                             condition: "${{ steps.request_approval.output.response.approved == true }}"
                             steps:
                               # Fresh reads bind the mutation to the approved identity and state.
+                              - name: get_connector_identity_fresh
+                                type: aws.request
+                                connector-id: __install__.aws-connector
+                                on-failure:
+                                  continue: true
+                                with:
+                                  service: sts
+                                  headers:
+                                    Accept: application/json
+                                  query:
+                                    Action: GetCallerIdentity
+                                    Version: "2011-06-15"
+
                               - name: get_user_fresh
                                 type: aws.request
                                 connector-id: __install__.aws-connector
@@ -243,12 +291,18 @@ steps:
                                 type: data.set
                                 with:
                                   state: >-
+                                    {% assign fresh_connector_account =
+                                    steps.get_connector_identity_fresh.output.data.GetCallerIdentityResponse.GetCallerIdentityResult.Account
+                                    | default: '' | strip -%}
                                     {% assign fresh_user_id =
                                     steps.get_user_fresh.output.data.GetUserResponse.GetUserResult.User.UserId
                                     | default: '' -%} {% assign
+                                    fresh_user_name =
+                                    steps.get_user_fresh.output.data.GetUserResponse.GetUserResult.User.UserName
+                                    | default: '' | strip -%} {% assign
                                     fresh_profile_user =
                                     steps.get_login_profile_fresh.output.data.GetLoginProfileResponse.GetLoginProfileResult.LoginProfile.UserName
-                                    | default: '' -%} {% assign
+                                    | default: '' | strip -%} {% assign
                                     fresh_profile_created =
                                     steps.get_login_profile_fresh.output.data.GetLoginProfileResponse.GetLoginProfileResult.LoginProfile.CreateDate
                                     | default: '' -%} {% assign
@@ -258,8 +312,8 @@ steps:
                                     steps.get_login_profile_fresh.output.data.GetLoginProfileResponse.GetLoginProfileResult.LoginProfile.PasswordResetRequired
                                     -%}
                                     {% assign approved_reset = steps.classify_pre_read.output.profile_password_reset -%}
-                                    {% if fresh_profile_reset == true %}{% assign normalized_fresh_reset = 'true' %}{% elsif fresh_profile_reset == false %}{% assign normalized_fresh_reset = 'false' %}{% else %}{% assign normalized_fresh_reset = '' %}{% endif -%}
-                                    {% if steps.get_user_fresh.error == nil and steps.get_login_profile_fresh.error == nil and fresh_user_id == steps.parse_user_identity_before.output.user_id and fresh_profile_user == variables.user_name and fresh_profile_user == steps.classify_pre_read.output.profile_user_name and normalized_fresh_profile_created != blank and normalized_fresh_profile_created == steps.classify_pre_read.output.profile_create_date and fresh_profile_reset != nil and normalized_fresh_reset == approved_reset %}unchanged{% else %}stale_or_failed{% endif %}
+                                    {% if fresh_profile_reset == true %}{% assign normalized_fresh_reset = 'true' %}{% elsif fresh_profile_reset == false %}{% assign normalized_fresh_reset = 'false' %}{% else %}{% assign normalized_fresh_reset = 'not_returned' %}{% endif -%}
+                                    {% if steps.get_connector_identity_fresh.error == nil and fresh_connector_account == variables.expected_account_id and fresh_connector_account == variables.target_account_id and fresh_connector_account == steps.parse_connector_account.output.connector_account_id and steps.get_user_fresh.error == nil and steps.get_login_profile_fresh.error == nil and fresh_user_id == steps.parse_user_identity_before.output.user_id and fresh_user_name == variables.user_name and fresh_profile_user == variables.user_name and fresh_profile_user == steps.classify_pre_read.output.profile_user_name and normalized_fresh_profile_created != blank and normalized_fresh_profile_created == steps.classify_pre_read.output.profile_create_date and normalized_fresh_reset == approved_reset %}unchanged{% else %}stale_or_failed{% endif %}
 
                               - name: mutate_only_when_evidence_matches
                                 type: if
@@ -332,7 +386,8 @@ steps:
                                             with:
                                               message: |-
                                                 Outcome: verified; DeleteLoginProfile succeeded and an exact NoSuchEntity 404 verified absence.
-                                                Account: {{ variables.account_id }}.
+                                                Target account: {{ variables.target_account_id }}.
+                                                Connector account: {{ steps.parse_connector_account.output.connector_account_id }}.
                                                 Account evidence: {{ steps.resolve_context.output.account_source }}.
                                                 User: {{ variables.user_name }}.
                                                 UserId: {{ steps.parse_user_identity_before.output.user_id }}.
@@ -351,7 +406,8 @@ steps:
                                             with:
                                               message: |-
                                                 Outcome: verification_failed; DeleteLoginProfile succeeded, but exact NoSuchEntity 404 absence was not established after three GetLoginProfile attempts.
-                                                Account: {{ variables.account_id }}.
+                                                Target account: {{ variables.target_account_id }}.
+                                                Connector account: {{ steps.parse_connector_account.output.connector_account_id }}.
                                                 User: {{ variables.user_name }}.
                                                 UserId: {{ steps.parse_user_identity_before.output.user_id }}.
                                                 Alert: {{ variables.alert_id }}.
@@ -375,7 +431,8 @@ steps:
                                         with:
                                           message: |-
                                             Outcome: mutation_failed; DeleteLoginProfile returned an error and no verification read was used to attribute deletion.
-                                            Account: {{ variables.account_id }}.
+                                            Target account: {{ variables.target_account_id }}.
+                                            Connector account: {{ steps.parse_connector_account.output.connector_account_id }}.
                                             User: {{ variables.user_name }}.
                                             UserId: {{ steps.parse_user_identity_before.output.user_id }}.
                                             Alert: {{ variables.alert_id }}.
@@ -397,7 +454,9 @@ steps:
                                     with:
                                       message: |-
                                         Outcome: no_change; approved IAM identity or login-profile evidence changed, or a fresh read failed. No DeleteLoginProfile request was made.
-                                        Account: {{ variables.account_id }}.
+                                        Target account: {{ variables.target_account_id }}.
+                                        Connector account before approval: {{ steps.parse_connector_account.output.connector_account_id }}.
+                                        Fresh connector account: {{ steps.get_connector_identity_fresh.output.data.GetCallerIdentityResponse.GetCallerIdentityResult.Account | default: '(unverified)' }}.
                                         User: {{ variables.user_name }}.
                                         Approved UserId: {{ steps.parse_user_identity_before.output.user_id }}.
                                         Fresh-read state: {{ steps.compare_fresh_evidence.output.state }}.
@@ -418,7 +477,8 @@ steps:
                                 with:
                                   message: |-
                                     Outcome: no_change; no DeleteLoginProfile request was made because remediation was rejected.
-                                    Account: {{ variables.account_id }}.
+                                    Target account: {{ variables.target_account_id }}.
+                                    Connector account: {{ steps.parse_connector_account.output.connector_account_id }}.
                                     User: {{ variables.user_name }}.
                                     UserId: {{ steps.parse_user_identity_before.output.user_id }}.
                                     Alert: {{ variables.alert_id }}.
@@ -435,7 +495,8 @@ steps:
                                 with:
                                   message: |-
                                     Outcome: no_change; the IAM user has no console login profile, so no approval or mutation was issued.
-                                    Account: {{ variables.account_id }}.
+                                    Target account: {{ variables.target_account_id }}.
+                                    Connector account: {{ steps.parse_connector_account.output.connector_account_id }}.
                                     User: {{ variables.user_name }}.
                                     UserId: {{ steps.parse_user_identity_before.output.user_id }}.
                                     Alert: {{ variables.alert_id }}.
@@ -445,7 +506,8 @@ steps:
                                 with:
                                   message: |-
                                     Outcome: no_change; GetLoginProfile failed before approval with an unrecognized result.
-                                    Account: {{ variables.account_id }}.
+                                    Target account: {{ variables.target_account_id }}.
+                                    Connector account: {{ steps.parse_connector_account.output.connector_account_id }}.
                                     User: {{ variables.user_name }}.
                                     Alert: {{ variables.alert_id }}.
                                     Error: {{ steps.get_login_profile_before.error.message | default: steps.get_login_profile_before.error }}.
@@ -463,7 +525,8 @@ steps:
                         with:
                           message: |-
                             Outcome: no_change; GetUser failed or returned no UserId, so identity could not be bound before approval.
-                            Account: {{ variables.account_id }}.
+                            Target account: {{ variables.target_account_id }}.
+                            Connector account: {{ steps.parse_connector_account.output.connector_account_id }}.
                             User: {{ variables.user_name }}.
                             Alert: {{ variables.alert_id }}.
                             Error: {{ steps.get_user_before.error.message | default: steps.get_user_before.error | default: '(missing UserId)' }}.
@@ -480,16 +543,16 @@ steps:
                     with:
                       message: |-
                         Outcome: no_change; the AWS connector account could not be verified as the expected account.
-                        Expected account: {{ consts.expected_account_id }}.
-                        Alert/manual account: {{ variables.account_id }}.
-                        Connector account: {{ steps.parse_connector_account.output.account_id | default: '(unverified)' }}.
+                        Expected account: {{ variables.expected_account_id }}.
+                        Target alert/manual account: {{ steps.resolve_context.output.target_account_id | default: '(missing)' }}.
+                        Connector account: {{ steps.parse_connector_account.output.connector_account_id | default: '(unverified)' }}.
                         STS error: {{ steps.get_connector_identity.error | default: '(none)' }}.
                   - name: fail_connector_account_mismatch
                     type: workflow.fail
                     with:
                       message: >-
                         The AWS connector account could not be established as
-                        expected account {{ consts.expected_account_id }}.
+                        expected account {{ variables.expected_account_id }}.
                       reason: connector_account_mismatch
             else:
               - name: log_alert_account_mismatch
@@ -497,17 +560,17 @@ steps:
                 with:
                   message: |-
                     Outcome: no_change; alert account does not match the configured expected account.
-                    Expected account: {{ consts.expected_account_id }}.
-                    Alert account: {{ variables.account_id | default: '(missing)' }}.
+                    Expected account: {{ variables.expected_account_id }}.
+                    Target alert account: {{ steps.resolve_context.output.target_account_id | default: '(missing)' }}.
                     User: {{ variables.user_name }}.
                     Alert: {{ variables.alert_id }}.
               - name: fail_alert_account_mismatch
                 type: workflow.fail
                 with:
                   message: >-
-                    Resource-side account {{ variables.account_id | default: '(missing)' }}
+                    Resource-side account {{ steps.resolve_context.output.target_account_id | default: '(missing)' }}
                     from {{ steps.resolve_context.output.account_source }} does
-                    not match expected account {{ consts.expected_account_id }}.
+                    not match expected account {{ variables.expected_account_id }}.
                   reason: alert_account_mismatch
         else:
           - name: log_missing_target
@@ -515,9 +578,9 @@ steps:
             with:
               message: |-
                 Outcome: no_change; IAM console-access remediation was skipped because the target user or account was missing.
-                Expected alert fields: user.target.name with cloud.account.id, or aws.cloudtrail.flattened.request_parameters.userName with aws.cloudtrail.recipient_account_id.
+                Expected alert fields: user.target.name with cloud.account.id, or an aws.cloudtrail dataset IAM event.provider with aws.cloudtrail.flattened.request_parameters.userName and aws.cloudtrail.recipient_account_id.
                 Alert-driven runs require CloudTrail request-parameter retention set to All or Flattened.
-                Expected account: {{ consts.expected_account_id }}.
+                Expected account: {{ variables.expected_account_id }}.
                 Alert: {{ variables.alert_id }}.
           - name: fail_missing_target
             type: workflow.fail
@@ -535,7 +598,7 @@ steps:
           message: |-
             Outcome: no_change; received {{ steps.resolve_context.output.alert_count }} alerts, but this destructive workflow accepts at most one alert per execution.
             Configure the rule action to run per alert. No AWS request or approval was issued.
-            Expected account: {{ consts.expected_account_id }}.
+            Expected account: {{ variables.expected_account_id }}.
       - name: fail_alert_batch_rejected
         type: workflow.fail
         with:
