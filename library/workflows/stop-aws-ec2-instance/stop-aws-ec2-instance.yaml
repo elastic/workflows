@@ -412,7 +412,7 @@ steps:
 
                                   - name: reconcile_ambiguous_stop_error
                                     type: while
-                                    condition: "${{ variables.stop_error_reconciliation_state != 'stopped' and variables.stop_error_reconciliation_state != 'stopping' and variables.stop_error_reconciliation_state != 'unexpected' and variables.stop_error_reconciliation_state != 'identity_mismatch' }}"
+                                    condition: "${{ variables.stop_error_reconciliation_state != 'stopped' and variables.stop_error_reconciliation_state != 'unexpected' and variables.stop_error_reconciliation_state != 'identity_mismatch' }}"
                                     max-iterations:
                                       limit: 6
                                       on-limit: continue
