@@ -7,8 +7,11 @@ template-metadata:
     Block an IP or domain on the Windows firewall with netsh, through the
     Elastic Defend execute response action. Run it from a security alert and
     it reads agent.id and dns.question.name (or source.ip / destination.ip
-    when the alert has no domain). Manual inputs override the alert. Requires
-    Elastic Defend on Windows with the Execute response action allowed.
+    when the alert has no domain). Private, loopback, link-local, and
+    consts.protected_ips addresses are never blocked. A domain is resolved on
+    the endpoint and only logged unless consts.block_resolved_domain_ips is
+    yes. Manual inputs override the alert. Requires Elastic Defend on Windows
+    with the Execute response action allowed.
   solutions: [security]
   categories: [response]
 
@@ -18,12 +21,15 @@ description: >
   response action. Run it from a security alert to block that alert's domain
   or IP on the alerting Windows endpoint. The workflow reads agent.id and
   dns.question.name from the alert, and uses source.ip or destination.ip when
-  the alert has no domain. An address that matches host.ip is skipped. 
-  Fill the manual inputs only to override the alert or to run without one. 
-  netsh advfirewall adds inbound and outbound block rules. 
-  A domain is resolved on the endpoint first, so a later DNS change is
-  not picked up until the workflow runs again. Re-running replaces rules that
-  use the same name.
+  the alert has no domain. An address that matches host.ip is skipped.
+  Private, loopback, and link-local addresses are refused, as is any address
+  listed in consts.protected_ips. Fill the manual inputs only to override the
+  alert or to run without one. netsh advfirewall adds inbound and outbound
+  block rules. A domain is resolved on the endpoint. Leave
+  consts.block_resolved_domain_ips as no to only log those addresses. Set it
+  to yes to block the public ones. That can block a shared CDN address and
+  cut off other sites on that host. A later DNS change is not picked up until
+  the workflow runs again. Re-running replaces rules that use the same name.
 enabled: true
 tags:
   - security
@@ -47,8 +53,9 @@ triggers:
         required: false
         default: ""
         description: >-
-          Domain name to resolve on the endpoint and block. Leave empty to
-          use the alert's dns.question.name or destination.domain.
+          Domain name to resolve on the endpoint. Addresses are logged unless
+          consts.block_resolved_domain_ips is yes. Leave empty to use the
+          alert's dns.question.name or destination.domain.
       - name: agent_ids
         type: string
         required: false
@@ -71,6 +78,14 @@ consts:
   # Caps how many agent IDs one manual run will update.
   max_agents: 25
   execute_timeout_seconds: 120
+  # Exact addresses that must never be blocked: fleet, Elasticsearch, DNS,
+  # domain controllers. Comma-separated. Private, loopback, and link-local
+  # ranges are refused even when this list is empty.
+  protected_ips: ""
+  # Domain runs resolve A and AAAA on the endpoint. no only logs those
+  # addresses. yes blocks the public ones and skips protected addresses.
+  # A shared CDN address then blocks other sites for that host.
+  block_resolved_domain_ips: "no"
 
 steps:
   # Alert values fill any input left blank. A typed input overrides the alert.
@@ -229,6 +244,56 @@ steps:
         {%- if agents != '' and steps.normalize_inputs.output.agent_invalid_chars == '' and agents_double == false and agent_edge != ',' and agent_tail != ',' and agent_count > 0 and agent_count <= consts.max_agents -%}
         {%- assign agents_ok = true -%}
         {%- endif -%}
+        {%- assign protected = consts.protected_ips | default: '' | downcase | replace: ' ', '' | strip -%}
+        {%- assign protected_bad = protected | remove: '0' | remove: '1' | remove: '2' | remove: '3' | remove: '4' | remove: '5' | remove: '6' | remove: '7' | remove: '8' | remove: '9' | remove: 'a' | remove: 'b' | remove: 'c' | remove: 'd' | remove: 'e' | remove: 'f' | remove: '.' | remove: ':' | remove: ',' -%}
+        {%- if protected contains ',,' -%}{%- assign protected_bad = 'x' -%}{%- endif -%}
+        {%- assign protected_edge = protected | slice: 0, 1 -%}
+        {%- assign protected_tail = protected | slice: -1, 1 -%}
+        {%- if protected != '' -%}
+        {%- if protected_edge == ',' -%}{%- assign protected_bad = 'x' -%}{%- endif -%}
+        {%- if protected_tail == ',' -%}{%- assign protected_bad = 'x' -%}{%- endif -%}
+        {%- endif -%}
+        {%- assign reserved = false -%}
+        {%- if ipv4 -%}
+        {%- if o0 == 0 -%}{%- assign reserved = true -%}{%- endif -%}
+        {%- if o0 == 10 -%}{%- assign reserved = true -%}{%- endif -%}
+        {%- if o0 == 127 -%}{%- assign reserved = true -%}{%- endif -%}
+        {%- if o0 == 169 -%}
+        {%- if o1 == 254 -%}{%- assign reserved = true -%}{%- endif -%}
+        {%- endif -%}
+        {%- if o0 == 192 -%}
+        {%- if o1 == 168 -%}{%- assign reserved = true -%}{%- endif -%}
+        {%- endif -%}
+        {%- if o0 == 172 -%}
+        {%- if o1 >= 16 -%}
+        {%- if o1 <= 31 -%}{%- assign reserved = true -%}{%- endif -%}
+        {%- endif -%}
+        {%- endif -%}
+        {%- endif -%}
+        {%- if ipv6 -%}
+        {%- assign v6prefix3 = ip | slice: 0, 3 -%}
+        {%- assign v6prefix2 = ip | slice: 0, 2 -%}
+        {%- assign v6mapped = ip | slice: 0, 7 -%}
+        {%- if ip == '::1' -%}{%- assign reserved = true -%}{%- endif -%}
+        {%- if ip == '::' -%}{%- assign reserved = true -%}{%- endif -%}
+        {%- if ip == '0:0:0:0:0:0:0:1' -%}{%- assign reserved = true -%}{%- endif -%}
+        {%- if v6prefix3 == 'fe8' -%}{%- assign reserved = true -%}{%- endif -%}
+        {%- if v6prefix3 == 'fe9' -%}{%- assign reserved = true -%}{%- endif -%}
+        {%- if v6prefix3 == 'fea' -%}{%- assign reserved = true -%}{%- endif -%}
+        {%- if v6prefix3 == 'feb' -%}{%- assign reserved = true -%}{%- endif -%}
+        {%- if v6prefix2 == 'fc' -%}{%- assign reserved = true -%}{%- endif -%}
+        {%- if v6prefix2 == 'fd' -%}{%- assign reserved = true -%}{%- endif -%}
+        {%- if v6mapped == '::ffff:' -%}{%- assign reserved = true -%}{%- endif -%}
+        {%- endif -%}
+        {%- assign listed = false -%}
+        {%- if ip != '' -%}
+        {%- assign protected_hay = ',' | append: protected | append: ',' -%}
+        {%- assign protected_needle = ',' | append: ip | append: ',' -%}
+        {%- if protected_hay contains protected_needle -%}{%- assign listed = true -%}{%- endif -%}
+        {%- endif -%}
+        {%- assign blocked_ip = false -%}
+        {%- if reserved -%}{%- assign blocked_ip = true -%}{%- endif -%}
+        {%- if listed -%}{%- assign blocked_ip = true -%}{%- endif -%}
         {%- assign kind = 'invalid' -%}
         {%- if ip != '' and domain != '' -%}
         {%- elsif ipv4 or ipv6 -%}
@@ -238,14 +303,20 @@ steps:
         {%- endif -%}
         {%- assign target_ok = false -%}
         {%- if domain == '' -%}
-        {%- if ipv4 or ipv6 -%}{%- assign target_ok = true -%}{%- endif -%}
+        {%- if ipv4 or ipv6 -%}
+        {%- if blocked_ip == false -%}{%- assign target_ok = true -%}{%- endif -%}
+        {%- endif -%}
         {%- elsif ip == '' -%}
         {%- if domain_ok -%}{%- assign target_ok = true -%}{%- endif -%}
         {%- endif -%}
         {%- assign ready = 'no' -%}
-        {%- if target_ok and agents_ok -%}{%- assign ready = 'yes' -%}{%- endif -%}
+        {%- if target_ok and agents_ok -%}
+        {%- if protected_bad == '' -%}{%- assign ready = 'yes' -%}{%- endif -%}
+        {%- endif -%}
         {%- assign reason = '' -%}
-        {%- if ip != '' and domain != '' -%}
+        {%- if protected_bad != '' -%}
+        {%- assign reason = 'consts.protected_ips must be comma-separated IP addresses.' -%}
+        {%- elsif ip != '' and domain != '' -%}
         {%- assign reason = 'Enter a source IP or a domain, not both.' -%}
         {%- elsif ip == '' and domain == '' -%}
         {%- assign reason = 'Enter a source IP or a domain.' -%}
@@ -261,6 +332,8 @@ steps:
         {%- assign reason = 'source_ip must be one IPv4 or IPv6 address.' -%}
         {%- elsif domain != '' and domain_ok == false -%}
         {%- assign reason = 'domain must be a hostname such as example.com.' -%}
+        {%- elsif blocked_ip -%}
+        {%- assign reason = 'Refusing to block a private, loopback, link-local, or protected address.' -%}
         {%- endif -%}
         {{- kind -}}|{{- ready -}}|{{- reason -}}
 
@@ -273,8 +346,9 @@ steps:
 
   # IP: one cmd.exe chain of netsh delete-then-add, so a second run replaces
   # the same rule names. Domain: Windows PowerShell resolves A and AAAA on
-  # the endpoint, then calls netsh for each address. netsh is the command
-  # that changes the firewall in both cases.
+  # the endpoint. Protected addresses are skipped. netsh runs only when
+  # consts.block_resolved_domain_ips is yes. Otherwise the script logs the
+  # resolved addresses and does not change the firewall.
   - name: build_command
     type: data.set
     with:
@@ -289,7 +363,11 @@ steps:
         cmd.exe /c "netsh advfirewall firewall delete rule name={{ rule_in }} & netsh advfirewall firewall add rule name={{ rule_in }} dir=in action=block remoteip={{ target }} enable=yes profile=any & netsh advfirewall firewall delete rule name={{ rule_out }} & netsh advfirewall firewall add rule name={{ rule_out }} dir=out action=block remoteip={{ target }} enable=yes profile=any & echo FIREWALL_RULES_SET"
         {%- else -%}
         {%- assign target = steps.normalize_inputs.output.domain -%}
-        powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "$n='{{ target }}'; $prefix='{{ consts.rule_prefix }}'; $ips=@(Resolve-DnsName -Name $n -Type A -ErrorAction SilentlyContinue | Where-Object { $_.IPAddress } | Select-Object -ExpandProperty IPAddress); $ips6=@(Resolve-DnsName -Name $n -Type AAAA -ErrorAction SilentlyContinue | Where-Object { $_.IPAddress } | Select-Object -ExpandProperty IPAddress); $all=@($ips+$ips6 | Where-Object { $_ } | Select-Object -Unique); if(-not $all){ Write-Output 'NO_ADDRESSES'; exit 2 }; foreach($ip in $all){ $safe=($n + '-' + ($ip -replace ':','-')); if($safe.Length -gt 180){ $safe=$safe.Substring(0,180) }; $in=($prefix + '-' + $safe + '-in'); $out=($prefix + '-' + $safe + '-out'); & netsh.exe advfirewall firewall delete rule name=$in | Out-Null; & netsh.exe advfirewall firewall add rule name=$in dir=in action=block remoteip=$ip enable=yes profile=any | Out-Null; if($LASTEXITCODE -ne 0){ Write-Output ('ADD_FAILED ' + $ip + ' in'); exit 3 }; & netsh.exe advfirewall firewall delete rule name=$out | Out-Null; & netsh.exe advfirewall firewall add rule name=$out dir=out action=block remoteip=$ip enable=yes profile=any | Out-Null; if($LASTEXITCODE -ne 0){ Write-Output ('ADD_FAILED ' + $ip + ' out'); exit 3 }; Write-Output ('BLOCKED ' + $ip) }; Write-Output 'FIREWALL_RULES_SET'"
+        {%- assign protected = consts.protected_ips | default: '' | downcase | replace: ' ', '' | strip -%}
+        {%- assign block_domains = 'no' -%}
+        {%- assign block_flag = consts.block_resolved_domain_ips | default: 'no' | strip | downcase -%}
+        {%- if block_flag == 'yes' -%}{%- assign block_domains = 'yes' -%}{%- endif -%}
+        powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "$n='{{ target }}'; $prefix='{{ consts.rule_prefix }}'; $block='{{ block_domains }}'; $protected='{{ protected }}'; $ips=@(Resolve-DnsName -Name $n -Type A -ErrorAction SilentlyContinue | Where-Object { $_.IPAddress } | Select-Object -ExpandProperty IPAddress); $ips6=@(Resolve-DnsName -Name $n -Type AAAA -ErrorAction SilentlyContinue | Where-Object { $_.IPAddress } | Select-Object -ExpandProperty IPAddress); $all=@($ips+$ips6 | Where-Object { $_ } | Select-Object -Unique); if(-not $all){ Write-Output 'NO_ADDRESSES'; exit 2 }; $guard=@($protected -split ',' | Where-Object { $_ }); $blocked=0; foreach($ip in $all){ $skip=$false; if($guard -contains $ip){ $skip=$true }; if(-not $skip){ $parsed=$null; if(-not [System.Net.IPAddress]::TryParse($ip, [ref]$parsed)){ $skip=$true } else { $b=$parsed.GetAddressBytes(); if($parsed.AddressFamily -eq [System.Net.Sockets.AddressFamily]::InterNetwork){ if($b[0] -eq 0 -or $b[0] -eq 10 -or $b[0] -eq 127 -or ($b[0] -eq 169 -and $b[1] -eq 254) -or ($b[0] -eq 192 -and $b[1] -eq 168) -or ($b[0] -eq 172 -and $b[1] -ge 16 -and $b[1] -le 31)){ $skip=$true } } else { if([System.Net.IPAddress]::IsLoopback($parsed) -or ($b[0] -eq 0xfe -and (($b[1] -band 0xc0) -eq 0x80)) -or (($b[0] -band 0xfe) -eq 0xfc)){ $skip=$true } } } }; if($skip){ Write-Output ('SKIPPED_PROTECTED ' + $ip); continue }; if($block -ne 'yes'){ Write-Output ('RESOLVED ' + $ip); continue }; $safe=($n + '-' + ($ip -replace ':','-')); if($safe.Length -gt 180){ $safe=$safe.Substring(0,180) }; $in=($prefix + '-' + $safe + '-in'); $out=($prefix + '-' + $safe + '-out'); & netsh.exe advfirewall firewall delete rule name=$in | Out-Null; & netsh.exe advfirewall firewall add rule name=$in dir=in action=block remoteip=$ip enable=yes profile=any | Out-Null; if($LASTEXITCODE -ne 0){ Write-Output ('ADD_FAILED ' + $ip + ' in'); exit 3 }; & netsh.exe advfirewall firewall delete rule name=$out | Out-Null; & netsh.exe advfirewall firewall add rule name=$out dir=out action=block remoteip=$ip enable=yes profile=any | Out-Null; if($LASTEXITCODE -ne 0){ Write-Output ('ADD_FAILED ' + $ip + ' out'); exit 3 }; Write-Output ('BLOCKED ' + $ip); $blocked++ }; if($block -ne 'yes'){ Write-Output 'RESOLVED_ONLY'; exit 0 }; if($blocked -eq 0){ Write-Output 'NO_PUBLIC_ADDRESSES'; exit 4 }; Write-Output 'FIREWALL_RULES_SET'"
         {%- endif -%}
 
   - name: log_request
@@ -301,6 +379,7 @@ steps:
         source_ip={{ steps.normalize_inputs.output.source_ip }}
         domain={{ steps.normalize_inputs.output.domain }}
         agents={{ steps.normalize_inputs.output.agent_ids }}
+        block_resolved_domain_ips={{ consts.block_resolved_domain_ips }}
         {% if steps.classify_block.output.ready != 'yes' %}rejected={{ steps.classify_block.output.reject_reason | strip }}{% endif %}
 
   - name: when_ready
@@ -345,7 +424,7 @@ steps:
                     agent_type: endpoint
                     endpoint_ids:
                       - "{{ foreach.item[0] }}"
-                    comment: "Workflow Block Windows Firewall — block {{ steps.normalize_inputs.output.source_ip }}{{ steps.normalize_inputs.output.domain }} inbound and outbound."
+                    comment: "Workflow Block Windows Firewall — {{ steps.normalize_inputs.output.source_ip }}{{ steps.normalize_inputs.output.domain }}. Domain addresses are logged unless consts.block_resolved_domain_ips is yes. Protected addresses are skipped."
                     parameters:
                       command: "{{ steps.build_command.output.command }}"
                       timeout: 120
