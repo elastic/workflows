@@ -489,8 +489,16 @@ steps:
                     {%- for mapping in mappings -%}
                       {%- if mapping contains "<ebs>" and mapping contains "</ebs>" -%}
                         {%- assign ebs = mapping | split: "<ebs>" | last | split: "</ebs>" | first -%}
-                        {%- assign volume_id = ebs | split: "<volumeId>" | last | split: "</volumeId>" | first | strip | default: "(missing)" -%}
-                        {%- assign attachment_status = ebs | split: "<status>" | last | split: "</status>" | first | strip | default: "(missing)" -%}
+                        {%- if ebs contains "<volumeId>" and ebs contains "</volumeId>" -%}
+                          {%- assign volume_id = ebs | split: "<volumeId>" | last | split: "</volumeId>" | first | strip | default: "(missing)" -%}
+                        {%- else -%}
+                          {%- assign volume_id = "(missing)" -%}
+                        {%- endif -%}
+                        {%- if ebs contains "<status>" and ebs contains "</status>" -%}
+                          {%- assign attachment_status = ebs | split: "<status>" | last | split: "</status>" | first | strip | default: "(missing)" -%}
+                        {%- else -%}
+                          {%- assign attachment_status = "(missing)" -%}
+                        {%- endif -%}
                         {%- capture observation -%}{{ volume_id }}={{ attachment_status }}{%- endcapture -%}
                         {%- assign observations = observations | push: observation -%}
                       {%- endif -%}
