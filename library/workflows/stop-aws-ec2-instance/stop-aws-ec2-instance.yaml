@@ -409,6 +409,8 @@ steps:
                                       stop_error_reconciliation_state: unknown
                                       stop_error_reconciliation_request_id: ""
                                       stop_error_reconciliation_error: ""
+                                      stop_error_last_verified_state: unknown
+                                      stop_error_last_verified_request_id: ""
 
                                   - name: reconcile_ambiguous_stop_error
                                     type: while
@@ -443,6 +445,19 @@ steps:
                                           stop_error_reconciliation_request_id: "{{ steps.describe_instance_after_stop_error.output.data | default: '' | split: '<requestId>' | last | split: '</requestId>' | first | strip }}"
                                           stop_error_reconciliation_error: "{{ steps.describe_instance_after_stop_error.error | default: '' | json }}"
 
+                                      - name: remember_verified_stop_error_reconciliation
+                                        type: data.set
+                                        if: "${{ variables.stop_error_reconciliation_state == 'stopped' or variables.stop_error_reconciliation_state == 'stopping' or variables.stop_error_reconciliation_state == 'running' }}"
+                                        with:
+                                          stop_error_last_verified_state: "{{ variables.stop_error_reconciliation_state }}"
+                                          stop_error_last_verified_request_id: "{{ variables.stop_error_reconciliation_request_id }}"
+
+                                  - name: classify_stop_error_reconciliation_result
+                                    type: data.set
+                                    with:
+                                      stop_error_reconciliation_in_progress: >-
+                                        {% if variables.stop_error_reconciliation_state == 'stopping' %}true{% elsif variables.stop_error_reconciliation_state == 'unknown' and variables.stop_error_last_verified_state == 'stopping' %}true{% else %}false{% endif %}
+
                                   - name: report_stop_error_reconciliation
                                     type: if
                                     condition: "${{ variables.stop_error_reconciliation_state == 'stopped' }}"
@@ -464,13 +479,17 @@ steps:
                                     else:
                                       - name: classify_reconciled_stop_in_progress
                                         type: if
-                                        condition: "${{ variables.stop_error_reconciliation_state == 'stopping' }}"
+                                        condition: "${{ steps.classify_stop_error_reconciliation_result.output.stop_error_reconciliation_in_progress == 'true' }}"
                                         steps:
                                           - name: log_reconciled_stop_in_progress
                                             type: console
                                             with:
                                               message: |-
-                                                Outcome: stopping; StopInstances returned a connector error, but read-only reconciliation verified that the instance is stopping. StopInstances was not retried.
+                                                Outcome: stopping; StopInstances returned a connector error, and read-only reconciliation verified that the instance was stopping at least once. StopInstances was not retried.
+                                                Latest classified state: {{ variables.stop_error_reconciliation_state }}.
+                                                Last verified reconciliation state: {{ variables.stop_error_last_verified_state }}.
+                                                Last verified request ID: {{ variables.stop_error_last_verified_request_id | default: '(not reported)' }}.
+                                                Latest reconciliation error: {{ variables.stop_error_reconciliation_error | default: '(none)' }}.
                                                 Completion is not confirmed. Investigate the instance and, if appropriate, obtain separate authorization before considering an EC2 force stop.
                                                 Target account: {{ variables.target_account_id }}.
                                                 Connector account: {{ variables.expected_account_id }}.
@@ -493,6 +512,8 @@ steps:
                                               message: |-
                                                 Outcome: mutation_failed_unknown; StopInstances returned an error and bounded read-only reconciliation did not establish that AWS accepted it. StopInstances was not retried.
                                                 Reconciled state: {{ variables.stop_error_reconciliation_state }}.
+                                                Last verified reconciliation state: {{ variables.stop_error_last_verified_state }}.
+                                                Last verified request ID: {{ variables.stop_error_last_verified_request_id | default: '(not reported)' }}.
                                                 Target account: {{ variables.target_account_id }}.
                                                 Connector account: {{ variables.expected_account_id }}.
                                                 Instance ID: {{ variables.instance_id }}.
