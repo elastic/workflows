@@ -363,6 +363,7 @@ steps:
                                             with:
                                               message: |-
                                                 Outcome: stopping; AWS accepted StopInstances and the instance remained in the documented stopping state after 10 minutes of read-only polling. StopInstances was not retried.
+                                                Completion is not confirmed. Investigate the instance and, if appropriate, obtain separate authorization before considering an EC2 force stop.
                                                 Target account: {{ variables.target_account_id }}.
                                                 Connector account: {{ variables.expected_account_id }}.
                                                 Instance ID: {{ variables.instance_id }}.
@@ -372,6 +373,11 @@ steps:
                                                 Verification request ID: {{ variables.post_stop_verification_request_id | default: '(not reported)' }}.
                                                 Responder: {{ steps.request_approval.output.respondedBy }}.
                                                 Notes: {{ steps.request_approval.output.response.notes | default: '(none)' }}.
+                                          - name: fail_stop_still_in_progress
+                                            type: workflow.fail
+                                            with:
+                                              message: "The EC2 instance remained stopping after bounded verification; completion is not confirmed."
+                                              reason: instance_stop_still_in_progress
                                         else:
                                           - name: log_post_stop_verification_failed
                                             type: console
@@ -439,13 +445,13 @@ steps:
 
                                   - name: report_stop_error_reconciliation
                                     type: if
-                                    condition: "${{ variables.stop_error_reconciliation_state == 'stopped' or variables.stop_error_reconciliation_state == 'stopping' }}"
+                                    condition: "${{ variables.stop_error_reconciliation_state == 'stopped' }}"
                                     steps:
                                       - name: log_reconciled_stop_error
                                         type: console
                                         with:
                                           message: |-
-                                            Outcome: {{ variables.stop_error_reconciliation_state }}; StopInstances returned a connector error, but read-only reconciliation verified that the instance is {{ variables.stop_error_reconciliation_state }}. StopInstances was not retried.
+                                            Outcome: stopped; StopInstances returned a connector error, but read-only reconciliation verified that the instance is stopped. StopInstances was not retried.
                                             Target account: {{ variables.target_account_id }}.
                                             Connector account: {{ variables.expected_account_id }}.
                                             Instance ID: {{ variables.instance_id }}.
@@ -453,26 +459,55 @@ steps:
                                             Alert: {{ variables.alert_id }}.
                                             Verification request ID: {{ variables.stop_error_reconciliation_request_id | default: '(not reported)' }}.
                                             Mutation error: {{ steps.stop_instance.error | json }}.
+                                            Responder: {{ steps.request_approval.output.respondedBy }}.
+                                            Notes: {{ steps.request_approval.output.response.notes | default: '(none)' }}.
                                     else:
-                                      - name: log_stop_attempt_failed
-                                        type: console
-                                        with:
-                                          message: |-
-                                            Outcome: mutation_failed_unknown; StopInstances returned an error and bounded read-only reconciliation did not establish that AWS accepted it. StopInstances was not retried.
-                                            Reconciled state: {{ variables.stop_error_reconciliation_state }}.
-                                            Target account: {{ variables.target_account_id }}.
-                                            Connector account: {{ variables.expected_account_id }}.
-                                            Instance ID: {{ variables.instance_id }}.
-                                            Region: {{ variables.region }}.
-                                            Alert: {{ variables.alert_id }}.
-                                            Verification request ID: {{ variables.stop_error_reconciliation_request_id | default: '(not reported)' }}.
-                                            Verification error: {{ variables.stop_error_reconciliation_error | default: '(none)' }}.
-                                            Mutation error: {{ steps.stop_instance.error | json }}.
-                                      - name: fail_stop_attempt
-                                        type: workflow.fail
-                                        with:
-                                          message: "StopInstances failed and its effect remains unknown for {{ variables.instance_id }}."
-                                          reason: stop_instances_effect_unknown
+                                      - name: classify_reconciled_stop_in_progress
+                                        type: if
+                                        condition: "${{ variables.stop_error_reconciliation_state == 'stopping' }}"
+                                        steps:
+                                          - name: log_reconciled_stop_in_progress
+                                            type: console
+                                            with:
+                                              message: |-
+                                                Outcome: stopping; StopInstances returned a connector error, but read-only reconciliation verified that the instance is stopping. StopInstances was not retried.
+                                                Completion is not confirmed. Investigate the instance and, if appropriate, obtain separate authorization before considering an EC2 force stop.
+                                                Target account: {{ variables.target_account_id }}.
+                                                Connector account: {{ variables.expected_account_id }}.
+                                                Instance ID: {{ variables.instance_id }}.
+                                                Region: {{ variables.region }}.
+                                                Alert: {{ variables.alert_id }}.
+                                                Verification request ID: {{ variables.stop_error_reconciliation_request_id | default: '(not reported)' }}.
+                                                Mutation error: {{ steps.stop_instance.error | json }}.
+                                                Responder: {{ steps.request_approval.output.respondedBy }}.
+                                                Notes: {{ steps.request_approval.output.response.notes | default: '(none)' }}.
+                                          - name: fail_reconciled_stop_still_in_progress
+                                            type: workflow.fail
+                                            with:
+                                              message: "The EC2 instance is stopping after an ambiguous StopInstances error; completion is not confirmed."
+                                              reason: reconciled_stop_still_in_progress
+                                        else:
+                                          - name: log_stop_attempt_failed
+                                            type: console
+                                            with:
+                                              message: |-
+                                                Outcome: mutation_failed_unknown; StopInstances returned an error and bounded read-only reconciliation did not establish that AWS accepted it. StopInstances was not retried.
+                                                Reconciled state: {{ variables.stop_error_reconciliation_state }}.
+                                                Target account: {{ variables.target_account_id }}.
+                                                Connector account: {{ variables.expected_account_id }}.
+                                                Instance ID: {{ variables.instance_id }}.
+                                                Region: {{ variables.region }}.
+                                                Alert: {{ variables.alert_id }}.
+                                                Verification request ID: {{ variables.stop_error_reconciliation_request_id | default: '(not reported)' }}.
+                                                Verification error: {{ variables.stop_error_reconciliation_error | default: '(none)' }}.
+                                                Mutation error: {{ steps.stop_instance.error | json }}.
+                                                Responder: {{ steps.request_approval.output.respondedBy }}.
+                                                Notes: {{ steps.request_approval.output.response.notes | default: '(none)' }}.
+                                          - name: fail_stop_attempt
+                                            type: workflow.fail
+                                            with:
+                                              message: "StopInstances failed and its effect remains unknown for {{ variables.instance_id }}."
+                                              reason: stop_instances_effect_unknown
                             else:
                               - name: log_stale_instance_context
                                 type: console
@@ -625,12 +660,18 @@ steps:
                                         with:
                                           message: |-
                                             Outcome: stopping; the instance was already stopping, StopInstances was skipped, and it remained stopping after 10 minutes of read-only polling.
+                                            Completion is not confirmed. Investigate the instance and, if appropriate, obtain separate authorization before considering an EC2 force stop.
                                             Target account: {{ variables.target_account_id }}.
                                             Connector account: {{ variables.expected_account_id }}.
                                             Instance ID: {{ variables.instance_id }}.
                                             Region: {{ variables.region }}.
                                             Alert: {{ variables.alert_id }}.
                                             Verification request ID: {{ variables.initial_stopping_verification_request_id | default: '(not reported)' }}.
+                                      - name: fail_initial_stop_still_in_progress
+                                        type: workflow.fail
+                                        with:
+                                          message: "The initially stopping EC2 instance remained stopping after bounded verification; completion is not confirmed."
+                                          reason: initial_stop_still_in_progress
                                     else:
                                       - name: log_initial_stopping_verification_failed
                                         type: console
