@@ -1,0 +1,545 @@
+template-metadata:
+  slug: disable-aws-iam-console-access
+  version: "1.0.0"
+  availability: ">=9.7.0"
+  name: "Disable AWS IAM Console Access"
+  description: >-
+    Delete an AWS IAM user's login profile after account and identity checks,
+    explicit analyst approval, and a fresh pre-mutation read. Alert-driven runs
+    require per-alert action mode and the AWS integration's request-parameter
+    retention mode to be All or Flattened. This blocks new password-based
+    console sign-ins but does not revoke active sessions, assumed-role access,
+    or API credentials. CloudTrail targets use the resource-side recipient
+    account; normalized non-CloudTrail targets use cloud.account.id. The AWS
+    connector uses sts:GetCallerIdentity and requires iam:GetUser,
+    iam:GetLoginProfile, and iam:DeleteLoginProfile.
+  solutions: [security]
+  categories: [response]
+  install:
+    form:
+      - name: aws-connector
+        label: "AWS connector"
+        description: >-
+          AWS connector for the expected account with permission to identify
+          itself and read and delete login profiles for in-scope IAM users.
+        inputType: connector
+        connectorType: .aws
+        required: true
+      - name: expected-account-id
+        label: "Expected AWS account ID"
+        description: >-
+          Twelve-digit AWS account ID that must match both the alert and the
+          selected AWS connector before this workflow can read or change a user.
+        inputType: text
+        required: true
+
+name: Disable AWS IAM Console Access
+description: |
+  Resolve the target IAM user from user.target.name or the parsed CloudTrail
+  request parameter, verify the alert and connector account, capture the IAM
+  UserId and login profile, require analyst approval, then repeat both reads.
+  DeleteLoginProfile runs only when the fresh identity and profile exactly match
+  the approved evidence. Alert-driven runs require a per-alert rule action and
+  AWS CloudTrail request-parameter retention set to All or Flattened. Deleting a
+  login profile does not revoke active sessions, assumed-role access, access
+  keys, or other API credentials. The final read immediately before deletion
+  narrows but cannot close the race between that read and the mutation.
+
+consts:
+  expected_account_id: "__install__.expected-account-id"
+
+triggers:
+  - type: alert
+  - type: manual
+    inputs:
+      - name: user_name
+        type: string
+        description: AWS IAM user whose console login profile will be deleted.
+        required: true
+        default: ""
+
+steps:
+  # Summary-mode alert batches are rejected; configure the rule action per alert.
+  - name: resolve_context
+    type: data.set
+    with:
+      alert_count: "{% if event.alerts %}{{ event.alerts.size }}{% else %}0{% endif %}"
+      batch_state: "{% if event.alerts and event.alerts.size > 1 %}multiple{% else %}safe{% endif %}"
+      user_name: "{{ event.alerts[0].aws.cloudtrail.flattened.request_parameters.userName | default: event.alerts[0].user.target.name | default: inputs.user_name }}"
+      target_source: >-
+        {%- if event.alerts[0].aws.cloudtrail.flattened.request_parameters.userName != blank -%}cloudtrail
+        {%- elsif event.alerts[0].user.target.name != blank -%}normalized
+        {%- else -%}manual{%- endif -%}
+      account_id: >-
+        {%- if event.alerts[0].aws.cloudtrail.flattened.request_parameters.userName != blank -%}{{ event.alerts[0].aws.cloudtrail.recipient_account_id }}
+        {%- elsif event.alerts[0].user.target.name != blank -%}{{ event.alerts[0].cloud.account.id }}
+        {%- elsif event.alerts -%}{%- else -%}{{ consts.expected_account_id }}{%- endif -%}
+      account_source: >-
+        {%- if event.alerts[0].aws.cloudtrail.flattened.request_parameters.userName != blank -%}CloudTrail recipient account
+        {%- elsif event.alerts[0].user.target.name != blank -%}normalized cloud.account.id
+        {%- else -%}manual expected account{%- endif -%}
+      alert_id: "{{ event.alerts[0].kibana.alert.uuid | default: event.alerts[0]._id | default: 'manual' }}"
+
+  - name: enforce_single_alert
+    type: if
+    condition: "${{ steps.resolve_context.output.batch_state == 'safe' }}"
+    steps:
+      # Missing targets or account context stop before connector access.
+      - name: validate_target
+        type: if
+        condition: "${{ variables.user_name != blank and variables.account_id != blank }}"
+        steps:
+          - name: require_expected_alert_account
+            type: if
+            condition: "${{ variables.account_id == consts.expected_account_id }}"
+            steps:
+              - name: get_connector_identity
+                type: aws.request
+                connector-id: __install__.aws-connector
+                on-failure:
+                  continue: true
+                with:
+                  service: sts
+                  headers:
+                    Accept: application/json
+                  query:
+                    Action: GetCallerIdentity
+                    Version: "2011-06-15"
+
+              - name: parse_connector_account
+                type: data.set
+                with:
+                  account_id: "{{ steps.get_connector_identity.output.data.GetCallerIdentityResponse.GetCallerIdentityResult.Account | default: '' }}"
+
+              - name: require_expected_connector_account
+                type: if
+                condition: "${{ steps.parse_connector_account.output.account_id == consts.expected_account_id }}"
+                steps:
+                  - name: get_user_before
+                    type: aws.request
+                    connector-id: __install__.aws-connector
+                    on-failure:
+                      continue: true
+                    with:
+                      service: iam
+                      headers:
+                        Accept: application/json
+                      query:
+                        Action: GetUser
+                        Version: "2010-05-08"
+                        UserName: "{{ variables.user_name }}"
+
+                  - name: parse_user_identity_before
+                    type: data.set
+                    with:
+                      user_id: "{{ steps.get_user_before.output.data.GetUserResponse.GetUserResult.User.UserId | default: '' }}"
+
+                  - name: continue_with_known_user
+                    type: if
+                    condition: "${{ steps.parse_user_identity_before.output.user_id != blank }}"
+                    steps:
+                      - name: get_login_profile_before
+                        type: aws.request
+                        connector-id: __install__.aws-connector
+                        on-failure:
+                          continue: true
+                        with:
+                          service: iam
+                          headers:
+                            Accept: application/json
+                          query:
+                            Action: GetLoginProfile
+                            Version: "2010-05-08"
+                            UserName: "{{ variables.user_name }}"
+
+                      # Only an exact IAM NoSuchEntity 404 is expected absence.
+                      - name: classify_pre_read
+                        type: data.set
+                        with:
+                          profile_user_name: "{{ steps.get_login_profile_before.output.data.GetLoginProfileResponse.GetLoginProfileResult.LoginProfile.UserName | default: '' }}"
+                          profile_create_date: "{{ steps.get_login_profile_before.output.data.GetLoginProfileResponse.GetLoginProfileResult.LoginProfile.CreateDate | default: '' }}"
+                          profile_password_reset: >-
+                            {% assign profile_password_reset = steps.get_login_profile_before.output.data.GetLoginProfileResponse.GetLoginProfileResult.LoginProfile.PasswordResetRequired -%}
+                            {% if profile_password_reset == true %}true{% elsif profile_password_reset == false %}false{% endif %}
+                          state: >-
+                            {% assign error_message = steps.get_login_profile_before.error.message | default: '' -%}
+                            {% assign profile_user_name = steps.get_login_profile_before.output.data.GetLoginProfileResponse.GetLoginProfileResult.LoginProfile.UserName | default: '' -%}
+                            {% assign profile_create_date = steps.get_login_profile_before.output.data.GetLoginProfileResponse.GetLoginProfileResult.LoginProfile.CreateDate | default: '' -%}
+                            {% assign profile_password_reset = steps.get_login_profile_before.output.data.GetLoginProfileResponse.GetLoginProfileResult.LoginProfile.PasswordResetRequired -%}
+                            {% if steps.get_login_profile_before.error == nil and profile_user_name == variables.user_name and profile_create_date != blank and profile_password_reset != nil %}exists{% elsif error_message contains 'AWS iam request failed with status 404:' and error_message contains 'NoSuchEntity' %}absent{% else %}failed{% endif %}
+
+                      - name: continue_only_when_profile_exists
+                        type: if
+                        condition: "${{ steps.classify_pre_read.output.state == 'exists' }}"
+                        steps:
+                          - name: request_approval
+                            type: waitForInput
+                            timeout: 1h
+                            with:
+                              message: |-
+                                Approve deleting the AWS IAM console login profile?
+
+                                Account: {{ variables.account_id }}
+                                Account evidence: {{ steps.resolve_context.output.account_source }}
+                                User: {{ variables.user_name }}
+                                Immutable UserId: {{ steps.parse_user_identity_before.output.user_id }}
+                                Login profile user name: {{ steps.classify_pre_read.output.profile_user_name }}
+                                Login profile create date: {{ steps.classify_pre_read.output.profile_create_date }}
+                                Password reset required: {{ steps.classify_pre_read.output.profile_password_reset }}
+                                Alert: {{ variables.alert_id }}
+                                WARNING: This permanently deletes the user's console password.
+                                It does not revoke active console sessions, assumed-role
+                                sessions, access keys, or other API credentials.
+                                The action cannot be rolled back automatically. Restoring
+                                console access requires an authorized CreateLoginProfile or
+                                password-reset process that provisions new credentials.
+                              schema:
+                                type: object
+                                properties:
+                                  approved:
+                                    type: boolean
+                                    title: Delete the IAM console login profile
+                                    default: false
+                                  notes:
+                                    type: string
+                                    title: Analyst notes
+                                required:
+                                  - approved
+
+                          - name: apply_when_approved
+                            type: if
+                            condition: "${{ steps.request_approval.output.response.approved == true }}"
+                            steps:
+                              # Fresh reads bind the mutation to the approved identity and state.
+                              - name: get_user_fresh
+                                type: aws.request
+                                connector-id: __install__.aws-connector
+                                on-failure:
+                                  continue: true
+                                with:
+                                  service: iam
+                                  headers:
+                                    Accept: application/json
+                                  query:
+                                    Action: GetUser
+                                    Version: "2010-05-08"
+                                    UserName: "{{ variables.user_name }}"
+
+                              - name: get_login_profile_fresh
+                                type: aws.request
+                                connector-id: __install__.aws-connector
+                                on-failure:
+                                  continue: true
+                                with:
+                                  service: iam
+                                  headers:
+                                    Accept: application/json
+                                  query:
+                                    Action: GetLoginProfile
+                                    Version: "2010-05-08"
+                                    UserName: "{{ variables.user_name }}"
+
+                              - name: compare_fresh_evidence
+                                type: data.set
+                                with:
+                                  state: >-
+                                    {% assign fresh_user_id =
+                                    steps.get_user_fresh.output.data.GetUserResponse.GetUserResult.User.UserId
+                                    | default: '' -%} {% assign
+                                    fresh_profile_user =
+                                    steps.get_login_profile_fresh.output.data.GetLoginProfileResponse.GetLoginProfileResult.LoginProfile.UserName
+                                    | default: '' -%} {% assign
+                                    fresh_profile_created =
+                                    steps.get_login_profile_fresh.output.data.GetLoginProfileResponse.GetLoginProfileResult.LoginProfile.CreateDate
+                                    | default: '' -%} {% assign
+                                    normalized_fresh_profile_created =
+                                    fresh_profile_created | append: '' -%} {% assign
+                                    fresh_profile_reset =
+                                    steps.get_login_profile_fresh.output.data.GetLoginProfileResponse.GetLoginProfileResult.LoginProfile.PasswordResetRequired
+                                    -%}
+                                    {% assign approved_reset = steps.classify_pre_read.output.profile_password_reset -%}
+                                    {% if fresh_profile_reset == true %}{% assign normalized_fresh_reset = 'true' %}{% elsif fresh_profile_reset == false %}{% assign normalized_fresh_reset = 'false' %}{% else %}{% assign normalized_fresh_reset = '' %}{% endif -%}
+                                    {% if steps.get_user_fresh.error == nil and steps.get_login_profile_fresh.error == nil and fresh_user_id == steps.parse_user_identity_before.output.user_id and fresh_profile_user == variables.user_name and fresh_profile_user == steps.classify_pre_read.output.profile_user_name and normalized_fresh_profile_created != blank and normalized_fresh_profile_created == steps.classify_pre_read.output.profile_create_date and fresh_profile_reset != nil and normalized_fresh_reset == approved_reset %}unchanged{% else %}stale_or_failed{% endif %}
+
+                              - name: mutate_only_when_evidence_matches
+                                type: if
+                                condition: "${{ steps.compare_fresh_evidence.output.state == 'unchanged' }}"
+                                steps:
+                                  - name: delete_login_profile
+                                    type: aws.request
+                                    connector-id: __install__.aws-connector
+                                    on-failure:
+                                      continue: true
+                                    with:
+                                      service: iam
+                                      headers:
+                                        Accept: application/json
+                                      query:
+                                        Action: DeleteLoginProfile
+                                        Version: "2010-05-08"
+                                        UserName: "{{ variables.user_name }}"
+
+                                  - name: classify_mutation
+                                    type: data.set
+                                    with:
+                                      mutation_succeeded: >-
+                                        {% if steps.delete_login_profile.error == nil %}true{% else %}false{% endif %}
+
+                                  - name: verify_after_successful_mutation
+                                    type: if
+                                    condition: "${{ steps.classify_mutation.output.mutation_succeeded == 'true' }}"
+                                    steps:
+                                      # IAM can be eventually consistent. Retry only GetLoginProfile.
+                                      - name: verify_login_profile_absent
+                                        type: while
+                                        condition: "${{ variables.verification_state != 'absent' }}"
+                                        max-iterations:
+                                          limit: 3
+                                          on-limit: continue
+                                        steps:
+                                          - name: verification_backoff
+                                            type: wait
+                                            with:
+                                              duration: 2s
+
+                                          - name: get_login_profile_after
+                                            type: aws.request
+                                            connector-id: __install__.aws-connector
+                                            on-failure:
+                                              continue: true
+                                            with:
+                                              service: iam
+                                              headers:
+                                                Accept: application/json
+                                              query:
+                                                Action: GetLoginProfile
+                                                Version: "2010-05-08"
+                                                UserName: "{{ variables.user_name }}"
+
+                                          - name: classify_verification_attempt
+                                            type: data.set
+                                            with:
+                                              verification_state: >-
+                                                {% assign error_message = steps.get_login_profile_after.error.message | default: '' -%}
+                                                {% if error_message contains 'AWS iam request failed with status 404:' and error_message contains 'NoSuchEntity' %}absent{% elsif steps.get_login_profile_after.error == nil %}still_exists{% else %}read_failed{% endif %}
+
+                                      - name: finish_verified_deletion
+                                        type: if
+                                        condition: "${{ variables.verification_state == 'absent' }}"
+                                        steps:
+                                          - name: log_approved_audit_result
+                                            type: console
+                                            with:
+                                              message: |-
+                                                Outcome: verified; DeleteLoginProfile succeeded and an exact NoSuchEntity 404 verified absence.
+                                                Account: {{ variables.account_id }}.
+                                                Account evidence: {{ steps.resolve_context.output.account_source }}.
+                                                User: {{ variables.user_name }}.
+                                                UserId: {{ steps.parse_user_identity_before.output.user_id }}.
+                                                Alert: {{ variables.alert_id }}.
+                                                Approved: {{ steps.request_approval.output.response.approved }}.
+                                                Responder: {{ steps.request_approval.output.respondedBy }}.
+                                                Notes: {{ steps.request_approval.output.response.notes | default: '(none)' }}.
+                                                Mutation response: {{ steps.delete_login_profile.output.data | default: '(none)' }}.
+                                                Verification response: {{ steps.get_login_profile_after.output.data | default: '(none)' }}.
+                                                Verification error: {{ steps.get_login_profile_after.error | default: '(none)' }}.
+                                                Containment limitation: deleting the login profile blocks new password-based console sign-ins but does not revoke active sessions, assumed-role access, access keys, or other API credentials.
+                                                Rollback: no automatic rollback is possible; restoring console access requires an authorized process to create a new login profile and password.
+                                        else:
+                                          - name: log_verification_exhausted
+                                            type: console
+                                            with:
+                                              message: |-
+                                                Outcome: verification_failed; DeleteLoginProfile succeeded, but exact NoSuchEntity 404 absence was not established after three GetLoginProfile attempts.
+                                                Account: {{ variables.account_id }}.
+                                                User: {{ variables.user_name }}.
+                                                UserId: {{ steps.parse_user_identity_before.output.user_id }}.
+                                                Alert: {{ variables.alert_id }}.
+                                                Responder: {{ steps.request_approval.output.respondedBy }}.
+                                                Notes: {{ steps.request_approval.output.response.notes | default: '(none)' }}.
+                                                Last verification state: {{ variables.verification_state }}.
+                                                Last verification response: {{ steps.get_login_profile_after.output.data | default: '(none)' }}.
+                                                Last verification error: {{ steps.get_login_profile_after.error | default: '(none)' }}.
+                                                Rollback guidance: verify the profile directly. If it was deleted, restoring console access requires an authorized process to create a new login profile and password.
+                                          - name: fail_verification_exhausted
+                                            type: workflow.fail
+                                            with:
+                                              message: >-
+                                                DeleteLoginProfile succeeded for {{ variables.user_name }},
+                                                but absence was not verified after three
+                                                GetLoginProfile attempts.
+                                              reason: login_profile_absence_not_verified
+                                    else:
+                                      - name: log_mutation_error
+                                        type: console
+                                        with:
+                                          message: |-
+                                            Outcome: mutation_failed; DeleteLoginProfile returned an error and no verification read was used to attribute deletion.
+                                            Account: {{ variables.account_id }}.
+                                            User: {{ variables.user_name }}.
+                                            UserId: {{ steps.parse_user_identity_before.output.user_id }}.
+                                            Alert: {{ variables.alert_id }}.
+                                            Responder: {{ steps.request_approval.output.respondedBy }}.
+                                            Notes: {{ steps.request_approval.output.response.notes | default: '(none)' }}.
+                                            Mutation response: {{ steps.delete_login_profile.output.data | default: '(none)' }}.
+                                            Mutation error: {{ steps.delete_login_profile.error | default: '(none)' }}.
+                                            Rollback guidance: no successful deletion was attributed; verify the login profile before taking any restoration action.
+                                      - name: fail_mutation_error
+                                        type: workflow.fail
+                                        with:
+                                          message: >-
+                                            DeleteLoginProfile failed for IAM user
+                                            {{ variables.user_name }}.
+                                          reason: delete_login_profile_failed
+                                else:
+                                  - name: log_stale_approved_state
+                                    type: console
+                                    with:
+                                      message: |-
+                                        Outcome: no_change; approved IAM identity or login-profile evidence changed, or a fresh read failed. No DeleteLoginProfile request was made.
+                                        Account: {{ variables.account_id }}.
+                                        User: {{ variables.user_name }}.
+                                        Approved UserId: {{ steps.parse_user_identity_before.output.user_id }}.
+                                        Fresh-read state: {{ steps.compare_fresh_evidence.output.state }}.
+                                        Alert: {{ variables.alert_id }}.
+                                        Responder: {{ steps.request_approval.output.respondedBy }}.
+                                        Notes: {{ steps.request_approval.output.response.notes | default: '(none)' }}.
+                                  - name: fail_stale_approved_state
+                                    type: workflow.fail
+                                    with:
+                                      message: >-
+                                        IAM identity or complete login-profile evidence
+                                        changed or could not be read after approval; no
+                                        DeleteLoginProfile request was made.
+                                      reason: stale_approved_state
+                            else:
+                              - name: log_rejected_audit_result
+                                type: console
+                                with:
+                                  message: |-
+                                    Outcome: no_change; no DeleteLoginProfile request was made because remediation was rejected.
+                                    Account: {{ variables.account_id }}.
+                                    User: {{ variables.user_name }}.
+                                    UserId: {{ steps.parse_user_identity_before.output.user_id }}.
+                                    Alert: {{ variables.alert_id }}.
+                                    Approved: {{ steps.request_approval.output.response.approved }}.
+                                    Responder: {{ steps.request_approval.output.respondedBy }}.
+                                    Notes: {{ steps.request_approval.output.response.notes | default: '(none)' }}.
+                        else:
+                          - name: classify_no_change
+                            type: if
+                            condition: "${{ steps.classify_pre_read.output.state == 'absent' }}"
+                            steps:
+                              - name: log_profile_already_absent
+                                type: console
+                                with:
+                                  message: |-
+                                    Outcome: no_change; the IAM user has no console login profile, so no approval or mutation was issued.
+                                    Account: {{ variables.account_id }}.
+                                    User: {{ variables.user_name }}.
+                                    UserId: {{ steps.parse_user_identity_before.output.user_id }}.
+                                    Alert: {{ variables.alert_id }}.
+                            else:
+                              - name: log_pre_read_failure
+                                type: console
+                                with:
+                                  message: |-
+                                    Outcome: no_change; GetLoginProfile failed before approval with an unrecognized result.
+                                    Account: {{ variables.account_id }}.
+                                    User: {{ variables.user_name }}.
+                                    Alert: {{ variables.alert_id }}.
+                                    Error: {{ steps.get_login_profile_before.error.message | default: steps.get_login_profile_before.error }}.
+                              - name: fail_pre_read_error
+                                type: workflow.fail
+                                with:
+                                  message: >-
+                                    GetLoginProfile failed or returned incomplete or
+                                    mismatched evidence for IAM user
+                                    {{ variables.user_name }}.
+                                  reason: login_profile_pre_read_failed
+                    else:
+                      - name: log_user_identity_failure
+                        type: console
+                        with:
+                          message: |-
+                            Outcome: no_change; GetUser failed or returned no UserId, so identity could not be bound before approval.
+                            Account: {{ variables.account_id }}.
+                            User: {{ variables.user_name }}.
+                            Alert: {{ variables.alert_id }}.
+                            Error: {{ steps.get_user_before.error.message | default: steps.get_user_before.error | default: '(missing UserId)' }}.
+                      - name: fail_user_identity_error
+                        type: workflow.fail
+                        with:
+                          message: >-
+                            GetUser failed or returned no immutable UserId for
+                            IAM user {{ variables.user_name }}.
+                          reason: iam_user_identity_unavailable
+                else:
+                  - name: log_connector_account_mismatch
+                    type: console
+                    with:
+                      message: |-
+                        Outcome: no_change; the AWS connector account could not be verified as the expected account.
+                        Expected account: {{ consts.expected_account_id }}.
+                        Alert/manual account: {{ variables.account_id }}.
+                        Connector account: {{ steps.parse_connector_account.output.account_id | default: '(unverified)' }}.
+                        STS error: {{ steps.get_connector_identity.error | default: '(none)' }}.
+                  - name: fail_connector_account_mismatch
+                    type: workflow.fail
+                    with:
+                      message: >-
+                        The AWS connector account could not be established as
+                        expected account {{ consts.expected_account_id }}.
+                      reason: connector_account_mismatch
+            else:
+              - name: log_alert_account_mismatch
+                type: console
+                with:
+                  message: |-
+                    Outcome: no_change; alert account does not match the configured expected account.
+                    Expected account: {{ consts.expected_account_id }}.
+                    Alert account: {{ variables.account_id | default: '(missing)' }}.
+                    User: {{ variables.user_name }}.
+                    Alert: {{ variables.alert_id }}.
+              - name: fail_alert_account_mismatch
+                type: workflow.fail
+                with:
+                  message: >-
+                    Resource-side account {{ variables.account_id | default: '(missing)' }}
+                    from {{ steps.resolve_context.output.account_source }} does
+                    not match expected account {{ consts.expected_account_id }}.
+                  reason: alert_account_mismatch
+        else:
+          - name: log_missing_target
+            type: console
+            with:
+              message: |-
+                Outcome: no_change; IAM console-access remediation was skipped because the target user or account was missing.
+                Expected alert fields: user.target.name with cloud.account.id, or aws.cloudtrail.flattened.request_parameters.userName with aws.cloudtrail.recipient_account_id.
+                Alert-driven runs require CloudTrail request-parameter retention set to All or Flattened.
+                Expected account: {{ consts.expected_account_id }}.
+                Alert: {{ variables.alert_id }}.
+          - name: fail_missing_target
+            type: workflow.fail
+            with:
+              message: >-
+                IAM console-access remediation requires a user and a
+                resource-side account established from normalized
+                cloud.account.id, the CloudTrail recipient account, or the
+                configured manual account.
+              reason: missing_or_invalid_target
+    else:
+      - name: log_alert_batch_rejected
+        type: console
+        with:
+          message: |-
+            Outcome: no_change; received {{ steps.resolve_context.output.alert_count }} alerts, but this destructive workflow accepts at most one alert per execution.
+            Configure the rule action to run per alert. No AWS request or approval was issued.
+            Expected account: {{ consts.expected_account_id }}.
+      - name: fail_alert_batch_rejected
+        type: workflow.fail
+        with:
+          message: >-
+            IAM console-access remediation accepts at most one alert per
+            execution; configure the rule action to run per alert.
+          reason: alert_batch_rejected
