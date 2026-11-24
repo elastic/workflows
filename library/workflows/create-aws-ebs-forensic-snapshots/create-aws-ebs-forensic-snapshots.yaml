@@ -68,7 +68,6 @@ description: |
 
 consts:
   expected_account_id: "__install__.expected-account-id"
-  snapshot_verification_attempts: "__install__.snapshot-verification-attempts"
 
 triggers:
   - type: alert
@@ -484,6 +483,19 @@ steps:
                       {%- endif -%}
                     {%- endfor -%}
                     {%- if mapping_count > 0 and attached_count == mapping_count -%}true{%- else -%}false{%- endif -%}
+                  attachment_states: >-
+                    {%- assign observations = "" | split: "" -%}
+                    {%- assign mappings = steps.describe_instance_pre_mutation.output.data | default: "" | split: "<blockDeviceMapping>" | last | split: "</blockDeviceMapping>" | first | split: "<item>" -%}
+                    {%- for mapping in mappings -%}
+                      {%- if mapping contains "<ebs>" and mapping contains "</ebs>" -%}
+                        {%- assign ebs = mapping | split: "<ebs>" | last | split: "</ebs>" | first -%}
+                        {%- assign volume_id = ebs | split: "<volumeId>" | last | split: "</volumeId>" | first | strip | default: "(missing)" -%}
+                        {%- assign attachment_status = ebs | split: "<status>" | last | split: "</status>" | first | strip | default: "(missing)" -%}
+                        {%- capture observation -%}{{ volume_id }}={{ attachment_status }}{%- endcapture -%}
+                        {%- assign observations = observations | push: observation -%}
+                      {%- endif -%}
+                    {%- endfor -%}
+                    {{- observations | join: "," -}}
 
               # CreateSnapshots is the first mutation and runs only after the
               # exact post-approval and immediate pre-mutation evidence matches.
@@ -567,7 +579,7 @@ steps:
                         type: while
                         condition: "${{ variables.snapshot_verification_state == 'pending' or variables.snapshot_verification_state == 'read_retry' }}"
                         max-iterations:
-                          limit: "{{ consts.snapshot_verification_attempts }}"
+                          limit: __install__.snapshot-verification-attempts
                           on-limit: continue
                         steps:
                           - name: snapshot_verification_backoff
@@ -733,6 +745,7 @@ steps:
                         Approved canonical volume IDs: {{ steps.parse_approved_instance_evidence.output.volume_ids | default: '(missing)' }}.
                         Final canonical volume IDs: {{ steps.parse_final_instance_evidence.output.volume_ids | default: '(missing)' }}.
                         Immediate pre-mutation canonical volume IDs: {{ steps.parse_pre_mutation_instance_evidence.output.volume_ids | default: '(missing)' }}.
+                        Immediate pre-mutation attachment states: {{ steps.parse_pre_mutation_instance_evidence.output.attachment_states | default: '(missing)' }}.
                         Final volume attachment/state observations: {{ variables.final_volume_observations | default: '(missing)' | json }}.
                         Final responder: {{ steps.request_final_approval.output.respondedBy }}.
                         Final notes: {{ steps.request_final_approval.output.response.notes | default: '(none)' }}.
