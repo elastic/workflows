@@ -14,6 +14,7 @@ Thanks for your interest in contributing. This document is the authoring guide f
   - [Install-time inputs (`install.form` + `__install__.*`)](#install-time-inputs-installform--__install__)
   - [Step types and connectors](#step-types-and-connectors)
   - [Style and idiomatic patterns](#style-and-idiomatic-patterns)
+  - [Common review findings](#common-review-findings)
 - [Validating locally](#validating-locally)
 - [Versioning](#versioning)
 - [Pull request flow](#pull-request-flow)
@@ -178,6 +179,68 @@ The catalog generator derives `stepTypes` and `triggerTypes` for each template �
 - **Body comments must survive install on their own.** At install time the entire `template-metadata` block — including `install.form` and every field label/description — is stripped away; only the workflow body and its comments are rendered into the operator's installed workflow. So **never write a body comment (or a runtime `console` message) that refers to `template-metadata`, an install-form field, or its label/description** — e.g. "(see install form)" or "enable the *Overwrite existing* option". Once installed, that thing no longer exists and the reference dangles. Instead, describe the value itself, and when you point the user at a knob to change, point at what survives into the installed YAML — the `consts:` entry or `inputs:` value they can edit (e.g. "set `overwrite_existing: true` in consts").
 - **Snake_case for workflow-body identifiers** (input names, step names): `ip_address`, `check_abuseipdb`, `format_results`. Kebab-case is reserved for `install.form` field names.
 - **Prefer the dedicated `data.*` step types over abusing `console` for value transformation.** Use `data.parseJson`, `data.set`, etc. when you want to compute or restructure data.
+
+### Common review findings
+
+Reviewers flag these again and again. Schema validation and `npm run build:catalog` pass on templates that have every one of them, so **go through this list before you open a PR**.
+
+#### Liquid and rendering
+
+- **Objects inside a string render as `[object Object]`.** `"Samples: {{ steps.query.output }}"` does not print the data, so an `ai.agent` prompt built this way never sees it. Use `{{ steps.query.output | json }}`.
+- **Arrays render with no separator.** ES|QL `VALUES(...)` returns an array when there is more than one value, and `{{ hosts }}` renders `['host-a','host-b']` as `host-ahost-b`. Use `{{ hosts | join: ", " }}`.
+- **The `date` filter uses the Kibana server's local time zone.** `{{ execution.startedAt | date: '%Y-%m-%dT%H:%M:%S.%LZ' }}` is off by the server's UTC offset on any host not running in UTC. Pass the offset: `date: '%Y-%m-%dT%H:%M:%S.%LZ', 0`.
+- **Escape Liquid meant for a dashboard `custom_content` panel exactly once.** The workflow renders the request body when it runs, so a bare `{% for row in rows %}` is consumed at `PUT` time and the panel is saved empty. Use the single-string form: `{{ "{% for row in rows %}" }}`, `{{ "{{ row[\"host\"].value }}" }}` (single quotes when the tag has double quotes inside, e.g. `{{ '{% if row["sli_pct"].value < 99 %}' }}`). Escaping twice stores the literal text; the split form `{{ '{%' }} ... {{ '%}' }}` fails Kibana validation.
+- **Don't work around `<your_input>`.** The run dialog only pre-fills that placeholder for string inputs without a `default`. Give optional inputs `default: ""` instead of checking for the placeholder.
+
+#### Conditions and settings
+
+- **`if:` conditions are KQL.** Liquid can build the KQL, but a bare rendered value like `"{{ steps.get_dashboard.error }}"` is not a condition, and the gated step never runs.
+- **The HTTP status is only in `error.message`.** Step errors have no `statusCode`; the message reads `HTTP 404: {...}`. Match on `steps.get_dashboard.error.message: HTTP*404*`, so a 401, 500, or timeout doesn't fall through to a create.
+- **`concurrency` needs a `key`.** Without one the engine ignores the block. `cancel-in-progress` is not a valid property.
+
+  ```yaml
+  settings:
+    concurrency:
+      key: "{{ workflow.id }}"
+      strategy: drop
+      max: 1
+  ```
+
+- **Step timeouts must fit inside `settings.timeout`.** Two agents with `timeout: 25m` and `timeout: 20m` in a workflow with `timeout: 30m` get the second one killed mid-run.
+- **Use `on-failure: continue: true` on optional steps only.** On every step, and especially on agents, a broken run still shows as completed.
+- **Manual inputs go under the manual trigger** (`triggers[type=manual].inputs`), not at the workflow root.
+
+#### ES|QL
+
+- **An unknown column fails the whole query.** Referencing a field that is not in the mapping fails with `Unknown column [...]`, so a probe written against one dataset stops the run on every other cluster. Start such queries with `SET unmapped_fields="nullify";` so missing fields are `null`.
+- **`RLIKE` always matches the whole string, and `^` / `$` are literal characters.** `domain RLIKE """(.*\.)?microsoft\.com$"""` never matches `microsoft.com`; drop the anchors. Keep patterns tight too: `[0-9]{3}.*` matches `365-office-login.com`, not only IP addresses.
+- **Read alerts from the current space only.** `.alerts-security.alerts-*` also reads other spaces' alerts. Use `.alerts-security.alerts-{{ workflow.spaceId | default: 'default' }}`.
+- **MITRE fields on detection alerts are `kibana.alert.rule.threat.*`.** `threat.technique.name` is only set when the source event has it, so panels and filters on it are empty for most rules.
+
+#### Scheduled agents and object ownership
+
+- **Gate `ai.agent` on a deterministic check.** Run the cheap query in the workflow and call the agent only when there is something to do. An ungated agent on a 15-minute schedule is ~96 LLM runs a day, even when nothing changed.
+- **Don't set `create-conversation: true` on scheduled runs.** Every run saves a conversation to the user's Agent Builder history.
+- **Make the agent an install input.** `agent-id` in `install.form` (default `elastic-ai-agent`), `agent_id: __install__.agent-id` in `consts`, and `agent-id: "{{ consts.agent_id }}"` on the step.
+- **Create saved objects only when they are missing.** A full `PUT` on every run overwrites the user's edits. `GET` first and create only on 404 (see `db-monitoring-auto-dashboards`).
+- **Use readable, deterministic ids** with a prefix the template owns, e.g. `auto-prom-dashboard-http`. Hand-made or placeholder UUIDs (`a1b2c3d4-e5f6-7890-abcd-ef1234567890`) can collide with objects that already exist.
+- **Never delete or rewrite objects the template doesn't own.** Scope by a tag only this template sets (`auto-prom`, not `prometheus`), and don't act on a transient signal, e.g. a panel that returns `Unknown index` because there is no data yet.
+
+#### Alert triggers
+
+- **An alert run can carry many alerts.** Rule actions run in summary mode by default, so `event.alerts` can hold several alerts. Loop over them, or reject the run when there is more than one; don't silently handle only `event.alerts[0]`.
+- **Alert runs have no `inputs`.** Read values from `event.alerts[0]` and use `inputs.*` only as the manual fallback, otherwise the alert path runs with empty values.
+- **Read only fields that exist on the alert.** Check every `event.alerts[0].*` field against ECS or `_field_caps` on the alert index. A field that does not exist (e.g. `user.home`) is always empty, and the alert path silently falls back to its defaults.
+
+#### Catalog hygiene
+
+- **No demo, vendor, sales, or internal references.** Templates ship to every customer: no demo-app metric names or service prefixes as defaults (e.g. `horizon*`), no competitor comparisons or pitch copy, no links to private repos or scripts, no internal task ids.
+- **Copy and `availability` must match where the template installs.** Don't say "Serverless" when `availability` also covers stateful. Raise `availability` to the first version that has every feature the template uses, e.g. dashboard `custom_content` panels need `>=9.6.0`. If a template only works on Serverless, say so in its name and description.
+- **New templates start at `version: "1.0.0"`**, whatever the PR history. See [Versioning](#versioning) for changes to existing ones.
+- **Descriptions say what the template does**, not what changed in the PR. `name` is human-readable, not the slug.
+- **Case comments are Markdown, not Slack mrkdwn.** `*bold*` renders italic and `:emoji:` codes render as text; use `**bold**`.
+- **Render values from `consts` in messages.** "did not confirm after 5 minutes" goes stale when `consts.status_check_wait` changes; use `{{ consts.status_check_wait }}`.
+- **Don't ship near-duplicate templates.** If two files differ only by one value, make it an input.
 
 ---
 
