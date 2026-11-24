@@ -4,15 +4,14 @@ template-metadata:
   availability: ">=9.7.0"
   name: "Quiesce AWS Lambda Function"
   description: >-
-    Set an AWS Lambda function's reserved concurrency to zero after account,
-    identity, and state checks, explicit analyst approval, and fresh
-    pre-mutation reads. Alert-driven runs require per-alert action mode and the
-    AWS integration's request-parameter retention mode to be All or Flattened.
-    CloudTrail targets use the resource-side recipient account; normalized
-    non-CloudTrail targets use cloud.account.id. The AWS connector uses
-    sts:GetCallerIdentity and requires lambda:GetFunctionConfiguration,
-    lambda:GetFunctionConcurrency, and
-    lambda:PutFunctionConcurrency.
+    Set an AWS Lambda function's reserved concurrency to zero after target,
+    account, and state checks, explicit analyst approval, and immediate
+    post-approval revalidation. Alert-driven runs require per-alert action mode
+    and AWS request-parameter retention set to All or Flattened. CloudTrail
+    targets always use aws.cloudtrail.recipient_account_id. The connector policy
+    needs sts:GetCallerIdentity on Resource "*" plus
+    lambda:GetFunctionConcurrency and lambda:PutFunctionConcurrency scoped to
+    the permitted function ARN or ARN pattern.
   solutions: [security]
   categories: [response]
   install:
@@ -20,31 +19,32 @@ template-metadata:
       - name: aws-connector
         label: "AWS connector"
         description: >-
-          AWS connector for the expected account with permission to read
-          function identity and concurrency and set reserved concurrency.
+          AWS connector for the expected account. Allow sts:GetCallerIdentity
+          on Resource "*" and lambda:GetFunctionConcurrency plus
+          lambda:PutFunctionConcurrency only on the Lambda function ARNs this
+          workflow may quiesce.
         inputType: connector
         connectorType: .aws
         required: true
       - name: expected-account-id
         label: "Expected AWS account ID"
         description: >-
-          Twelve-digit AWS account ID that must match both the alert and the
-          selected AWS connector before this workflow can read or change a
-          function.
+          Twelve-digit AWS account ID that must match the resource-side alert
+          account, any account embedded in the target, and the selected AWS
+          connector account.
         inputType: text
         required: true
 
 name: Quiesce AWS Lambda Function
 description: |
-  Resolve an AWS Lambda function and Region, verify the alert and connector
-  account, capture the function ARN, revision, and reserved concurrency, and
-  require analyst approval. Fresh identity and concurrency reads must exactly
-  match the approved evidence before reserved concurrency is set to zero.
-  Alert-driven runs require a per-alert rule action and AWS CloudTrail
-  request-parameter retention set to All or Flattened. Restore the prior
-  integer to roll back, or delete the concurrency configuration when it was
-  previously unconfigured. The final configuration and concurrency reads
-  narrow but cannot close the race between those reads and the mutation.
+  Resolve and normalize Lambda names, full ARNs, partial ARNs, and qualified
+  identifiers; reject ambiguous targets; and bind CloudTrail targets to
+  aws.cloudtrail.recipient_account_id. The workflow verifies the connector
+  account and current reserved concurrency before approval, repeats both reads
+  immediately after approval, and mutates only if the approved state is still
+  current. It never calls GetFunctionConfiguration, whose response can contain
+  Environment.Variables. Restore the prior integer to roll back, or delete the
+  concurrency configuration when it was previously unconfigured.
 
 consts:
   expected_account_id: "__install__.expected-account-id"
@@ -55,430 +55,51 @@ triggers:
     inputs:
       - name: function_name
         type: string
-        description: AWS Lambda function name whose invocations will be quiesced.
+        description: >-
+          Lambda name, name with qualifier, full ARN, or partial ARN. Reserved
+          concurrency applies to the unqualified function.
         required: true
-        default: ""
       - name: region
         type: string
         description: AWS Region containing the Lambda function.
         required: true
-        default: ""
 
 steps:
-  # Summary-mode alert batches are rejected; configure the rule action per alert.
-  - name: resolve_context
+  - name: collect_context
     type: data.set
     with:
       alert_count: "{% if event.alerts %}{{ event.alerts.size }}{% else %}0{% endif %}"
-      batch_state: "{% if event.alerts and event.alerts.size > 1 %}multiple{% else %}safe{% endif %}"
-      function_name: "{{ event.alerts[0].aws.cloudtrail.flattened.request_parameters.functionName | default: event.alerts[0].faas.name | default: inputs.function_name }}"
-      region: "{{ event.alerts[0].cloud.region | default: inputs.region }}"
-      target_source: >-
-        {%- if event.alerts[0].aws.cloudtrail.flattened.request_parameters.functionName != blank -%}cloudtrail
-        {%- elsif event.alerts[0].faas.name != blank -%}normalized
-        {%- else -%}manual{%- endif -%}
-      account_id: >-
-        {%- if event.alerts[0].aws.cloudtrail.flattened.request_parameters.functionName != blank -%}{{ event.alerts[0].aws.cloudtrail.recipient_account_id }}
-        {%- elsif event.alerts[0].faas.name != blank -%}{{ event.alerts[0].cloud.account.id }}
-        {%- elsif event.alerts -%}{%- else -%}{{ consts.expected_account_id }}{%- endif -%}
-      account_source: >-
-        {%- if event.alerts[0].aws.cloudtrail.flattened.request_parameters.functionName != blank -%}CloudTrail recipient account
-        {%- elsif event.alerts[0].faas.name != blank -%}normalized cloud.account.id
-        {%- else -%}manual expected account{%- endif -%}
+      has_alert: "{% if event.alerts[0] != nil %}true{% else %}false{% endif %}"
+      is_cloudtrail: >-
+        {%- assign alert = event.alerts[0] -%}
+        {%- if alert == nil -%}false
+        {%- elsif alert.aws.cloudtrail != nil -%}true
+        {%- elsif alert.event.dataset contains 'aws.cloudtrail' -%}true
+        {%- elsif alert.event.provider == 'lambda.amazonaws.com' -%}true
+        {%- else -%}false{%- endif -%}
+      cloudtrail_name: "{{ event.alerts[0].aws.cloudtrail.flattened.request_parameters.functionName | default: '' | strip }}"
+      normalized_name: "{{ event.alerts[0].faas.name | default: '' | strip }}"
+      manual_name: >-
+        {%- if event.alerts[0] == nil -%}{{ inputs.function_name | default: '' | strip }}{%- endif -%}
+      observed_region: >-
+        {%- if event.alerts[0] != nil -%}{{ event.alerts[0].cloud.region | default: '' | strip | downcase }}
+        {%- else -%}{{ inputs.region | default: '' | strip | downcase }}{%- endif -%}
+      recipient_account_id: "{{ event.alerts[0].aws.cloudtrail.recipient_account_id | default: '' | strip }}"
+      normalized_account_id: "{{ event.alerts[0].cloud.account.id | default: '' | strip }}"
+      expected_account_id: "{{ consts.expected_account_id | strip }}"
       alert_id: "{{ event.alerts[0].kibana.alert.uuid | default: event.alerts[0]._id | default: 'manual' }}"
 
-  - name: enforce_single_alert
+  - name: reject_alert_batch
     type: if
-    condition: "${{ steps.resolve_context.output.batch_state == 'safe' }}"
+    condition: "${{ steps.collect_context.output.alert_count > 1 }}"
     steps:
-      - name: validate_target
-        type: if
-        condition: "${{ variables.function_name != blank and variables.region != blank and variables.account_id != blank }}"
-        steps:
-          - name: require_expected_alert_account
-            type: if
-            condition: "${{ variables.account_id == consts.expected_account_id }}"
-            steps:
-              - name: get_connector_identity
-                type: aws.request
-                connector-id: __install__.aws-connector
-                on-failure:
-                  continue: true
-                with:
-                  service: sts
-                  region: "{{ variables.region }}"
-                  query:
-                    Action: GetCallerIdentity
-                    Version: "2011-06-15"
-
-              - name: parse_connector_account
-                type: data.set
-                with:
-                  account_id: "{{ steps.get_connector_identity.output.data.GetCallerIdentityResponse.GetCallerIdentityResult.Account | default: '' }}"
-
-              - name: require_expected_connector_account
-                type: if
-                condition: "${{ steps.parse_connector_account.output.account_id == consts.expected_account_id }}"
-                steps:
-                  # Capture both immutable function identity and approved concurrency.
-                  - name: get_function_configuration_before
-                    type: aws.request
-                    connector-id: __install__.aws-connector
-                    on-failure:
-                      continue: true
-                    with:
-                      service: lambda
-                      region: "{{ variables.region }}"
-                      method: GET
-                      path: "/2015-03-31/functions/{{ variables.function_name }}/configuration"
-
-                  - name: get_concurrency_before
-                    type: aws.request
-                    connector-id: __install__.aws-connector
-                    on-failure:
-                      continue: true
-                    with:
-                      service: lambda
-                      region: "{{ variables.region }}"
-                      method: GET
-                      path: "/2019-09-30/functions/{{ variables.function_name }}/concurrency"
-
-                  - name: validate_pre_read
-                    type: data.set
-                    with:
-                      state: >-
-                        {% if steps.get_function_configuration_before.error == nil and steps.get_concurrency_before.error == nil and steps.get_function_configuration_before.output.data.FunctionName == variables.function_name and steps.get_function_configuration_before.output.data.FunctionArn != nil and steps.get_function_configuration_before.output.data.RevisionId != nil and steps.get_concurrency_before.output.data.ReservedConcurrentExecutions == 0 %}already_zero{% elsif steps.get_function_configuration_before.error == nil and steps.get_concurrency_before.error == nil and steps.get_function_configuration_before.output.data.FunctionName == variables.function_name and steps.get_function_configuration_before.output.data.FunctionArn != nil and steps.get_function_configuration_before.output.data.RevisionId != nil %}ready{% else %}failed{% endif %}
-
-                  - name: continue_after_safe_pre_read
-                    type: if
-                    condition: "${{ steps.validate_pre_read.output.state == 'ready' }}"
-                    steps:
-                      - name: request_approval
-                        type: waitForInput
-                        timeout: 1h
-                        with:
-                          message: |-
-                            Approve setting reserved concurrency to zero?
-
-                            Account: {{ variables.account_id }}
-                            Account evidence: {{ steps.resolve_context.output.account_source }}
-                            Function: {{ variables.function_name }}
-                            Region: {{ variables.region }}
-                            Function ARN: {{ steps.get_function_configuration_before.output.data.FunctionArn }}
-                            Revision: {{ steps.get_function_configuration_before.output.data.RevisionId }}
-                            Alert: {{ variables.alert_id }}
-
-                            WARNING: Zero reserved concurrency blocks new invocations. Event
-                            sources and callers may retry, and queues or upstream work may grow.
-                            Pre-change concurrency: {{ steps.get_concurrency_before.output | json }}.
-                            Rollback: {% if steps.get_concurrency_before.output.data.ReservedConcurrentExecutions == nil %}call DeleteFunctionConcurrency because reserved concurrency was previously unconfigured{% else %}restore ReservedConcurrentExecutions to {{ steps.get_concurrency_before.output.data.ReservedConcurrentExecutions }}{% endif %}.
-                          schema:
-                            type: object
-                            properties:
-                              approved:
-                                type: boolean
-                                title: Set reserved concurrency to zero
-                                default: false
-                              notes:
-                                type: string
-                                title: Analyst notes
-                            required:
-                              - approved
-
-                      - name: apply_when_approved
-                        type: if
-                        condition: "${{ steps.request_approval.output.response.approved == true }}"
-                        steps:
-                          # Fresh reads bind the mutation to the approved revision and state.
-                          - name: get_function_configuration_fresh
-                            type: aws.request
-                            connector-id: __install__.aws-connector
-                            on-failure:
-                              continue: true
-                            with:
-                              service: lambda
-                              region: "{{ variables.region }}"
-                              method: GET
-                              path: "/2015-03-31/functions/{{ variables.function_name }}/configuration"
-
-                          - name: get_concurrency_fresh
-                            type: aws.request
-                            connector-id: __install__.aws-connector
-                            on-failure:
-                              continue: true
-                            with:
-                              service: lambda
-                              region: "{{ variables.region }}"
-                              method: GET
-                              path: "/2019-09-30/functions/{{ variables.function_name }}/concurrency"
-
-                          - name: compare_fresh_evidence
-                            type: data.set
-                            with:
-                              state: >-
-                                {% if steps.get_function_configuration_fresh.error == nil and steps.get_concurrency_fresh.error == nil and steps.get_function_configuration_fresh.output.data.FunctionName == variables.function_name and steps.get_function_configuration_fresh.output.data.FunctionArn == steps.get_function_configuration_before.output.data.FunctionArn and steps.get_function_configuration_fresh.output.data.RevisionId == steps.get_function_configuration_before.output.data.RevisionId and steps.get_concurrency_fresh.output.data.ReservedConcurrentExecutions == steps.get_concurrency_before.output.data.ReservedConcurrentExecutions %}unchanged{% else %}stale_or_failed{% endif %}
-
-                          - name: mutate_only_when_evidence_matches
-                            type: if
-                            condition: "${{ steps.compare_fresh_evidence.output.state == 'unchanged' }}"
-                            steps:
-                              - name: set_zero_reserved_concurrency
-                                type: aws.request
-                                connector-id: __install__.aws-connector
-                                on-failure:
-                                  continue: true
-                                with:
-                                  service: lambda
-                                  region: "{{ variables.region }}"
-                                  method: PUT
-                                  path: "/2017-10-31/functions/{{ variables.function_name }}/concurrency"
-                                  body:
-                                    ReservedConcurrentExecutions: 0
-
-                              - name: continue_after_successful_mutation
-                                type: if
-                                condition: "${{ steps.set_zero_reserved_concurrency.error == nil }}"
-                                steps:
-                                  # Retry only GetFunctionConcurrency; never repeat the mutation.
-                                  - name: verify_zero_reserved_concurrency
-                                    type: while
-                                    condition: "${{ variables.verification_state != 'zero' }}"
-                                    max-iterations:
-                                      limit: 3
-                                      on-limit: continue
-                                    steps:
-                                      - name: verification_backoff
-                                        type: wait
-                                        with:
-                                          duration: 2s
-
-                                      - name: get_concurrency_after
-                                        type: aws.request
-                                        connector-id: __install__.aws-connector
-                                        on-failure:
-                                          continue: true
-                                        with:
-                                          service: lambda
-                                          region: "{{ variables.region }}"
-                                          method: GET
-                                          path: "/2019-09-30/functions/{{ variables.function_name }}/concurrency"
-
-                                      - name: classify_verification_attempt
-                                        type: data.set
-                                        with:
-                                          verification_state: >-
-                                            {% if steps.get_concurrency_after.error == nil and steps.get_concurrency_after.output.data.ReservedConcurrentExecutions == 0 %}zero{% elsif steps.get_concurrency_after.error == nil %}not_zero{% else %}read_failed{% endif %}
-
-                                  - name: finish_verified_mutation
-                                    type: if
-                                    condition: "${{ steps.get_concurrency_after.output.data.ReservedConcurrentExecutions == 0 and variables.verification_state == 'zero' }}"
-                                    steps:
-                                      - name: log_verified_audit_result
-                                        type: console
-                                        with:
-                                          message: |-
-                                            Outcome: verified; PutFunctionConcurrency succeeded and a follow-up GetFunctionConcurrency returned exact numeric zero.
-                                            Account: {{ variables.account_id }}.
-                                            Account evidence: {{ steps.resolve_context.output.account_source }}.
-                                            Function: {{ variables.function_name }}.
-                                            Region: {{ variables.region }}.
-                                            Function ARN: {{ steps.get_function_configuration_before.output.data.FunctionArn }}.
-                                            Approved revision: {{ steps.get_function_configuration_before.output.data.RevisionId }}.
-                                            Alert: {{ variables.alert_id }}.
-                                            Approved: {{ steps.request_approval.output.response.approved }}.
-                                            Responder: {{ steps.request_approval.output.respondedBy }}.
-                                            Notes: {{ steps.request_approval.output.response.notes | default: '(none)' }}.
-                                            Mutation response: {{ steps.set_zero_reserved_concurrency.output | json }}.
-                                            Verification response: {{ steps.get_concurrency_after.output | json }}.
-                                            Rollback: {% if steps.get_concurrency_before.output.data.ReservedConcurrentExecutions == nil %}call DeleteFunctionConcurrency because reserved concurrency was previously unconfigured{% else %}restore ReservedConcurrentExecutions to {{ steps.get_concurrency_before.output.data.ReservedConcurrentExecutions }}{% endif %}.
-                                    else:
-                                      - name: log_verification_exhausted
-                                        type: console
-                                        with:
-                                          message: |-
-                                            Outcome: verification_failed; PutFunctionConcurrency succeeded, but exact numeric zero was not verified after three GetFunctionConcurrency attempts.
-                                            Account: {{ variables.account_id }}.
-                                            Function: {{ variables.function_name }}.
-                                            Region: {{ variables.region }}.
-                                            Function ARN: {{ steps.get_function_configuration_before.output.data.FunctionArn }}.
-                                            Alert: {{ variables.alert_id }}.
-                                            Approved: {{ steps.request_approval.output.response.approved }}.
-                                            Responder: {{ steps.request_approval.output.respondedBy }}.
-                                            Notes: {{ steps.request_approval.output.response.notes | default: '(none)' }}.
-                                            Mutation response: {{ steps.set_zero_reserved_concurrency.output | json }}.
-                                            Last verification response: {{ steps.get_concurrency_after.output | json }}.
-                                            Last verification error: {{ steps.get_concurrency_after.error | default: '(none)' | json }}.
-                                            Rollback guidance: first verify the current concurrency. Then {% if steps.get_concurrency_before.output.data.ReservedConcurrentExecutions == nil %}call DeleteFunctionConcurrency because reserved concurrency was previously unconfigured{% else %}restore ReservedConcurrentExecutions to {{ steps.get_concurrency_before.output.data.ReservedConcurrentExecutions }}{% endif %}.
-                                      - name: fail_verification_exhausted
-                                        type: workflow.fail
-                                        with:
-                                          message: >-
-                                            PutFunctionConcurrency succeeded for
-                                            {{ variables.function_name }}, but numeric
-                                            zero was not verified after three reads.
-                                          reason: lambda_zero_not_verified
-                                else:
-                                  - name: log_mutation_error
-                                    type: console
-                                    with:
-                                      message: |-
-                                        Outcome: mutation_failed; PutFunctionConcurrency returned an error, so no successful quiescing is attributed.
-                                        Account: {{ variables.account_id }}.
-                                        Function: {{ variables.function_name }}.
-                                        Region: {{ variables.region }}.
-                                        Function ARN: {{ steps.get_function_configuration_before.output.data.FunctionArn }}.
-                                        Alert: {{ variables.alert_id }}.
-                                        Approved: {{ steps.request_approval.output.response.approved }}.
-                                        Responder: {{ steps.request_approval.output.respondedBy }}.
-                                        Notes: {{ steps.request_approval.output.response.notes | default: '(none)' }}.
-                                        Mutation response: {{ steps.set_zero_reserved_concurrency.output | json }}.
-                                        Mutation error: {{ steps.set_zero_reserved_concurrency.error | default: '(none)' | json }}.
-                                        Rollback guidance: no successful mutation was attributed; verify current concurrency before deciding whether restoration is required.
-                                  - name: fail_mutation_error
-                                    type: workflow.fail
-                                    with:
-                                      message: >-
-                                        PutFunctionConcurrency failed for Lambda
-                                        function {{ variables.function_name }}.
-                                      reason: put_function_concurrency_failed
-                            else:
-                              - name: log_stale_approved_state
-                                type: console
-                                with:
-                                  message: |-
-                                    Outcome: no_change; approved Lambda identity, revision, or concurrency changed, or a fresh read failed. No PutFunctionConcurrency request was made.
-                                    Account: {{ variables.account_id }}.
-                                    Function: {{ variables.function_name }}.
-                                    Region: {{ variables.region }}.
-                                    Approved ARN: {{ steps.get_function_configuration_before.output.data.FunctionArn }}.
-                                    Approved revision: {{ steps.get_function_configuration_before.output.data.RevisionId }}.
-                                    Alert: {{ variables.alert_id }}.
-                                    Responder: {{ steps.request_approval.output.respondedBy }}.
-                                    Notes: {{ steps.request_approval.output.response.notes | default: '(none)' }}.
-                              - name: fail_stale_approved_state
-                                type: workflow.fail
-                                with:
-                                  message: >-
-                                    Lambda identity, revision, or concurrency changed
-                                    or could not be read after approval; no mutation
-                                    was requested.
-                                  reason: stale_approved_state
-                        else:
-                          - name: log_rejected_audit_result
-                            type: console
-                            with:
-                              message: |-
-                                Outcome: no_change; no PutFunctionConcurrency request was made because quiescing was rejected.
-                                Account: {{ variables.account_id }}.
-                                Function: {{ variables.function_name }}.
-                                Region: {{ variables.region }}.
-                                Function ARN: {{ steps.get_function_configuration_before.output.data.FunctionArn }}.
-                                Alert: {{ variables.alert_id }}.
-                                Approved: {{ steps.request_approval.output.response.approved }}.
-                                Responder: {{ steps.request_approval.output.respondedBy }}.
-                                Notes: {{ steps.request_approval.output.response.notes | default: '(none)' }}.
-                                Rollback: no rollback is needed because no mutation was attempted.
-                    else:
-                      - name: classify_non_remediation_state
-                        type: if
-                        condition: "${{ steps.validate_pre_read.output.state == 'already_zero' }}"
-                        steps:
-                          - name: log_already_safe
-                            type: console
-                            with:
-                              message: |-
-                                Outcome: already_safe; GetFunctionConfiguration established the exact function identity and GetFunctionConcurrency returned numeric zero, so no approval or mutation was issued.
-                                Account: {{ variables.account_id }}.
-                                Account evidence: {{ steps.resolve_context.output.account_source }}.
-                                Function: {{ variables.function_name }}.
-                                Region: {{ variables.region }}.
-                                Function ARN: {{ steps.get_function_configuration_before.output.data.FunctionArn }}.
-                                Revision: {{ steps.get_function_configuration_before.output.data.RevisionId }}.
-                                Alert: {{ variables.alert_id }}.
-                                Current concurrency response: {{ steps.get_concurrency_before.output | json }}.
-                        else:
-                          - name: log_pre_read_failure
-                            type: console
-                            with:
-                              message: |-
-                                Outcome: failed; function identity or concurrency could not be established completely before approval.
-                                Account: {{ variables.account_id }}.
-                                Function: {{ variables.function_name }}.
-                                Region: {{ variables.region }}.
-                                Alert: {{ variables.alert_id }}.
-                                Function-configuration error: {{ steps.get_function_configuration_before.error | default: '(none)' | json }}.
-                                Concurrency error: {{ steps.get_concurrency_before.error | default: '(none)' | json }}.
-                          - name: fail_pre_read_error
-                            type: workflow.fail
-                            with:
-                              message: >-
-                                GetFunctionConfiguration or
-                                GetFunctionConcurrency failed or returned
-                                incomplete identity evidence for
-                                {{ variables.function_name }}.
-                              reason: lambda_pre_read_failed
-                else:
-                  - name: log_connector_account_mismatch
-                    type: console
-                    with:
-                      message: |-
-                        Outcome: no_change; the AWS connector account could not be verified as the expected account.
-                        Expected account: {{ consts.expected_account_id }}.
-                        Alert/manual account: {{ variables.account_id }}.
-                        Connector account: {{ steps.parse_connector_account.output.account_id | default: '(unverified)' }}.
-                        STS error: {{ steps.get_connector_identity.error | default: '(none)' }}.
-                  - name: fail_connector_account_mismatch
-                    type: workflow.fail
-                    with:
-                      message: >-
-                        The AWS connector account could not be established as
-                        expected account {{ consts.expected_account_id }}.
-                      reason: connector_account_mismatch
-            else:
-              - name: log_alert_account_mismatch
-                type: console
-                with:
-                  message: |-
-                    Outcome: no_change; alert account does not match the configured expected account.
-                    Expected account: {{ consts.expected_account_id }}.
-                    Alert account: {{ variables.account_id | default: '(missing)' }}.
-                    Function: {{ variables.function_name }}.
-                    Region: {{ variables.region }}.
-                    Alert: {{ variables.alert_id }}.
-              - name: fail_alert_account_mismatch
-                type: workflow.fail
-                with:
-                  message: >-
-                    Resource-side account {{ variables.account_id | default: '(missing)' }}
-                    from {{ steps.resolve_context.output.account_source }} does
-                    not match expected account {{ consts.expected_account_id }}.
-                  reason: alert_account_mismatch
-        else:
-          - name: log_missing_target
-            type: console
-            with:
-              message: |-
-                Outcome: no_change; Lambda quiescing was skipped because the function, Region, or account was missing.
-                Expected alert fields: faas.name with cloud.account.id, or aws.cloudtrail.flattened.request_parameters.functionName with aws.cloudtrail.recipient_account_id; cloud.region is always required.
-                Alert-driven CloudTrail runs require request-parameter retention set to All or Flattened.
-                Expected account: {{ consts.expected_account_id }}.
-                Alert: {{ variables.alert_id }}.
-          - name: fail_missing_target
-            type: workflow.fail
-            with:
-              message: >-
-                Lambda quiescing requires a function, Region, and resource-side
-                account established from normalized cloud.account.id, the
-                CloudTrail recipient account, or the configured manual account.
-              reason: missing_or_invalid_target
-    else:
       - name: log_alert_batch_rejected
         type: console
         with:
-          message: |-
-            Outcome: no_change; received {{ steps.resolve_context.output.alert_count }} alerts, but this destructive workflow accepts at most one alert per execution.
-            Configure the rule action to run per alert. No AWS request or approval was issued.
-            Expected account: {{ consts.expected_account_id }}.
+          message: >-
+            Outcome: no_change; received
+            {{ steps.collect_context.output.alert_count }} alerts, but this
+            destructive workflow accepts at most one alert per execution.
       - name: fail_alert_batch_rejected
         type: workflow.fail
         with:
@@ -486,3 +107,517 @@ steps:
             Lambda quiescing accepts at most one alert per execution; configure
             the rule action to run per alert.
           reason: alert_batch_rejected
+
+  # Each record is state|bare-name|embedded-account|embedded-region. Qualifiers
+  # are validated structurally and intentionally removed because reserved
+  # concurrency is configured only at the unqualified function level.
+  - name: normalize_cloudtrail_target
+    type: data.set
+    with:
+      record: >-
+        {%- assign raw = steps.collect_context.output.cloudtrail_name -%}
+        {%- assign parts = raw | split: ':' -%}
+        {%- assign name = '' -%}
+        {%- assign account = '' -%}
+        {%- assign region = '' -%}
+        {%- assign qualifier = '' -%}
+        {%- assign valid = false -%}
+        {%- if raw == blank -%}
+        {%- elsif parts.size == 1 -%}
+          {%- assign name = parts[0] -%}
+          {%- if name != blank and name.size <= 64 -%}{%- assign valid = true -%}{%- endif -%}
+        {%- elsif parts.size == 2 -%}
+          {%- assign name = parts[0] -%}{%- assign qualifier = parts[1] -%}
+          {%- if name != blank and name.size <= 64 and qualifier != blank and qualifier.size <= 128 -%}{%- assign valid = true -%}{%- endif -%}
+        {%- elsif parts.size == 3 or parts.size == 4 -%}
+          {%- assign account = parts[0] -%}{%- assign name = parts[2] -%}{%- assign qualifier = parts[3] | default: 'unqualified' -%}
+          {%- if account.size == 12 and parts[1] == 'function' and name != blank and name.size <= 64 and qualifier != blank and qualifier.size <= 128 -%}{%- assign valid = true -%}{%- endif -%}
+        {%- elsif parts.size == 7 or parts.size == 8 -%}
+          {%- assign account = parts[4] -%}{%- assign region = parts[3] | downcase -%}{%- assign name = parts[6] -%}{%- assign qualifier = parts[7] | default: 'unqualified' -%}
+          {%- if parts[0] == 'arn' and parts[2] == 'lambda' and parts[5] == 'function' and account.size == 12 and region != blank and name != blank and name.size <= 64 and qualifier != blank and qualifier.size <= 128 -%}
+            {%- if parts[1] == 'aws' or parts[1] == 'aws-us-gov' -%}{%- assign valid = true -%}{%- endif -%}
+          {%- endif -%}
+        {%- endif -%}
+        {%- if name contains '|' or name contains '/' or name contains '?' or name contains '#' or name contains '%' or name contains ' ' -%}{%- assign valid = false -%}{%- endif -%}
+        {%- if raw == blank -%}absent|||{%- elsif valid -%}valid|{{ name }}|{{ account }}|{{ region }}{%- else -%}invalid|||{%- endif -%}
+
+  - name: normalize_ecs_target
+    type: data.set
+    with:
+      record: >-
+        {%- assign raw = steps.collect_context.output.normalized_name -%}
+        {%- assign parts = raw | split: ':' -%}
+        {%- assign name = '' -%}
+        {%- assign account = '' -%}
+        {%- assign region = '' -%}
+        {%- assign qualifier = '' -%}
+        {%- assign valid = false -%}
+        {%- if raw == blank -%}
+        {%- elsif parts.size == 1 -%}
+          {%- assign name = parts[0] -%}
+          {%- if name != blank and name.size <= 64 -%}{%- assign valid = true -%}{%- endif -%}
+        {%- elsif parts.size == 2 -%}
+          {%- assign name = parts[0] -%}{%- assign qualifier = parts[1] -%}
+          {%- if name != blank and name.size <= 64 and qualifier != blank and qualifier.size <= 128 -%}{%- assign valid = true -%}{%- endif -%}
+        {%- elsif parts.size == 3 or parts.size == 4 -%}
+          {%- assign account = parts[0] -%}{%- assign name = parts[2] -%}{%- assign qualifier = parts[3] | default: 'unqualified' -%}
+          {%- if account.size == 12 and parts[1] == 'function' and name != blank and name.size <= 64 and qualifier != blank and qualifier.size <= 128 -%}{%- assign valid = true -%}{%- endif -%}
+        {%- elsif parts.size == 7 or parts.size == 8 -%}
+          {%- assign account = parts[4] -%}{%- assign region = parts[3] | downcase -%}{%- assign name = parts[6] -%}{%- assign qualifier = parts[7] | default: 'unqualified' -%}
+          {%- if parts[0] == 'arn' and parts[2] == 'lambda' and parts[5] == 'function' and account.size == 12 and region != blank and name != blank and name.size <= 64 and qualifier != blank and qualifier.size <= 128 -%}
+            {%- if parts[1] == 'aws' or parts[1] == 'aws-us-gov' -%}{%- assign valid = true -%}{%- endif -%}
+          {%- endif -%}
+        {%- endif -%}
+        {%- if name contains '|' or name contains '/' or name contains '?' or name contains '#' or name contains '%' or name contains ' ' -%}{%- assign valid = false -%}{%- endif -%}
+        {%- if raw == blank -%}absent|||{%- elsif valid -%}valid|{{ name }}|{{ account }}|{{ region }}{%- else -%}invalid|||{%- endif -%}
+
+  - name: normalize_manual_target
+    type: data.set
+    with:
+      record: >-
+        {%- assign raw = steps.collect_context.output.manual_name -%}
+        {%- assign parts = raw | split: ':' -%}
+        {%- assign name = '' -%}
+        {%- assign account = '' -%}
+        {%- assign region = '' -%}
+        {%- assign qualifier = '' -%}
+        {%- assign valid = false -%}
+        {%- if raw == blank -%}
+        {%- elsif parts.size == 1 -%}
+          {%- assign name = parts[0] -%}
+          {%- if name != blank and name.size <= 64 -%}{%- assign valid = true -%}{%- endif -%}
+        {%- elsif parts.size == 2 -%}
+          {%- assign name = parts[0] -%}{%- assign qualifier = parts[1] -%}
+          {%- if name != blank and name.size <= 64 and qualifier != blank and qualifier.size <= 128 -%}{%- assign valid = true -%}{%- endif -%}
+        {%- elsif parts.size == 3 or parts.size == 4 -%}
+          {%- assign account = parts[0] -%}{%- assign name = parts[2] -%}{%- assign qualifier = parts[3] | default: 'unqualified' -%}
+          {%- if account.size == 12 and parts[1] == 'function' and name != blank and name.size <= 64 and qualifier != blank and qualifier.size <= 128 -%}{%- assign valid = true -%}{%- endif -%}
+        {%- elsif parts.size == 7 or parts.size == 8 -%}
+          {%- assign account = parts[4] -%}{%- assign region = parts[3] | downcase -%}{%- assign name = parts[6] -%}{%- assign qualifier = parts[7] | default: 'unqualified' -%}
+          {%- if parts[0] == 'arn' and parts[2] == 'lambda' and parts[5] == 'function' and account.size == 12 and region != blank and name != blank and name.size <= 64 and qualifier != blank and qualifier.size <= 128 -%}
+            {%- if parts[1] == 'aws' or parts[1] == 'aws-us-gov' -%}{%- assign valid = true -%}{%- endif -%}
+          {%- endif -%}
+        {%- endif -%}
+        {%- if name contains '|' or name contains '/' or name contains '?' or name contains '#' or name contains '%' or name contains ' ' -%}{%- assign valid = false -%}{%- endif -%}
+        {%- if raw == blank -%}absent|||{%- elsif valid -%}valid|{{ name }}|{{ account }}|{{ region }}{%- else -%}invalid|||{%- endif -%}
+
+  - name: resolve_target
+    type: data.set
+    with:
+      parse_state: >-
+        {%- assign ct = steps.normalize_cloudtrail_target.output.record | split: '|' -%}
+        {%- assign ecs = steps.normalize_ecs_target.output.record | split: '|' -%}
+        {%- assign manual = steps.normalize_manual_target.output.record | split: '|' -%}
+        {%- if ct[0] == 'invalid' or ecs[0] == 'invalid' or manual[0] == 'invalid' -%}invalid{%- else -%}valid{%- endif -%}
+      function_name: >-
+        {%- assign names = '' | split: '' -%}
+        {%- assign ct = steps.normalize_cloudtrail_target.output.record | split: '|' -%}
+        {%- assign ecs = steps.normalize_ecs_target.output.record | split: '|' -%}
+        {%- assign manual = steps.normalize_manual_target.output.record | split: '|' -%}
+        {%- if ct[0] == 'valid' -%}{%- assign names = names | push: ct[1] -%}{%- endif -%}
+        {%- if ecs[0] == 'valid' -%}{%- assign names = names | push: ecs[1] -%}{%- endif -%}
+        {%- if manual[0] == 'valid' -%}{%- assign names = names | push: manual[1] -%}{%- endif -%}
+        {%- assign names = names | compact | uniq -%}{{ names | first | default: '' }}
+      function_name_count: >-
+        {%- assign names = '' | split: '' -%}
+        {%- assign ct = steps.normalize_cloudtrail_target.output.record | split: '|' -%}
+        {%- assign ecs = steps.normalize_ecs_target.output.record | split: '|' -%}
+        {%- assign manual = steps.normalize_manual_target.output.record | split: '|' -%}
+        {%- if ct[0] == 'valid' -%}{%- assign names = names | push: ct[1] -%}{%- endif -%}
+        {%- if ecs[0] == 'valid' -%}{%- assign names = names | push: ecs[1] -%}{%- endif -%}
+        {%- if manual[0] == 'valid' -%}{%- assign names = names | push: manual[1] -%}{%- endif -%}
+        {{- names | compact | uniq | size -}}
+      target_account_id: >-
+        {%- if steps.collect_context.output.has_alert == 'false' -%}{{ steps.collect_context.output.expected_account_id }}
+        {%- elsif steps.collect_context.output.is_cloudtrail == 'true' -%}{{ steps.collect_context.output.recipient_account_id }}
+        {%- else -%}{{ steps.collect_context.output.normalized_account_id }}{%- endif -%}
+      account_source: >-
+        {%- if steps.collect_context.output.has_alert == 'false' -%}manual expected account
+        {%- elsif steps.collect_context.output.is_cloudtrail == 'true' -%}aws.cloudtrail.recipient_account_id
+        {%- else -%}cloud.account.id{%- endif -%}
+      embedded_account_count: >-
+        {%- assign accounts = '' | split: '' -%}
+        {%- assign ct = steps.normalize_cloudtrail_target.output.record | split: '|' -%}
+        {%- assign ecs = steps.normalize_ecs_target.output.record | split: '|' -%}
+        {%- assign manual = steps.normalize_manual_target.output.record | split: '|' -%}
+        {%- if ct[2] != blank -%}{%- assign accounts = accounts | push: ct[2] -%}{%- endif -%}
+        {%- if ecs[2] != blank -%}{%- assign accounts = accounts | push: ecs[2] -%}{%- endif -%}
+        {%- if manual[2] != blank -%}{%- assign accounts = accounts | push: manual[2] -%}{%- endif -%}
+        {{- accounts | compact | uniq | size -}}
+      embedded_account_id: >-
+        {%- assign accounts = '' | split: '' -%}
+        {%- assign ct = steps.normalize_cloudtrail_target.output.record | split: '|' -%}
+        {%- assign ecs = steps.normalize_ecs_target.output.record | split: '|' -%}
+        {%- assign manual = steps.normalize_manual_target.output.record | split: '|' -%}
+        {%- if ct[2] != blank -%}{%- assign accounts = accounts | push: ct[2] -%}{%- endif -%}
+        {%- if ecs[2] != blank -%}{%- assign accounts = accounts | push: ecs[2] -%}{%- endif -%}
+        {%- if manual[2] != blank -%}{%- assign accounts = accounts | push: manual[2] -%}{%- endif -%}
+        {{- accounts | compact | uniq | first | default: '' -}}
+      region: >-
+        {%- assign regions = '' | split: '' -%}
+        {%- if steps.collect_context.output.observed_region != blank -%}{%- assign regions = regions | push: steps.collect_context.output.observed_region -%}{%- endif -%}
+        {%- assign ct = steps.normalize_cloudtrail_target.output.record | split: '|' -%}
+        {%- assign ecs = steps.normalize_ecs_target.output.record | split: '|' -%}
+        {%- assign manual = steps.normalize_manual_target.output.record | split: '|' -%}
+        {%- if ct[3] != blank -%}{%- assign regions = regions | push: ct[3] -%}{%- endif -%}
+        {%- if ecs[3] != blank -%}{%- assign regions = regions | push: ecs[3] -%}{%- endif -%}
+        {%- if manual[3] != blank -%}{%- assign regions = regions | push: manual[3] -%}{%- endif -%}
+        {{- regions | compact | uniq | first | default: '' -}}
+      region_count: >-
+        {%- assign regions = '' | split: '' -%}
+        {%- if steps.collect_context.output.observed_region != blank -%}{%- assign regions = regions | push: steps.collect_context.output.observed_region -%}{%- endif -%}
+        {%- assign ct = steps.normalize_cloudtrail_target.output.record | split: '|' -%}
+        {%- assign ecs = steps.normalize_ecs_target.output.record | split: '|' -%}
+        {%- assign manual = steps.normalize_manual_target.output.record | split: '|' -%}
+        {%- if ct[3] != blank -%}{%- assign regions = regions | push: ct[3] -%}{%- endif -%}
+        {%- if ecs[3] != blank -%}{%- assign regions = regions | push: ecs[3] -%}{%- endif -%}
+        {%- if manual[3] != blank -%}{%- assign regions = regions | push: manual[3] -%}{%- endif -%}
+        {{- regions | compact | uniq | size -}}
+
+  - name: reject_invalid_or_ambiguous_target
+    type: if
+    condition: >-
+      ${{ steps.resolve_target.output.parse_state != 'valid' or
+      steps.resolve_target.output.function_name_count != 1 or
+      steps.resolve_target.output.region_count != 1 or
+      steps.resolve_target.output.embedded_account_count > 1 }}
+    steps:
+      - name: log_invalid_or_ambiguous_target
+        type: console
+        with:
+          message: >-
+            Outcome: no_change; target identifiers were invalid or resolved to
+            distinct function names, accounts, or Regions.
+      - name: fail_invalid_or_ambiguous_target
+        type: workflow.fail
+        with:
+          message: >-
+            Provide one unambiguous Lambda target. Identical normalized values
+            are accepted; distinct values are rejected.
+          reason: invalid_or_ambiguous_target
+
+  - name: reject_missing_target
+    type: if
+    condition: >-
+      ${{ steps.resolve_target.output.function_name == blank or
+      steps.resolve_target.output.region == blank or
+      steps.resolve_target.output.target_account_id == blank }}
+    steps:
+      - name: log_missing_target
+        type: console
+        with:
+          message: >-
+            Outcome: no_change; function, Region, or resource-side account is
+            missing. CloudTrail alerts require
+            aws.cloudtrail.recipient_account_id even when faas.name is present.
+      - name: fail_missing_target
+        type: workflow.fail
+        with:
+          message: Lambda quiescing requires a function, Region, and resource-side account.
+          reason: missing_target
+
+  - name: reject_account_mismatch
+    type: if
+    condition: >-
+      ${{ steps.resolve_target.output.target_account_id !=
+      steps.collect_context.output.expected_account_id or
+      steps.resolve_target.output.embedded_account_id != blank and
+      steps.resolve_target.output.embedded_account_id !=
+      steps.collect_context.output.expected_account_id }}
+    steps:
+      - name: log_account_mismatch
+        type: console
+        with:
+          message: |-
+            Outcome: no_change; target account evidence does not match the configured expected account.
+            Expected: {{ steps.collect_context.output.expected_account_id }}.
+            Resource-side target: {{ steps.resolve_target.output.target_account_id | default: '(missing)' }}.
+            Source: {{ steps.resolve_target.output.account_source }}.
+            ARN/partial-ARN account: {{ steps.resolve_target.output.embedded_account_id | default: '(none)' }}.
+      - name: fail_account_mismatch
+        type: workflow.fail
+        with:
+          message: Target account evidence does not match the expected account.
+          reason: target_account_mismatch
+
+  - name: build_canonical_target
+    type: data.set
+    with:
+      function_arn: >-
+        {%- if steps.resolve_target.output.region contains 'us-gov-' -%}arn:aws-us-gov
+        {%- else -%}arn:aws{%- endif -%}:lambda:{{ steps.resolve_target.output.region }}:{{ steps.resolve_target.output.target_account_id }}:function:{{ steps.resolve_target.output.function_name }}
+
+  - name: get_connector_identity
+    type: aws.request
+    connector-id: __install__.aws-connector
+    on-failure:
+      continue: true
+    with:
+      service: sts
+      headers:
+        Accept: application/json
+      query:
+        Action: GetCallerIdentity
+        Version: "2011-06-15"
+
+  - name: capture_connector_identity
+    type: data.set
+    with:
+      connector_account_id: "{{ steps.get_connector_identity.output.data.GetCallerIdentityResponse.GetCallerIdentityResult.Account | default: '' | strip }}"
+
+  - name: reject_connector_account_mismatch
+    type: if
+    condition: >-
+      ${{ steps.get_connector_identity.error != nil or
+      steps.capture_connector_identity.output.connector_account_id !=
+      steps.collect_context.output.expected_account_id }}
+    steps:
+      - name: log_connector_account_mismatch
+        type: console
+        with:
+          message: |-
+            Outcome: no_change; connector identity could not be verified.
+            Target account: {{ steps.resolve_target.output.target_account_id }}.
+            Connector account: {{ steps.capture_connector_identity.output.connector_account_id | default: '(unverified)' }}.
+      - name: fail_connector_account_mismatch
+        type: workflow.fail
+        with:
+          message: The AWS connector account does not match the expected account.
+          reason: connector_account_mismatch
+
+  - name: get_concurrency_before
+    type: aws.request
+    connector-id: __install__.aws-connector
+    on-failure:
+      continue: true
+    with:
+      service: lambda
+      region: "{{ steps.resolve_target.output.region }}"
+      method: GET
+      path: "/2019-09-30/functions/{{ steps.build_canonical_target.output.function_arn | url_encode }}/concurrency"
+
+  - name: classify_pre_read
+    type: data.set
+    with:
+      state: >-
+        {%- if steps.get_concurrency_before.error != nil -%}failed
+        {%- elsif steps.get_concurrency_before.output.data.ReservedConcurrentExecutions == 0 -%}already_zero
+        {%- else -%}ready{%- endif -%}
+      concurrency_token: >-
+        {%- if steps.get_concurrency_before.output.data.ReservedConcurrentExecutions == nil -%}unconfigured
+        {%- else -%}{{ steps.get_concurrency_before.output.data.ReservedConcurrentExecutions }}{%- endif -%}
+
+  - name: reject_pre_read_failure
+    type: if
+    condition: "${{ steps.classify_pre_read.output.state == 'failed' }}"
+    steps:
+      - name: log_pre_read_failure
+        type: console
+        with:
+          message: >-
+            Outcome: failed; GetFunctionConcurrency could not establish the
+            canonical target's current reserved concurrency.
+      - name: fail_pre_read_failure
+        type: workflow.fail
+        with:
+          message: GetFunctionConcurrency failed for the canonical Lambda target.
+          reason: lambda_pre_read_failed
+
+  - name: log_already_quiesced
+    type: console
+    if: "${{ steps.classify_pre_read.output.state == 'already_zero' }}"
+    with:
+      message: >-
+        Outcome: already_safe; reserved concurrency is already exact numeric
+        zero for {{ steps.build_canonical_target.output.function_arn }}.
+
+  - name: request_approval
+    type: waitForInput
+    if: "${{ steps.classify_pre_read.output.state == 'ready' }}"
+    timeout: 1h
+    with:
+      message: |-
+        Approve setting reserved concurrency to zero?
+
+        Function: {{ steps.build_canonical_target.output.function_arn }}
+        Current reserved concurrency: {{ steps.classify_pre_read.output.concurrency_token }}
+
+        WARNING: This blocks new invocations but does not stop invocations that are already running. Asynchronous events can be retried and may ultimately be lost or sent to a dead-letter queue or on-failure destination; restoring concurrency does not recover them.
+        Rollback: {% if steps.classify_pre_read.output.concurrency_token == 'unconfigured' %}delete the concurrency configuration{% else %}restore reserved concurrency to {{ steps.classify_pre_read.output.concurrency_token }}{% endif %}.
+      schema:
+        type: object
+        properties:
+          approved:
+            type: boolean
+            title: Set reserved concurrency to zero
+            default: false
+          notes:
+            type: string
+            title: Analyst notes
+        required:
+          - approved
+
+  - name: log_rejected_result
+    type: console
+    if: >-
+      ${{ steps.classify_pre_read.output.state == 'ready' and
+      steps.request_approval.output.response.approved != true }}
+    with:
+      message: >-
+        Outcome: no_change; the analyst did not approve quiescing
+        {{ steps.build_canonical_target.output.function_arn }}.
+
+  # Revalidate identity and mutable state immediately after approval.
+  - name: get_connector_identity_fresh
+    type: aws.request
+    connector-id: __install__.aws-connector
+    if: "${{ steps.request_approval.output.response.approved == true }}"
+    on-failure:
+      continue: true
+    with:
+      service: sts
+      headers:
+        Accept: application/json
+      query:
+        Action: GetCallerIdentity
+        Version: "2011-06-15"
+
+  - name: get_concurrency_fresh
+    type: aws.request
+    connector-id: __install__.aws-connector
+    if: "${{ steps.request_approval.output.response.approved == true }}"
+    on-failure:
+      continue: true
+    with:
+      service: lambda
+      region: "{{ steps.resolve_target.output.region }}"
+      method: GET
+      path: "/2019-09-30/functions/{{ steps.build_canonical_target.output.function_arn | url_encode }}/concurrency"
+
+  - name: compare_fresh_evidence
+    type: data.set
+    if: "${{ steps.request_approval.output.response.approved == true }}"
+    with:
+      state: >-
+        {%- assign fresh_account = steps.get_connector_identity_fresh.output.data.GetCallerIdentityResponse.GetCallerIdentityResult.Account | default: '' | strip -%}
+        {%- assign fresh_concurrency = steps.get_concurrency_fresh.output.data.ReservedConcurrentExecutions | append: '' -%}
+        {%- if steps.get_connector_identity_fresh.error != nil or steps.get_concurrency_fresh.error != nil -%}stale_or_failed
+        {%- elsif fresh_account != steps.collect_context.output.expected_account_id -%}stale_or_failed
+        {%- elsif steps.get_concurrency_fresh.output.data.ReservedConcurrentExecutions == nil -%}
+          {%- if steps.classify_pre_read.output.concurrency_token == 'unconfigured' -%}unchanged{%- else -%}stale_or_failed{%- endif -%}
+        {%- elsif fresh_concurrency == steps.classify_pre_read.output.concurrency_token -%}unchanged
+        {%- else -%}stale_or_failed{%- endif -%}
+
+  - name: reject_stale_approved_state
+    type: if
+    condition: >-
+      ${{ steps.request_approval.output.response.approved == true and
+      steps.compare_fresh_evidence.output.state != 'unchanged' }}
+    steps:
+      - name: log_stale_approved_state
+        type: console
+        with:
+          message: >-
+            Outcome: no_change; connector identity or reserved concurrency
+            changed or could not be revalidated after approval. No mutation was
+            requested.
+      - name: fail_stale_approved_state
+        type: workflow.fail
+        with:
+          message: Approved Lambda state is stale; no mutation was requested.
+          reason: stale_approved_state
+
+  - name: set_zero_reserved_concurrency
+    type: aws.request
+    connector-id: __install__.aws-connector
+    if: "${{ steps.compare_fresh_evidence.output.state == 'unchanged' }}"
+    on-failure:
+      continue: true
+    with:
+      service: lambda
+      region: "{{ steps.resolve_target.output.region }}"
+      method: PUT
+      path: "/2017-10-31/functions/{{ steps.build_canonical_target.output.function_arn | url_encode }}/concurrency"
+      body:
+        ReservedConcurrentExecutions: 0
+
+  - name: reject_mutation_failure
+    type: if
+    condition: >-
+      ${{ steps.compare_fresh_evidence.output.state == 'unchanged' and
+      steps.set_zero_reserved_concurrency.error != nil }}
+    steps:
+      - name: log_mutation_failure
+        type: console
+        with:
+          message: >-
+            Outcome: mutation_failed; PutFunctionConcurrency returned an error.
+            Verify current concurrency before attempting rollback.
+      - name: fail_mutation_failure
+        type: workflow.fail
+        with:
+          message: PutFunctionConcurrency failed for the Lambda target.
+          reason: put_function_concurrency_failed
+
+  - name: verify_zero_reserved_concurrency
+    type: while
+    if: >-
+      ${{ steps.compare_fresh_evidence.output.state == 'unchanged' and
+      steps.set_zero_reserved_concurrency.error == nil }}
+    condition: "${{ variables.verification_state != 'zero' }}"
+    max-iterations:
+      limit: 3
+      on-limit: continue
+    steps:
+      - name: verification_backoff
+        type: wait
+        with:
+          duration: 2s
+      - name: get_concurrency_after
+        type: aws.request
+        connector-id: __install__.aws-connector
+        on-failure:
+          continue: true
+        with:
+          service: lambda
+          region: "{{ steps.resolve_target.output.region }}"
+          method: GET
+          path: "/2019-09-30/functions/{{ steps.build_canonical_target.output.function_arn | url_encode }}/concurrency"
+      - name: classify_verification_attempt
+        type: data.set
+        with:
+          verification_state: >-
+            {%- if steps.get_concurrency_after.error == nil and steps.get_concurrency_after.output.data.ReservedConcurrentExecutions == 0 -%}zero
+            {%- elsif steps.get_concurrency_after.error == nil -%}not_zero
+            {%- else -%}read_failed{%- endif -%}
+
+  - name: log_verified_result
+    type: console
+    if: "${{ variables.verification_state == 'zero' }}"
+    with:
+      message: |-
+        Outcome: verified; reserved concurrency is exact numeric zero.
+        Function: {{ steps.build_canonical_target.output.function_arn }}.
+        Previous state: {{ steps.classify_pre_read.output.concurrency_token }}.
+        Responder: {{ steps.request_approval.output.respondedBy }}.
+        Notes: {{ steps.request_approval.output.response.notes | default: '(none)' }}.
+
+  - name: reject_unverified_result
+    type: if
+    condition: >-
+      ${{ steps.compare_fresh_evidence.output.state == 'unchanged' and
+      steps.set_zero_reserved_concurrency.error == nil and
+      variables.verification_state != 'zero' }}
+    steps:
+      - name: log_unverified_result
+        type: console
+        with:
+          message: >-
+            Outcome: verification_failed; PutFunctionConcurrency succeeded, but
+            exact numeric zero was not verified after three reads. Verify the
+            current state before rollback.
+      - name: fail_unverified_result
+        type: workflow.fail
+        with:
+          message: Reserved concurrency zero was not verified after three reads.
+          reason: lambda_zero_not_verified
