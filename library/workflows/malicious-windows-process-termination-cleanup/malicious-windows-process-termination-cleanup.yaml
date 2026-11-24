@@ -1,14 +1,15 @@
 template-metadata:
-  slug: malicious-windows-process-termination-and-cleanup
+  slug: malicious-windows-process-termination-cleanup
   version: "1.0.0"
   availability: ">=9.5.0"
   name: "Malicious Windows Process Termination and Cleanup"
   description: >-
     From a Windows alert with process.executable and process.entity_id,
     terminate that process and its tree, then delete files it created and
-    registry values it modified. Opens a Security case with the process,
-    agent, and each deleted path. Requires Elastic Defend and the Execute
-    response action.
+    registry values it modified. An analyst must approve the run before any
+    process is killed or any file or registry value is deleted. Opens a
+    Security case with the process, agent, and each deleted path. Requires
+    Elastic Defend and the Execute response action.
   solutions: [security]
   categories: [response, case-management]
 
@@ -16,8 +17,10 @@ name: Malicious Windows Process Termination and Cleanup
 description: >
   Requires Elastic Defend on Windows and permission to submit the Execute
   response action. Run it from a security alert whose process.executable and
-  process.entity_id are set, or fill those inputs manually. The workflow
-  kills the process tree with taskkill /F /T when process.pid is known.
+  process.entity_id are set, or fill those inputs manually. An analyst must
+  approve the run before any process is killed or any file or registry value
+  is deleted. The approval step waits up to 4 hours. The workflow kills the
+  process tree with taskkill /F /T when process.pid is known.
   Otherwise it submits the Defend kill-process action for that entity id,
   which does not include child processes. It then queries file creation
   events and registry modification events for the same process.entity_id
@@ -71,9 +74,10 @@ triggers:
           a process-event lookup.
 
 settings:
-  timeout: 20m
+  timeout: 5h
   concurrency:
-    key: "{{ workflow.id }}"
+    # One run per endpoint. A second alert for a different agent is not dropped.
+    key: "{{ workflow.id }}:{{ event.alerts[0].agent.id | default: event.alerts[0].elastic.agent.id | default: inputs.agent_id | join: ',' | split: ',' | first | strip }}"
     strategy: drop
     max: 1
 
@@ -230,6 +234,23 @@ steps:
           skipped_registry: []
           kill_note: ""
 
+      # Rejection stops this branch. Nothing is killed or deleted until an
+      # analyst approves.
+      - name: approve_cleanup
+        type: waitForApproval
+        timeout: 4h
+        with:
+          message: |
+            Approve termination and cleanup for this Windows process?
+            agent.id: {{ steps.normalize_inputs.output.agent_id }}
+            process.entity_id: {{ steps.normalize_inputs.output.process_entity_id }}
+            process.executable: {{ steps.normalize_inputs.output.process_executable }}
+            Approving kills the process tree when a pid is known, otherwise
+            submits the Defend kill-process action, then deletes files that
+            process created and registry values it modified.
+          approveLabel: "Terminate and clean up"
+          rejectLabel: "Do not clean up"
+
       # taskkill /T ends the pid and every child. A missing pid falls back to
       # the Defend kill-process action, which targets only that entity.
       - name: when_pid_known
@@ -378,6 +399,15 @@ steps:
                     {%- if path contains "'" -%}{%- assign bad = 'yes' -%}{%- endif -%}
                     {%- if path contains '"' -%}{%- assign bad = 'yes' -%}{%- endif -%}
                     {%- if path contains '`' -%}{%- assign bad = 'yes' -%}{%- endif -%}
+                    {%- if path contains '‘' -%}{%- assign bad = 'yes' -%}{%- endif -%}
+                    {%- if path contains '’' -%}{%- assign bad = 'yes' -%}{%- endif -%}
+                    {%- if path contains '‚' -%}{%- assign bad = 'yes' -%}{%- endif -%}
+                    {%- if path contains '‛' -%}{%- assign bad = 'yes' -%}{%- endif -%}
+                    {%- assign encoded = path | url_encode -%}
+                    {%- if encoded contains '%00' -%}{%- assign bad = 'yes' -%}{%- endif -%}
+                    {%- if encoded contains '%09' -%}{%- assign bad = 'yes' -%}{%- endif -%}
+                    {%- if encoded contains '%0A' -%}{%- assign bad = 'yes' -%}{%- endif -%}
+                    {%- if encoded contains '%0D' -%}{%- assign bad = 'yes' -%}{%- endif -%}
                     {%- if path contains '$' -%}{%- assign bad = 'yes' -%}{%- endif -%}
                     {%- if path contains '%' -%}{%- assign bad = 'yes' -%}{%- endif -%}
                     {%- if path contains '&' -%}{%- assign bad = 'yes' -%}{%- endif -%}
@@ -550,6 +580,24 @@ steps:
                     {%- if value contains '"' -%}{%- assign bad = 'yes' -%}{%- endif -%}
                     {%- if key contains '`' -%}{%- assign bad = 'yes' -%}{%- endif -%}
                     {%- if value contains '`' -%}{%- assign bad = 'yes' -%}{%- endif -%}
+                    {%- if key contains '‘' -%}{%- assign bad = 'yes' -%}{%- endif -%}
+                    {%- if value contains '‘' -%}{%- assign bad = 'yes' -%}{%- endif -%}
+                    {%- if key contains '’' -%}{%- assign bad = 'yes' -%}{%- endif -%}
+                    {%- if value contains '’' -%}{%- assign bad = 'yes' -%}{%- endif -%}
+                    {%- if key contains '‚' -%}{%- assign bad = 'yes' -%}{%- endif -%}
+                    {%- if value contains '‚' -%}{%- assign bad = 'yes' -%}{%- endif -%}
+                    {%- if key contains '‛' -%}{%- assign bad = 'yes' -%}{%- endif -%}
+                    {%- if value contains '‛' -%}{%- assign bad = 'yes' -%}{%- endif -%}
+                    {%- assign key_encoded = key | url_encode -%}
+                    {%- assign value_encoded = value | url_encode -%}
+                    {%- if key_encoded contains '%00' -%}{%- assign bad = 'yes' -%}{%- endif -%}
+                    {%- if value_encoded contains '%00' -%}{%- assign bad = 'yes' -%}{%- endif -%}
+                    {%- if key_encoded contains '%09' -%}{%- assign bad = 'yes' -%}{%- endif -%}
+                    {%- if value_encoded contains '%09' -%}{%- assign bad = 'yes' -%}{%- endif -%}
+                    {%- if key_encoded contains '%0A' -%}{%- assign bad = 'yes' -%}{%- endif -%}
+                    {%- if value_encoded contains '%0A' -%}{%- assign bad = 'yes' -%}{%- endif -%}
+                    {%- if key_encoded contains '%0D' -%}{%- assign bad = 'yes' -%}{%- endif -%}
+                    {%- if value_encoded contains '%0D' -%}{%- assign bad = 'yes' -%}{%- endif -%}
                     {%- if key contains '$' -%}{%- assign bad = 'yes' -%}{%- endif -%}
                     {%- if value contains '$' -%}{%- assign bad = 'yes' -%}{%- endif -%}
                     {%- if key contains '%' -%}{%- assign bad = 'yes' -%}{%- endif -%}
