@@ -14,10 +14,12 @@ template-metadata:
     events supply the product code, and Elastic Defend runs msiexec.exe /x
     for each code. The raw uninstall string is not executed. A legitimate
     install in that window is removed too. The workflow log and a new case
-    name the Publisher and product from registry events with the same
-    process.entity_id. A case is also opened when the uninstall action is
-    not accepted. The case title starts with "MSI Cleanup workflow - "
-    and the agent id.
+    name the Publisher and product from registry events in that window whose
+    path contains the product code. A case is also opened when the uninstall
+    action is not accepted. The execute action needs the Execute Operations
+    privilege. On Elastic Stack, response actions are an Enterprise feature.
+    On Serverless they need the Endpoint Protection Complete add-on.
+    The case title starts with "MSI Cleanup workflow - " and the agent id.
   solutions: [security]
   categories: [response]
 
@@ -31,9 +33,14 @@ template-metadata:
 # commands as MsiExec.exe /I{GUID} or /X{GUID}. Either form is accepted. The
 # response action is always:
 # msiexec.exe /x {GUID} /qn /norestart /L*v C:\Windows\Temp\msi-removal-{GUID}.log
-# Registry events with the same process.entity_id supply Publisher, ProductName,
-# and DisplayName for the workflow log and the case. The case title starts with
-# "MSI Cleanup workflow - " and the agent id. At most consts.max_packages
+# Publisher, ProductName, and DisplayName come from registry events in that
+# same window whose path contains the product code. Elastic Defend records
+# the Uninstall\{GUID} key when registry events are collected. A failed
+# product code is remembered for this run, so later rows do not open another
+# case for it. The execute action needs the Execute Operations privilege.
+# On Elastic Stack, response actions are an Enterprise feature. On Serverless
+# they need the Endpoint Protection Complete add-on. The case title starts
+# with "MSI Cleanup workflow - " and the agent id. At most consts.max_packages
 # distinct product codes are removed, newest first.
 name: Uninstall Recent MSI After Malicious Installer Alert
 description: >
@@ -48,13 +55,17 @@ description: >
   logs-endpoint.events.registry-* on that agent for msiexec.exe writing
   UninstallString. The product code is taken from registry.data.strings.
   Elastic Defend response actions then run msiexec.exe /x {GUID} /qn
-  /norestart. The raw UninstallString is not executed. At most 3 distinct
-  product codes are removed. A legitimate install in that window is removed
-  too. Each submitted uninstall is logged with the Publisher, ProductName,
-  and DisplayName from registry events that share the msiexec
-  process.entity_id, and a case is opened. A case is also opened when the
-  uninstall action is not accepted. The case title starts with
-  "MSI Cleanup workflow - " and the agent id.
+  /norestart. The raw UninstallString is not executed. The execute action
+  needs the Execute Operations privilege. On Elastic Stack, response actions
+  are an Enterprise feature. On Serverless they need the Endpoint Protection
+  Complete add-on. Elastic Defend records the Uninstall key when registry
+  events are collected. At most 3 distinct product codes are removed. A
+  legitimate install in that window is removed too. Each submitted uninstall
+  is logged with the Publisher, ProductName, and DisplayName from registry
+  events in that window whose path contains the product code, and a case is
+  opened. A case is also opened when the uninstall action is not accepted.
+  A product code that fails is not submitted again in that run. The case
+  title starts with "MSI Cleanup workflow - " and the agent id.
 enabled: true
 tags:
   - security
@@ -112,7 +123,8 @@ steps:
         {%- if agent == '<your_input>' -%}
         {%- assign agent = '' -%}
         {%- endif -%}
-        {%- if agent contains '"' or agent contains '|' or agent contains ' ' -%}
+        {%- assign agent_encoded = agent | url_encode -%}
+        {%- if agent contains '"' or agent contains '|' or agent contains ' ' or agent_encoded contains '%5C' -%}
         {%- assign agent = '' -%}
         {%- endif -%}
         {{- agent -}}
@@ -127,7 +139,8 @@ steps:
         {%- if stamp == '<your_input>' -%}
         {%- assign stamp = '' -%}
         {%- endif -%}
-        {%- if stamp contains '"' or stamp contains '|' or stamp contains ' ' -%}
+        {%- assign stamp_encoded = stamp | url_encode -%}
+        {%- if stamp contains '"' or stamp contains '|' or stamp contains ' ' or stamp_encoded contains '%5C' -%}
         {%- assign stamp = '' -%}
         {%- endif -%}
         {{- stamp -}}
@@ -223,7 +236,8 @@ steps:
                         {%- assign s3 = segments[3] | default: '' | size -%}
                         {%- assign s4 = segments[4] | default: '' | size -%}
                         {%- assign switch_ok = 'no' -%}
-                        {%- if lower contains '/x{' or lower contains '/i{' or lower contains '/x {' or lower contains '/i {' -%}
+                        {%- assign packed = lower | url_encode | remove: '+' | remove: '%20' | remove: '%09' | remove: '%0A' | remove: '%0D' -%}
+                        {%- if packed contains '%2Fx%7B' or packed contains '%2Fi%7B' -%}
                         {%- assign switch_ok = 'yes' -%}
                         {%- endif -%}
                         {%- if lower contains 'msiexec' -%}
@@ -288,7 +302,8 @@ steps:
                         with:
                           entity_id: |-
                             {%- assign id = foreach.item[2] | default: '' | append: '' | strip -%}
-                            {%- if id contains '"' -%}
+                            {%- assign id_encoded = id | url_encode -%}
+                            {%- if id contains '"' or id contains '|' or id contains ' ' or id_encoded contains '%5C' -%}
                             {%- assign id = '' -%}
                             {%- endif -%}
                             {{- id -}}
@@ -298,12 +313,13 @@ steps:
                           publisher: "unset"
                           product_name: "unset"
                           display_name: "unset"
-                      - name: when_entity_known
+                      - name: when_guid_known
                         type: if
-                        condition: 'steps.read_entity_id.output.entity_id: * and not steps.read_entity_id.output.entity_id: ""'
+                        condition: 'steps.read_product_code.output.log_id: * and not steps.read_product_code.output.log_id: ""'
                         steps:
-                          # Same process.entity_id as the UninstallString event.
-                          # Publisher and ProductName are separate registry events.
+                          # Names must come from this product's Uninstall key.
+                          # msiexec.exe /V is one long-lived process, so
+                          # process.entity_id alone can name a different package.
                           - name: query_product_names
                             type: elasticsearch.esql.query
                             on-failure:
@@ -313,10 +329,14 @@ steps:
                               query: |
                                 FROM {{ consts.registry_index }}
                                 | WHERE agent.id == "{{ steps.set_alert_context.output.agent_id }}"
-                                | WHERE process.entity_id == "{{ steps.read_entity_id.output.entity_id }}"
+                                | WHERE @timestamp >= TO_DATETIME("{{ steps.set_alert_context.output.alert_time }}") - {{ consts.lookaround_minutes }} minutes
+                                | WHERE @timestamp <= TO_DATETIME("{{ steps.set_alert_context.output.alert_time }}") + {{ consts.lookaround_minutes }} minutes
+                                | WHERE event.category == "registry"
+                                | WHERE TO_LOWER(registry.path) LIKE "*{{ steps.read_product_code.output.log_id | downcase }}*"
                                 | WHERE registry.value == "Publisher" OR registry.value == "ProductName" OR registry.value == "DisplayName"
                                 | EVAL value_name = MV_FIRST(registry.value),
                                     value_data = MV_CONCAT(registry.data.strings, " ")
+                                | SORT @timestamp DESC
                                 | KEEP value_name, value_data
                                 | LIMIT 20
                           - name: count_name_rows
@@ -406,7 +426,7 @@ steps:
                       - name: log_product_names
                         type: console
                         with:
-                          message: "Registry identity for process.entity_id {{ steps.read_entity_id.output.entity_id }}: rows={{ steps.count_name_rows.output.row_count | default: 0 }} Publisher={{ variables.publisher | default: '' }} ProductName={{ variables.product_name | default: '' }} DisplayName={{ variables.display_name | default: '' }}{% if steps.query_product_names.error != blank %} error={{ steps.query_product_names.error.message }}{% endif %}"
+                          message: "Registry identity for {{ steps.read_product_code.output.product_code }}: rows={{ steps.count_name_rows.output.row_count | default: 0 }} Publisher={{ variables.publisher | default: '' }} ProductName={{ variables.product_name | default: '' }} DisplayName={{ variables.display_name | default: '' }} process.entity_id={{ steps.read_entity_id.output.entity_id }}{% if steps.query_product_names.error != blank %} error={{ steps.query_product_names.error.message }}{% endif %}"
                       - name: uninstall_package
                         type: kibana.request
                         on-failure:
@@ -449,6 +469,7 @@ steps:
                           - name: note_uninstall_failed
                             type: data.set
                             with:
+                              seen_codes: "{{ variables.seen_codes | default: ',' | append: steps.read_product_code.output.product_code | append: ',' }}"
                               outcome: failed
                               detail: "{{ steps.uninstall_package.error.message | default: '' | append: '' }}"
                       - name: create_uninstall_case
@@ -522,7 +543,7 @@ steps:
                       - name: log_skipped_cap
                         type: console
                         with:
-                          message: "Left {{ steps.read_product_code.output.product_code }} installed. It is already queued in this run, or {{ consts.max_packages }} packages were already submitted."
+                          message: "Skipped {{ steps.read_product_code.output.product_code }}. It was already attempted in this run, or {{ consts.max_packages }} packages were already submitted."
             else:
               - name: log_none
                 type: console
