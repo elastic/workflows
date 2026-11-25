@@ -295,7 +295,7 @@ steps:
           - name: note_zip_cleanup
             type: data.set
             with:
-              cleanup_ok: "{%- if steps.read_zip_output.output.timed_out == 'yes' -%}no{%- elsif steps.read_zip_output.output.zipped | strip == 'yes' -%}pending{%- else -%}yes{%- endif -%}"
+              cleanup_ok: "{%- if steps.read_zip_output.output.timed_out == 'yes' -%}no{%- elsif steps.read_zip_output.output.zipped == 'yes' -%}pending{%- else -%}yes{%- endif -%}"
 
           - name: when_zipped
             type: if
