@@ -20,10 +20,12 @@ description: >
   value uses the name after the backslash. Every Chrome, Edge, Brave, and
   Firefox profile under that account is included. History databases are
   copied, including files the browser still has open, then zipped and
-  uploaded. The history files on the endpoint are left in place. The
-  temporary zip is removed after get-file completes. Download the archive
-  from Security → Endpoints → Response actions history. That download is
-  password-protected; the password is elastic.
+  uploaded. The history files on the endpoint are left in place. Each run
+  uses its own temp folder. Those copies are removed after the zip action
+  finishes, including when get-file fails. If the action is still running
+  when the poll stops, the copies are left in place and the log names the
+  path. Download the archive from Security → Endpoints → Response actions
+  history. That download is password-protected; the password is elastic.
 enabled: true
 tags:
   - security
@@ -54,23 +56,22 @@ triggers:
 settings:
   timeout: 20m
   concurrency:
-    key: "{{ workflow.id }}"
+    # One collection at a time per endpoint. A different agent is not dropped.
+    key: "{{ workflow.id }}:{{ event.alerts[0].agent.id | default: event.alerts[0].elastic.agent.id | default: inputs.agent_id | join: ',' | split: ',' | first | strip }}"
     strategy: drop
     max: 1
 
 consts:
-  # Temp files live here and are removed after a successful get-file.
+  # Temp files live here. The folder name includes the execution id.
   temp_dir: 'C:\Windows\Temp'
 
 steps:
-  # A typed input overrides the alert. The literal placeholder from the Run
-  # dialog is treated as empty.
+  # A typed input overrides the alert.
   - name: set_alert_context
     type: data.set
     with:
       agent_id: |
         {%- assign typed = inputs.agent_id | default: '' | append: '' | strip -%}
-        {%- if typed == '<your_input>' -%}{%- assign typed = '' -%}{%- endif -%}
         {%- if typed != '' -%}
         {{ typed }}
         {%- else -%}
@@ -81,7 +82,6 @@ steps:
         {%- endif -%}
       user_name: |
         {%- assign typed = inputs.user_name | default: '' | append: '' | strip -%}
-        {%- if typed == '<your_input>' -%}{%- assign typed = '' -%}{%- endif -%}
         {%- if typed != '' -%}
         {{ typed }}
         {%- else -%}
@@ -111,12 +111,16 @@ steps:
     type: data.set
     with:
       safe_label: "{{ steps.normalize_inputs.output.user_name | downcase | replace: ' ', '-' | truncate: 40, '' }}"
+      run_id: |-
+        {%- assign raw = execution.id | default: '' | downcase | append: '' | strip -%}
+        {%- assign clean = raw | remove: '-' -%}
+        {%- if clean != '' -%}{{ clean | truncate: 32, '' }}{%- else -%}run{%- endif -%}
 
   - name: set_locations
     type: data.set
     with:
-      stage_path: "{{ consts.temp_dir }}\\elastic-browser-history-{{ steps.set_paths.output.safe_label }}"
-      zip_path: "{{ consts.temp_dir }}\\elastic-browser-history-{{ steps.set_paths.output.safe_label }}.zip"
+      stage_path: "{{ consts.temp_dir }}\\elastic-browser-history-{{ steps.set_paths.output.safe_label }}-{{ steps.set_paths.output.run_id }}"
+      zip_path: "{{ consts.temp_dir }}\\elastic-browser-history-{{ steps.set_paths.output.safe_label }}-{{ steps.set_paths.output.run_id }}.zip"
 
   - name: decide_collect
     type: data.set
@@ -199,7 +203,7 @@ steps:
     with:
       command: |
         {%- if steps.classify_collect.output.ready == 'yes' -%}
-        powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "$u='{{ steps.normalize_inputs.output.user_name }}'; $root=Join-Path 'C:\Users' $u; if(-not (Test-Path -LiteralPath $root)){ Write-Output 'USER_PROFILE_NOT_FOUND'; exit 2 }; $stage='{{ steps.set_locations.output.stage_path }}'; $zip='{{ steps.set_locations.output.zip_path }}'; if(Test-Path -LiteralPath $stage){ Remove-Item -LiteralPath $stage -Recurse -Force }; if(Test-Path -LiteralPath $zip){ Remove-Item -LiteralPath $zip -Force }; New-Item -ItemType Directory -Path $stage | Out-Null; $count=0; $browsers=@(@{n='chrome'; r=(Join-Path $root 'AppData\Local\Google\Chrome\User Data'); f=@('History','History-journal','Archived History')}, @{n='edge'; r=(Join-Path $root 'AppData\Local\Microsoft\Edge\User Data'); f=@('History','History-journal','Archived History')}, @{n='brave'; r=(Join-Path $root 'AppData\Local\BraveSoftware\Brave-Browser\User Data'); f=@('History','History-journal','Archived History')}, @{n='firefox'; r=(Join-Path $root 'AppData\Roaming\Mozilla\Firefox\Profiles'); f=@('places.sqlite','places.sqlite-wal','places.sqlite-shm')}); foreach($b in $browsers){ if(-not (Test-Path -LiteralPath $b.r)){ continue }; foreach($p in @(Get-ChildItem -LiteralPath $b.r -Directory -ErrorAction SilentlyContinue)){ foreach($file in $b.f){ $src=Join-Path $p.FullName $file; if(Test-Path -LiteralPath $src -PathType Leaf){ $rel=Join-Path $b.n (Join-Path $p.Name $file); $dst=Join-Path $stage $rel; try { $in=[IO.File]::Open($src,'Open','Read','ReadWrite'); try { $dir=Split-Path -Parent $dst; if(-not (Test-Path -LiteralPath $dir)){ New-Item -ItemType Directory -Path $dir -Force | Out-Null }; $out=[IO.File]::Create($dst); try { [void]$in.CopyTo($out) } finally { $out.Dispose() } } finally { $in.Dispose() }; $count++; Write-Output ('COPIED '+$rel) } catch { Write-Output ('COPY_FAILED '+$rel) } } } } }; if($count -eq 0){ Write-Output 'NO_HISTORY'; exit 3 }; try { Compress-Archive -Path $stage -DestinationPath $zip -Force; Write-Output ('ZIPPED '+$zip); Write-Output 'HISTORY_ZIPPED' } catch { Write-Output 'ZIP_FAILED'; exit 4 }"
+        powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "$u='{{ steps.normalize_inputs.output.user_name }}'; $root=Join-Path 'C:\Users' $u; if(-not (Test-Path -LiteralPath $root)){ Write-Output 'USER_PROFILE_NOT_FOUND'; exit 2 }; $stage='{{ steps.set_locations.output.stage_path }}'; $zip='{{ steps.set_locations.output.zip_path }}'; if(Test-Path -LiteralPath $stage){ Remove-Item -LiteralPath $stage -Recurse -Force }; if(Test-Path -LiteralPath $zip){ Remove-Item -LiteralPath $zip -Force }; New-Item -ItemType Directory -Path $stage | Out-Null; Write-Output 'HISTORY_ZIP_START'; $count=0; $failed=0; $browsers=@(@{n='chrome'; r=(Join-Path $root 'AppData\Local\Google\Chrome\User Data'); f=@('History','History-journal','Archived History')}, @{n='edge'; r=(Join-Path $root 'AppData\Local\Microsoft\Edge\User Data'); f=@('History','History-journal','Archived History')}, @{n='brave'; r=(Join-Path $root 'AppData\Local\BraveSoftware\Brave-Browser\User Data'); f=@('History','History-journal','Archived History')}, @{n='firefox'; r=(Join-Path $root 'AppData\Roaming\Mozilla\Firefox\Profiles'); f=@('places.sqlite','places.sqlite-wal','places.sqlite-shm')}); foreach($b in $browsers){ if(-not (Test-Path -LiteralPath $b.r)){ continue }; foreach($p in @(Get-ChildItem -LiteralPath $b.r -Directory -ErrorAction SilentlyContinue)){ foreach($file in $b.f){ $src=Join-Path $p.FullName $file; if(Test-Path -LiteralPath $src -PathType Leaf){ $rel=Join-Path $b.n (Join-Path $p.Name $file); $dst=Join-Path $stage $rel; try { $in=[IO.File]::Open($src,'Open','Read','ReadWrite'); try { $dir=Split-Path -Parent $dst; if(-not (Test-Path -LiteralPath $dir)){ New-Item -ItemType Directory -Path $dir -Force | Out-Null }; $out=[IO.File]::Create($dst); try { [void]$in.CopyTo($out) } finally { $out.Dispose() } } finally { $in.Dispose() }; $count++ } catch { $failed++ } } } } }; if($count -eq 0){ Write-Output 'NO_HISTORY'; exit 3 }; Write-Output ('COPIED_COUNT '+$count); Write-Output ('COPY_FAILED_COUNT '+$failed); try { Compress-Archive -Path $stage -DestinationPath $zip -Force -ErrorAction Stop; if(-not (Test-Path -LiteralPath $zip)){ Write-Output 'ZIP_FAILED'; exit 4 }; Write-Output 'HISTORY_ZIPPED' } catch { Write-Output 'ZIP_FAILED'; exit 4 }"
         {%- endif -%}
 
   - name: build_cleanup_command
@@ -251,7 +255,8 @@ steps:
             type: while
             condition: 'variables.zip_action_id: * and not variables.zip_action_id: "" and not variables.zip_done: true'
             max-iterations:
-              limit: 24
+              # 66 x 5s = 330s, past the 300s execute timeout.
+              limit: 66
               on-limit: continue
             steps:
               - name: wait_zip
@@ -277,12 +282,20 @@ steps:
             with:
               stdout: "{%- assign eid = steps.normalize_inputs.output.agent_id -%}{%- assign d = steps.fetch_zip.output.data -%}{%- assign c = d.outputs[eid].content -%}{{ c.stdout | join: '\n' | default: '' | strip }}"
               stderr: "{%- assign eid = steps.normalize_inputs.output.agent_id -%}{%- assign d = steps.fetch_zip.output.data -%}{%- assign c = d.outputs[eid].content -%}{{ c.stderr | join: '\n' | default: '' | strip }}"
-              zipped: "{%- assign eid = steps.normalize_inputs.output.agent_id -%}{%- assign d = steps.fetch_zip.output.data -%}{%- assign c = d.outputs[eid].content -%}{%- assign stdout = c.stdout | join: '\n' | default: '' -%}{%- if stdout contains 'HISTORY_ZIPPED' -%}yes{%- else -%}no{%- endif -%}"
+              timed_out: "{%- if variables.zip_done == 'true' -%}no{%- else -%}yes{%- endif -%}"
+              zipped: "{%- assign eid = steps.normalize_inputs.output.agent_id -%}{%- assign d = steps.fetch_zip.output.data -%}{%- assign c = d.outputs[eid].content -%}{%- assign stdout = c.stdout | join: '\n' | default: '' -%}{%- assign code = c.shell_code | append: '' | strip -%}{%- if stdout contains 'HISTORY_ZIPPED' -%}yes{%- elsif code == '0' and stdout contains 'HISTORY_ZIP_START' -%}yes{%- else -%}no{%- endif -%}"
 
           - name: log_zip_result
             type: console
             with:
-              message: "Zip action {{ steps.remember_zip.output.zip_action_id }} zipped={{ steps.read_zip_output.output.zipped }} stdout={{ steps.read_zip_output.output.stdout | truncate: 500, '' }} stderr={{ steps.read_zip_output.output.stderr | truncate: 300, '' }}"
+              message: "Zip action {{ steps.remember_zip.output.zip_action_id }} zipped={{ steps.read_zip_output.output.zipped | strip }} timed_out={{ steps.read_zip_output.output.timed_out | strip }} stdout={{ steps.read_zip_output.output.stdout | truncate: 500, '' }} stderr={{ steps.read_zip_output.output.stderr | truncate: 300, '' }}"
+
+          # Cleanup waits until the endpoint action has finished. A poll
+          # timeout means the action may still be using the temp files.
+          - name: note_zip_cleanup
+            type: data.set
+            with:
+              cleanup_ok: "{%- if steps.read_zip_output.output.timed_out == 'yes' -%}no{%- elsif steps.read_zip_output.output.zipped | strip == 'yes' -%}pending{%- else -%}yes{%- endif -%}"
 
           - name: when_zipped
             type: if
@@ -319,7 +332,8 @@ steps:
                     type: while
                     condition: 'variables.get_action_id: * and not variables.get_action_id: "" and not variables.get_done: true'
                     max-iterations:
-                      limit: 24
+                      # 66 x 5s = 330s, past the 300s execute timeout.
+                      limit: 66
                       on-limit: continue
                     steps:
                       - name: wait_get_file
@@ -344,47 +358,67 @@ steps:
                     type: data.set
                     with:
                       uploaded: "{%- assign d = steps.fetch_get_file.output.data -%}{%- assign completed = d.isCompleted | append: '' -%}{%- assign success = d.wasSuccessful | append: '' -%}{%- if completed == 'true' and success == 'true' -%}yes{%- else -%}no{%- endif -%}"
+                      timed_out: "{%- if variables.get_done == 'true' -%}no{%- else -%}yes{%- endif -%}"
 
                   - name: log_get_file_result
                     type: console
                     with:
-                      message: "get-file action {{ steps.remember_get_file.output.get_action_id }} uploaded={{ steps.read_get_file.output.uploaded }} path={{ steps.set_locations.output.zip_path }}. Download it from Security → Endpoints → Response actions history. The download password is elastic."
+                      message: |
+                        get-file action {{ steps.remember_get_file.output.get_action_id }} uploaded={{ steps.read_get_file.output.uploaded }} path={{ steps.set_locations.output.zip_path }}.
+                        {%- if steps.read_get_file.output.uploaded == 'yes' %} Download it from Security → Endpoints → Response actions history. The download password is elastic.
+                        {%- elsif steps.read_get_file.output.timed_out == 'yes' %} The upload is still running. The temp zip is left in place.
+                        {%- else %} The upload did not succeed. Temp copies will be removed. Browser history on the endpoint was not deleted.
+                        {%- endif %}
 
-                  - name: when_uploaded
-                    type: if
-                    condition: 'steps.read_get_file.output.uploaded: "yes"'
-                    steps:
-                      - name: submit_cleanup
-                        type: kibana.request
-                        on-failure:
-                          continue: true
-                        with:
-                          method: POST
-                          path: /api/endpoint/action/execute
-                          headers:
-                            kbn-xsrf: "true"
-                          body:
-                            agent_type: endpoint
-                            endpoint_ids:
-                              - "{{ steps.normalize_inputs.output.agent_id }}"
-                            comment: "Workflow Collect Windows Browser History — remove temp zip for {{ steps.normalize_inputs.output.user_name }}."
-                            parameters:
-                              command: "{{ steps.build_cleanup_command.output.command }}"
-                              timeout: 120
-                      - name: log_cleanup_submitted
-                        type: console
-                        with:
-                          message: "{% if steps.submit_cleanup.output.data.id %}Temp zip cleanup submitted ({{ steps.submit_cleanup.output.data.id }}). Browser history on the endpoint was not deleted.{% else %}Temp zip cleanup was not submitted. Remove {{ steps.set_locations.output.zip_path }} on the endpoint. Browser history was not deleted.{% endif %}"
+                  - name: note_get_cleanup
+                    type: data.set
+                    with:
+                      cleanup_ok: "{%- if steps.read_get_file.output.timed_out == 'yes' -%}no{%- else -%}yes{%- endif -%}"
                 else:
+                  - name: note_get_file_missing
+                    type: data.set
+                    with:
+                      cleanup_ok: "yes"
                   - name: log_get_file_not_submitted
                     type: console
                     with:
-                      message: "get-file was not submitted. The zip is still at {{ steps.set_locations.output.zip_path }}. {{ steps.submit_get_file.error }}"
+                      message: "get-file was not submitted. Temp copies will be removed from {{ steps.set_locations.output.zip_path }}. {{ steps.submit_get_file.error }}"
             else:
               - name: log_zip_failed
                 type: console
                 with:
-                  message: "History zip was not created for {{ steps.normalize_inputs.output.user_name }}. stdout={{ steps.read_zip_output.output.stdout | truncate: 500, '' }} stderr={{ steps.read_zip_output.output.stderr | truncate: 300, '' }}"
+                  message: |
+                    {%- if steps.read_zip_output.output.timed_out == 'yes' -%}
+                    Zip action {{ steps.remember_zip.output.zip_action_id }} is still running after the poll. Temp files left at {{ steps.set_locations.output.stage_path }} and {{ steps.set_locations.output.zip_path }}.
+                    {%- else -%}
+                    History zip was not created for {{ steps.normalize_inputs.output.user_name }}. stdout={{ steps.read_zip_output.output.stdout | truncate: 500, '' }} stderr={{ steps.read_zip_output.output.stderr | truncate: 300, '' }}
+                    {%- endif -%}
+
+          - name: when_cleanup
+            type: if
+            condition: 'variables.cleanup_ok: "yes"'
+            steps:
+              - name: submit_cleanup
+                type: kibana.request
+                on-failure:
+                  continue: true
+                with:
+                  method: POST
+                  path: /api/endpoint/action/execute
+                  headers:
+                    kbn-xsrf: "true"
+                  body:
+                    agent_type: endpoint
+                    endpoint_ids:
+                      - "{{ steps.normalize_inputs.output.agent_id }}"
+                    comment: "Workflow Collect Windows Browser History — remove temp zip for {{ steps.normalize_inputs.output.user_name }}."
+                    parameters:
+                      command: "{{ steps.build_cleanup_command.output.command }}"
+                      timeout: 120
+              - name: log_cleanup_submitted
+                type: console
+                with:
+                  message: "{% if steps.submit_cleanup.output.data.id %}Temp zip cleanup submitted ({{ steps.submit_cleanup.output.data.id }}). Browser history on the endpoint was not deleted.{% else %}Temp zip cleanup was not submitted. Remove {{ steps.set_locations.output.zip_path }} on the endpoint. Browser history was not deleted.{% endif %}"
         else:
           - name: log_zip_not_submitted
             type: console
