@@ -1,0 +1,268 @@
+template-metadata:
+  slug: remove-selected-ai-extension
+  version: "1.0.0"
+  availability: ">=9.5.0"
+  name: "Remove Selected AI Extension"
+  description: >-
+        Audit and remove one supported user-installed AI editor extension by
+        exact ID and profile via Defend execute. Refuses built-in, system, and
+        policy-managed extensions. Audit by default.
+  solutions: [security]
+  categories: [response]
+  install:
+    form:
+      - name: enable-enforce
+        label: "Enforce extension uninstall"
+        description: >-
+          When true, run the uninstall adapter for the verified extension id.
+        inputType: boolean
+        required: true
+        default: false
+
+name: Remove Selected AI Extension
+description: >-
+  Audit and remove one supported user-installed VS Code-family extension by
+  exact publisher.extension ID and profile. Refuses built-in/system/policy
+  managed extensions (caller must attest install_source=user). Audit by default; enforce uses Defend execute as SYSTEM/root — pass profile/user home so the editor CLI targets the right extensions directory.
+enabled: true
+tags:
+  - security
+  - elastic-defend
+  - hunting
+  - response
+  - genai
+settings:
+  timeout: 15m
+  concurrency:
+    key: |-
+      {%- assign eid = inputs.extension_id | default: event.alerts[0].gen_ai.extension.id | default: '' | strip | downcase | truncate: 256, '' -%}
+      {%- assign ed = inputs.editor | default: event.alerts[0].gen_ai.editor.name | default: event.alerts[0].gen_ai.tool.name | default: '' | downcase | truncate: 32, '' -%}
+      {%- assign prof_raw = '' -%}
+      {%- assign prof_supplied = false -%}
+      {%- if inputs.profile != '' and inputs.profile != null -%}
+      {%- assign prof_raw = inputs.profile -%}
+      {%- assign prof_supplied = true -%}
+      {%- elsif event.alerts[0].gen_ai.editor.profile != '' and event.alerts[0].gen_ai.editor.profile != null -%}
+      {%- assign prof_raw = event.alerts[0].gen_ai.editor.profile -%}
+      {%- assign prof_supplied = true -%}
+      {%- endif -%}
+      {%- if prof_supplied -%}
+      {%- assign prof = prof_raw | strip | truncate: 128, '' -%}
+      {%- assign prof_lc = prof | downcase -%}
+      {%- if prof == '' -%}
+      {%- elsif prof_lc == 'default' -%}{%- assign prof = 'default' -%}
+      {%- endif -%}
+      {%- else -%}
+      {%- assign prof = 'default' -%}
+      {%- endif -%}
+      {%- assign aid = inputs.agent_id | default: event.alerts[0].agent.id | default: event.alerts[0].elastic.agent.id | default: 'none' | strip | truncate: 128, '' -%}
+      {{ workflow.id }}-ext-{{ eid | base64_encode }}|{{ ed | base64_encode }}|{{ prof | base64_encode }}|{{ aid | base64_encode }}
+    strategy: drop
+    max: 1
+consts:
+  enable_enforce: __install__.enable-enforce
+  supported_editors: vscode,cursor
+triggers:
+  - type: alert
+  - type: manual
+    inputs:
+      - name: agent_id
+        type: string
+        required: true
+      - name: os_type
+        type: string
+        required: true
+      - name: editor
+        type: string
+        required: true
+        description: vscode | cursor
+      - name: extension_id
+        type: string
+        required: true
+        description: publisher.extension exact id
+      - name: profile
+        type: string
+        required: false
+        default: default
+      - name: install_source
+        type: string
+        required: false
+        default: user
+        description: Caller attestation — must be user; built-in/system/policy must be refused by the triggering rule or analyst before invoke
+steps:
+  - name: set_context
+    type: data.set
+    with:
+      agent_id: "{% if event.alerts[0].agent.id != '' and event.alerts[0].agent.id != null %}{{ event.alerts[0].agent.id }}{% elsif event.alerts[0].elastic.agent.id != '' and event.alerts[0].elastic.agent.id != null %}{{ event.alerts[0].elastic.agent.id }}{% else %}{{ inputs.agent_id }}{% endif %}"
+      os_type: "{% if event.alerts[0].host.os.type != '' and event.alerts[0].host.os.type != null %}{{ event.alerts[0].host.os.type | downcase }}{% elsif inputs.os_type != '' and inputs.os_type != null %}{{ inputs.os_type | downcase }}{% else %}{% endif %}"
+      editor: "{% if inputs.editor != '' and inputs.editor != null %}{{ inputs.editor | downcase }}{% elsif event.alerts[0].gen_ai.editor.name != '' and event.alerts[0].gen_ai.editor.name != null %}{{ event.alerts[0].gen_ai.editor.name | downcase }}{% elsif event.alerts[0].gen_ai.tool.name != '' and event.alerts[0].gen_ai.tool.name != null %}{{ event.alerts[0].gen_ai.tool.name | downcase }}{% else %}{% endif %}"
+      extension_id: "{% if inputs.extension_id != '' and inputs.extension_id != null %}{{ inputs.extension_id }}{% elsif event.alerts[0].gen_ai.extension.id != '' and event.alerts[0].gen_ai.extension.id != null %}{{ event.alerts[0].gen_ai.extension.id }}{% else %}{% endif %}"
+      profile: |-
+        {%- assign supplied = false -%}
+        {%- assign raw = '' -%}
+        {%- if inputs.profile != '' and inputs.profile != null -%}
+        {%- assign raw = inputs.profile -%}
+        {%- assign supplied = true -%}
+        {%- elsif event.alerts[0].gen_ai.editor.profile != '' and event.alerts[0].gen_ai.editor.profile != null -%}
+        {%- assign raw = event.alerts[0].gen_ai.editor.profile -%}
+        {%- assign supplied = true -%}
+        {%- endif -%}
+        {%- if supplied -%}
+        {%- assign p = raw | strip -%}
+        {%- if p == '' -%}
+        {%- else -%}
+        {%- assign pl = p | downcase -%}
+        {%- if pl == 'default' -%}default{%- else -%}{{ p }}{%- endif -%}
+        {%- endif -%}
+        {%- else -%}
+        default
+        {%- endif -%}
+      install_source: "{% if inputs.install_source != '' and inputs.install_source != null %}{{ inputs.install_source | downcase }}{% elsif event.alerts[0].gen_ai.extension.install_source != '' and event.alerts[0].gen_ai.extension.install_source != null %}{{ event.alerts[0].gen_ai.extension.install_source | downcase }}{% else %}user{% endif %}"
+      run_mode: "{% if event.alerts[0]._id != '' and event.alerts[0]._id != null %}alert{% else %}manual{% endif %}"
+      alert_count: "{{ event.alerts | size | default: 0 }}"
+  - name: reject_multi_alert
+    type: if
+    condition: 'steps.set_context.output.run_mode: "alert" AND not steps.set_context.output.alert_count: "0" AND not steps.set_context.output.alert_count: "1"'
+    steps:
+      - name: log_reject_batch
+        type: console
+        with:
+          message: "rejected - received {{ steps.set_context.output.alert_count }} alerts; this workflow handles one extension removal at a time. outcome=rejected"
+    else:
+      # --- extension_id charset allowlist (Liquid; KQL has no regex) ---
+      - name: check_extension_id
+        type: data.set
+        with:
+          extension_id_ok: >-
+            {%- assign s = steps.set_context.output.extension_id | default: '' -%}
+            {%- assign allowed = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_.-' -%}
+            {%- assign alnum = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789' -%}
+            {%- assign ok = false -%}
+            {%- assign len = s.size -%}
+            {%- if len > 2 and len <= 256 and s contains '.' -%}
+              {%- assign c0 = s | slice: 0, 1 -%}
+              {%- if alnum contains c0 -%}
+                {%- assign bad = false -%}
+                {%- for i in (0..255) -%}
+                  {%- if i >= len -%}{%- break -%}{%- endif -%}
+                  {%- assign c = s | slice: i, 1 -%}
+                  {%- unless allowed contains c -%}{%- assign bad = true -%}{%- break -%}{%- endunless -%}
+                {%- endfor -%}
+                {%- unless bad -%}
+                  {%- assign parts = s | split: '.' -%}
+                  {%- if parts.size >= 2 and parts[0].size > 0 and parts[1].size > 0 -%}
+                    {%- assign ok = true -%}
+                  {%- endif -%}
+                {%- endunless -%}
+              {%- endif -%}
+            {%- endif -%}
+            {{ ok }}
+      - name: check_profile
+        type: data.set
+        with:
+          profile_ok: >-
+            {%- assign s = steps.set_context.output.profile | default: '' -%}
+            {%- assign allowed = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_.- ' -%}
+            {%- assign ok = true -%}
+            {%- assign len = s.size -%}
+            {%- if s == '' or len < 1 or len > 128 -%}{%- assign ok = false -%}
+            {%- else -%}
+              {%- for i in (0..127) -%}
+                {%- if i >= len -%}{%- break -%}{%- endif -%}
+                {%- assign c = s | slice: i, 1 -%}
+                {%- unless allowed contains c -%}{%- assign ok = false -%}{%- break -%}{%- endunless -%}
+              {%- endfor -%}
+            {%- endif -%}
+            {{ ok }}
+      - name: validate_extension_id
+        type: if
+        condition: 'not steps.check_extension_id.output.extension_id_ok: "true"'
+        steps:
+          - name: log_bad_ext
+            type: console
+            with:
+              message: "rejected - extension_id failed charset allowlist (expect publisher.extension). outcome=rejected"
+        else:
+          - name: validate
+            type: if
+            condition: 'not steps.check_profile.output.profile_ok: "true" OR steps.set_context.output.agent_id: "" OR steps.set_context.output.extension_id: "" OR steps.set_context.output.os_type: "" OR not steps.set_context.output.install_source: "user" OR (not steps.set_context.output.editor: "vscode" AND not steps.set_context.output.editor: "cursor")'
+            steps:
+              - name: log_skip
+                type: console
+                with:
+                  message: "skipped - need agent_id, os_type, editor vscode|cursor, extension_id, install_source=user, and a safe non-blank profile name (omit or set default; whitespace-only rejected; Defend runs as SYSTEM/root and cannot verify built-in/policy). outcome=skipped"
+            else:
+              - name: decide_enforce
+                type: data.set
+                with:
+                  enforce: "{% if consts.enable_enforce %}true{% else %}false{% endif %}"
+              - name: audit_path
+                type: if
+                condition: 'steps.decide_enforce.output.enforce: "false"'
+                steps:
+                  - name: log_audit
+                    type: console
+                    with:
+                      message: "audited - would remove editor={{ steps.set_context.output.editor }} extension={{ steps.set_context.output.extension_id }} profile={{ steps.set_context.output.profile }} agent={{ steps.set_context.output.agent_id }} outcome=audited"
+                else:
+                  - name: set_cmd
+                    type: data.set
+                    with:
+                      command: |-
+                        {%- assign ed = steps.set_context.output.editor -%}
+                        {%- assign eid = steps.set_context.output.extension_id -%}
+                        {%- if steps.set_context.output.os_type == 'windows' -%}
+                        {%- if ed == 'cursor' -%}
+                        powershell.exe -NoProfile -NonInteractive -Command "$ErrorActionPreference='Stop'; $eid=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('{{ eid | base64_encode }}')); if($eid -notmatch '^[A-Za-z0-9][A-Za-z0-9_.-]*\.[A-Za-z0-9][A-Za-z0-9_.-]*$'){exit 42}; $bin='cursor'; if($bin -notin @('cursor','code')){exit 42}; $prof=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('{{ steps.set_context.output.profile | base64_encode }}')); if($prof -and $prof.ToLowerInvariant() -ne 'default'){ if($prof -notmatch '^[A-Za-z0-9_. -]{1,128}$'){exit 42}; & $bin --uninstall-extension $eid --force --profile $prof } else { & $bin --uninstall-extension $eid --force }; if($LASTEXITCODE -ne 0){exit $LASTEXITCODE}; Write-Output ('removed:'+$eid)"
+                        {%- else -%}
+                        powershell.exe -NoProfile -NonInteractive -Command "$ErrorActionPreference='Stop'; $eid=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('{{ eid | base64_encode }}')); if($eid -notmatch '^[A-Za-z0-9][A-Za-z0-9_.-]*\.[A-Za-z0-9][A-Za-z0-9_.-]*$'){exit 42}; $bin='code'; if($bin -notin @('cursor','code')){exit 42}; $prof=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('{{ steps.set_context.output.profile | base64_encode }}')); if($prof -and $prof.ToLowerInvariant() -ne 'default'){ if($prof -notmatch '^[A-Za-z0-9_. -]{1,128}$'){exit 42}; & $bin --uninstall-extension $eid --force --profile $prof } else { & $bin --uninstall-extension $eid --force }; if($LASTEXITCODE -ne 0){exit $LASTEXITCODE}; Write-Output ('removed:'+$eid)"
+                        {%- endif -%}
+                        {%- else -%}
+                        eid='{{ eid | replace: "'", "'\\''" }}'; case "$eid" in *[!A-Za-z0-9_.-]*) exit 42 ;; esac; case "$eid" in *.*) ;; *) exit 42 ;; esac; bin={% if ed == 'cursor' %}cursor{% else %}code{% endif %}; command -v "$bin" >/dev/null || exit 47; prof='{{ steps.set_context.output.profile | replace: "'", "'\\''" }}'; case "$prof" in *[!A-Za-z0-9_.\ -]*) exit 42 ;; esac; prof_lc=$(printf '%s' "$prof" | tr '[:upper:]' '[:lower:]'); if [ -n "$prof" ] && [ "$prof_lc" != "default" ]; then "$bin" --uninstall-extension "$eid" --force --profile "$prof"; else "$bin" --uninstall-extension "$eid" --force; fi; ec=$?; [ $ec -eq 0 ] || exit $ec; printf 'removed:%s\n' "$eid"
+                        {%- endif -%}
+                  - name: execute_remove
+                    type: kibana.request
+                    with:
+                      method: POST
+                      path: /api/endpoint/action/execute
+                      headers:
+                        kbn-xsrf: "true"
+                      body:
+                        agent_type: endpoint
+                        endpoint_ids:
+                          - "{{ steps.set_context.output.agent_id }}"
+                        comment: "T05 remove-selected-ai-extension {{ steps.set_context.output.extension_id }}"
+                        parameters:
+                          command: "{{ steps.set_cmd.output.command }}"
+                          timeout: 120
+                  - name: remember
+                    type: data.set
+                    with:
+                      action_id: "{{ steps.execute_remove.output.data.id | default: steps.execute_remove.output.id | default: '' }}"
+                      completed: false
+                  - name: poll
+                    type: while
+                    condition: 'variables.action_id: * and not variables.action_id: "" and not variables.completed: true'
+                    max-iterations:
+                      limit: 36
+                      on-limit: continue
+                    steps:
+                      - name: wait_poll
+                        type: wait
+                        with:
+                          duration: 5s
+                      - name: fetch
+                        type: kibana.request
+                        on-failure:
+                          continue: true
+                        with:
+                          method: GET
+                          path: /api/endpoint/action/{{ variables.action_id | url_encode }}
+                      - name: mark
+                        type: data.set
+                        with:
+                          completed: "{%- assign d = steps.fetch.output.data -%}{%- if variables.action_id != '' and d.id == variables.action_id and d.isCompleted -%}true{%- else -%}false{%- endif -%}"
+                  - name: summarize
+                    type: console
+                    with:
+                      message: "extension-remove action_id={{ variables.action_id }} completed={{ variables.completed }} wasSuccessful={{ steps.fetch.output.data.wasSuccessful }} shell_code={{ steps.fetch.output.data.outputs[steps.set_context.output.agent_id].content.shell_code }} outcome={% if variables.completed == 'true' and steps.fetch.output.data.wasSuccessful and steps.fetch.output.data.outputs[steps.set_context.output.agent_id].content.shell_code == 0 %}verified{% elsif variables.completed == 'true' %}failed{% else %}unknown{% endif %}"
