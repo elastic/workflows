@@ -1,0 +1,249 @@
+template-metadata:
+  slug: isolate-endpoint
+  version: "1.0.0"
+  availability: ">=9.5.0"
+  name: "Isolate Endpoint"
+  description: >-
+    Isolate an Elastic Defend endpoint by agent ID. Resolves the agent from a
+    manual input or the launching alert, submits the Fleet isolate action,
+    notifies Slack, optionally comments on the related case, then waits and
+    confirms isolation state once.
+  solutions: [security]
+  categories: [response, notification, case-management]
+  install:
+    form:
+      - name: defend-http-connector
+        label: "Elastic Defend HTTP connector"
+        description: >-
+          HTTP connector pointed at your Kibana base URL, used to call the
+          Elastic Defend isolate and endpoint-metadata APIs. Authenticate with
+          credentials that can isolate hosts (typically a Kibana API key or
+          basic auth for a user with endpoint response privileges).
+        inputType: connector
+        connectorType: .http
+        required: true
+      - name: slack-connector
+        label: "Slack connector"
+        description: >-
+          Slack connector used for isolate submitted / confirmed / pending /
+          failed notifications. Configure it with a webhook or bot that posts
+          to the channel where responders watch endpoint actions.
+        inputType: connector
+        connectorType: .slack
+        required: true
+      - name: defend-endpoint-lookup
+        label: "Defend endpoint lookup URL prefix"
+        description: >-
+          Kibana URL prefix for the Security → Endpoints page, including the
+          space path and query up through selected_endpoint=. Concatenated with
+          the agent ID in Slack and case links. Example:
+          https://placeholder.elasticnet.co/s/placeholder-team/app/security/administration/endpoints?page_index=0&page_size=10&selected_endpoint=
+        inputType: text
+        required: true
+        default: "https://placeholder.elasticnet.co/s/placeholder-team/app/security/administration/endpoints?page_index=0&page_size=10&selected_endpoint="
+
+name: Isolate Endpoint
+description: >
+  Isolates an Elastic endpoint by agent ID. Accepts requests from analysts
+  via Kibana Cases (alert) or automation platform (http/webhook/manual).
+
+  For alert launches, the agent ID is pulled automatically from the alert context.
+  Sends an immediate Slack notification then polls once to confirm isolation is applied.
+
+consts:
+  defend_endpoint_lookup: __install__.defend-endpoint-lookup
+  status_check_wait: "5m"
+
+triggers:
+  - type: manual
+    inputs:
+      - name: agent_id
+        description: >
+          Elastic agent UUID. Required when run from an automation platform or
+          manually. Leave blank when launched from an alert — the agent ID is
+          read from the alert context.
+        type: string
+        required: false
+      - name: analyst_name
+        description: >
+          Name of the analyst running this automation. Auto-filled from the
+          Kibana profile on manual alert runs when omitted.
+        type: string
+        required: false
+
+steps:
+  # Prefer the manual input; fall back to the launching alert's agent id.
+  - name: resolve_agent_id
+    type: data.set
+    with:
+      agent_id: >-
+        {{ inputs.agent_id
+        | default: event.alerts[0].elastic.agent.id }}
+
+  # Abort early when neither input nor alert context provided an agent id.
+  - name: validate_agent_id
+    type: if
+    condition: "${{ steps.resolve_agent_id.output.agent_id != blank }}"
+    steps:
+      - name: validation_passed
+        type: console
+        with:
+          message: "agent_id resolved, continuing."
+    else:
+      - name: abort
+        type: workflow.fail
+        with:
+          message: "No agent_id available from input or alert context. Workflow aborted."
+
+  # Prefer the analyst_name input; fall back to the workflow executor.
+  - name: resolve_analyst_name
+    type: data.set
+    with:
+      display_name: >-
+        {{ inputs.analyst_name
+        | default: execution.executedBy}}
+
+  # Build the comment string sent with the isolate action.
+  - name: build_comment
+    type: data.set
+    with:
+      comment: "{{ steps.resolve_analyst_name.output.display_name }} isolated this machine."
+
+  # Look up cases attached to the launching alert; continue on miss so isolation is never blocked.
+  - name: lookup_case_by_alert
+    type: cases.getCasesByAlertId
+    if: "${{ event.alerts[0]._id != blank }}"
+    with:
+      alert_id: "{{ event.alerts[0]._id }}"
+      owner: securitySolution
+    timeout: 10m
+    on-failure:
+      continue: true
+
+  # First matching case id, or empty when the alert is unattached / lookup skipped.
+  - name: resolve_case_id
+    type: data.set
+    with:
+      case_id: >-
+        {{ steps.lookup_case_by_alert.output.cases[0].id
+        | default: '' }}
+
+  # Submit the Fleet isolate action via the Defend HTTP connector.
+  - name: isolate_endpoint
+    type: http
+    connector-id: __install__.defend-http-connector
+    with:
+      path: "/api/endpoint/action/isolate"
+      method: POST
+      headers:
+        kbn-xsrf: "true"
+        Content-Type: "application/json"
+      body:
+        endpoint_ids:
+          - "{{ steps.resolve_agent_id.output.agent_id }}"
+        comment: "{{ steps.build_comment.output.comment }}"
+    on-failure:
+      fallback:
+        - name: slack_action_failed
+          type: slack
+          connector-id: __install__.slack-connector
+          with:
+            message: |-
+              :x: *ISOLATE FAILED* — agent {{ steps.resolve_agent_id.output.agent_id }}
+              API call unsuccessful.
+              Initiated by: {{ steps.resolve_analyst_name.output.display_name }}
+              <{{ kibanaUrl }}/s/{{ workflow.spaceId }}/app/workflows/{{workflow.id}}?executionId={{ execution.id }}|:kibana: Link to Kibana Workflow Execution>
+        - name: abort_isolate_failed
+          type: workflow.fail
+          with:
+            message: "Isolate API call failed for agent {{ steps.resolve_agent_id.output.agent_id }}. Workflow aborted."
+
+  # Case comment when a case id was resolved for the launching alert.
+  - name: add_case_comment_start
+    type: cases.addComment
+    if: "${{ steps.resolve_case_id.output.case_id != blank }}"
+    with:
+      case_id: "{{ steps.resolve_case_id.output.case_id }}"
+      comment: |-
+        :kibana: *Endpoint isolation submitted* by {{ steps.resolve_analyst_name.output.display_name }}
+        *COMMAND:* `{{ steps.isolate_endpoint.output.data.data.command | upcase }}`
+        *STARTED AT:* `{{ steps.isolate_endpoint.output.data.data.startedAt }}`
+        *STATUS:* `{{ steps.isolate_endpoint.output.data.data.status }}`
+        *COMMENT:* `{{ steps.build_comment.output.comment }}`
+        *AGENT:* `{{ steps.resolve_agent_id.output.agent_id }}`
+        [Link to Endpoint in Defend]({{ consts.defend_endpoint_lookup }}{{ steps.resolve_agent_id.output.agent_id }})
+        [⚡ Link to Kibana Workflow Execution]({{ kibanaUrl }}/s/{{ workflow.spaceId }}/app/workflows/{{ workflow.id }}?executionId={{ execution.id }})
+
+  # Immediate Slack notice that the isolate request was accepted.
+  - name: slack_submitted
+    type: slack
+    connector-id: __install__.slack-connector
+    with:
+      message: |-
+        :kibana: *ISOLATE SUBMITTED — {{ steps.resolve_agent_id.output.agent_id }}*
+        *STARTED AT:* {{ steps.isolate_endpoint.output.data.data.startedAt }}
+        *STATUS:* {{ steps.isolate_endpoint.output.data.data.status }}
+        *COMMENT:* {{ steps.build_comment.output.comment }}
+        *INITIATED BY:* {{ steps.resolve_analyst_name.output.display_name }}
+        <{{ kibanaUrl }}/s/{{ workflow.spaceId }}/app/workflows/{{workflow.id}}?executionId={{ execution.id }}|:kibana: Link to Kibana Workflow Execution>
+        <{{consts.defend_endpoint_lookup}}{{ steps.resolve_agent_id.output.agent_id }}|:computer: Link to Endpoint in Defend>
+
+  # Allow the isolate action time to apply before a single status poll.
+  - name: wait
+    type: wait
+    with:
+      duration: "{{ consts.status_check_wait }}"
+
+  # Fetch endpoint metadata to read Endpoint.state.isolation.
+  - name: get_status
+    type: http
+    connector-id: __install__.defend-http-connector
+    with:
+      path: "/api/endpoint/metadata/{{ steps.resolve_agent_id.output.agent_id }}"
+      method: GET
+      headers:
+        kbn-xsrf: "true"
+        Content-Type: "application/json"
+    on-failure:
+      retry:
+        max-attempts: 2
+        delay: "15s"
+
+  # Confirm isolation, or warn that it is still pending after the wait.
+  - name: check_isolated
+    type: if
+    condition: "${{ steps.get_status.output.data.metadata.Endpoint.state.isolation == true }}"
+    steps:
+      - name: slack_confirmed
+        type: slack
+        connector-id: __install__.slack-connector
+        with:
+          message: |-
+            :white_check_mark: *ISOLATE CONFIRMED — {{ steps.resolve_agent_id.output.agent_id }}*
+            *COMMENT:* {{ steps.build_comment.output.comment }}
+            *ISOLATION STATE:* {{ steps.get_status.output.data.metadata.Endpoint.state.isolation }}
+            *INITIATED BY:* {{ steps.resolve_analyst_name.output.display_name }}
+            <{{ kibanaUrl }}/s/{{ workflow.spaceId }}/app/workflows/{{workflow.id}}?executionId={{ execution.id }}|:kibana: Link to Kibana Workflow Execution>
+            <{{consts.defend_endpoint_lookup}}{{ steps.resolve_agent_id.output.agent_id }}|:computer: Link to Endpoint in Defend>
+    else:
+      - name: slack_timeout
+        type: slack
+        connector-id: __install__.slack-connector
+        with:
+          message: |-
+            :warning: *ISOLATE STILL PENDING — {{ steps.resolve_agent_id.output.agent_id }}*
+            Did not confirm after 5 minutes.
+            *INITIATED BY:* {{ steps.resolve_analyst_name.output.display_name }}
+            <{{ kibanaUrl }}/s/{{workflow.spaceId}}/app/workflows/{{workflow.id}}?executionId={{ execution.id }}|:kibana: Link to Kibana Workflow Execution>
+            <{{consts.defend_endpoint_lookup}}{{ steps.resolve_agent_id.output.agent_id }}|:computer: Link to Endpoint in Defend>
+
+  # Final case comment with confirmed vs timed-out result when a case id exists.
+  - name: add_case_comment_result
+    type: cases.addComment
+    if: "${{ steps.resolve_case_id.output.case_id != blank }}"
+    with:
+      case_id: "{{ steps.resolve_case_id.output.case_id }}"
+      comment: |-
+        *Isolate result:*
+        `{% if steps.get_status.output.data.metadata.Endpoint.state.isolation == true %}CONFIRMED{% else %}TIMED OUT{% endif %}`
+        — agent `{{ steps.resolve_agent_id.output.agent_id }}`.
