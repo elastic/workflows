@@ -1,0 +1,271 @@
+template-metadata:
+  slug: deactivate-aws-iam-access-key
+  version: "1.0.0"
+  availability: ">=9.7.0"
+  name: "Deactivate AWS IAM Access Key"
+  description: >-
+    Deactivate a long-term AWS IAM user access key from a security alert or
+    manual input. Reads the user's access keys, requires explicit analyst
+    approval, changes the selected key to Inactive, and reads the keys again
+    for verification. Temporary role and federated-session credentials are
+    rejected before any IAM request. The AWS connector requires only
+    iam:ListAccessKeys and iam:UpdateAccessKey.
+  solutions: [security]
+  categories: [response]
+  install:
+    form:
+      - name: aws-connector
+        label: "AWS connector"
+        description: >-
+          AWS connector with permission to list and deactivate access keys for
+          the IAM users this workflow may remediate.
+        inputType: connector
+        connectorType: .aws
+        required: true
+
+name: Deactivate AWS IAM Access Key
+description: |
+  Resolve an IAM user and long-term access key from an alert or manual input,
+  inspect the current keys, request analyst approval, deactivate the selected
+  key, and verify the resulting state. Temporary credentials issued to assumed
+  roles or federated sessions cannot be deactivated with UpdateAccessKey; revoke
+  those sessions through the appropriate identity control instead.
+
+triggers:
+  - type: alert
+  - type: manual
+    inputs:
+      - name: user_name
+        type: string
+        description: AWS IAM user name whose access key should be deactivated.
+        required: true
+        default: ""
+      - name: access_key_id
+        type: string
+        description: AWS IAM access key ID to deactivate.
+        required: true
+        default: ""
+
+steps:
+  # Alert fields take precedence; manual inputs support direct runs.
+  - name: resolve_target
+    type: data.set
+    with:
+      user_name: "{{ event.alerts[0].user.name | default: inputs.user_name }}"
+      access_key_id: "{{ event.alerts[0].aws.cloudtrail.user_identity.access_key_id | default: inputs.access_key_id }}"
+      identity_type: "{{ event.alerts[0].aws.cloudtrail.user_identity.type | default: 'manual' }}"
+      access_key_kind: >-
+        {% assign resolved_key = event.alerts[0].aws.cloudtrail.user_identity.access_key_id | default: inputs.access_key_id | default: '' -%}
+        {% assign key_prefix = resolved_key | slice: 0, 4 -%}
+        {% if key_prefix == 'AKIA' %}long_term{% elsif key_prefix == 'ASIA' %}temporary{% else %}unrecognized{% endif %}
+      alert_id: "{{ event.alerts[0].kibana.alert.uuid | default: event.alerts[0]._id | default: 'manual' }}"
+
+  # UpdateAccessKey supports IAM-user long-term keys, not temporary session
+  # credentials such as ASIA keys issued to assumed roles or federated users.
+  - name: reject_temporary_credentials
+    type: if
+    condition: "${{ variables.access_key_id != blank and variables.access_key_kind == 'temporary' }}"
+    steps:
+      - name: log_temporary_credentials
+        type: console
+        with:
+          message: |-
+            Outcome: unsupported_target; no IAM request was made because {{ variables.access_key_id }} is an ASIA temporary session credential.
+            Identity type: {{ variables.identity_type }}.
+            User or role name: {{ variables.user_name | default: '(unavailable)' }}.
+            Alert: {{ variables.alert_id }}.
+            Temporary assumed-role or federated credentials must be contained by revoking the corresponding sessions or identity access.
+      - name: fail_temporary_credentials
+        type: workflow.fail
+        with:
+          message: >-
+            IAM access-key deactivation supports long-term AKIA IAM user keys;
+            {{ variables.access_key_id }} is an ASIA temporary credential that
+            requires session revocation instead.
+
+  # Unknown prefixes are invalid input, but are not assumed to represent a
+  # temporary session. Operators should correct or recheck the identifier.
+  - name: reject_unrecognized_access_key
+    type: if
+    condition: "${{ variables.access_key_id != blank and variables.access_key_kind == 'unrecognized' }}"
+    steps:
+      - name: log_unrecognized_access_key
+        type: console
+        with:
+          message: |-
+            Outcome: invalid_target; no IAM request was made because {{ variables.access_key_id }} is not a recognized AKIA long-term or ASIA temporary AWS access key ID.
+            Identity type: {{ variables.identity_type }}.
+            User or role name: {{ variables.user_name | default: '(unavailable)' }}.
+            Alert: {{ variables.alert_id }}.
+            Correct or recheck the access key ID before running remediation.
+      - name: fail_unrecognized_access_key
+        type: workflow.fail
+        with:
+          message: >-
+            {{ variables.access_key_id }} is not a recognized AWS access key
+            ID; correct or recheck the identifier.
+
+  # Fail closed when either target identifier is missing.
+  - name: validate_target
+    type: if
+    condition: "${{ variables.user_name != blank and variables.access_key_id != blank }}"
+    steps:
+      - name: list_access_keys_before
+        type: aws.request
+        connector-id: __install__.aws-connector
+        with:
+          service: iam
+          headers:
+            Accept: application/json
+          query:
+            Action: ListAccessKeys
+            Version: "2010-05-08"
+            UserName: "{{ variables.user_name }}"
+
+      - name: request_approval
+        type: waitForInput
+        timeout: 1h
+        with:
+          message: |-
+            Approve deactivation of AWS IAM access key {{ variables.access_key_id }}
+            for user {{ variables.user_name }}?
+
+            Alert: {{ variables.alert_id }}
+            The current ListAccessKeys response was:
+
+            ~~~json
+            {{ steps.list_access_keys_before.output.data | json: 2 }}
+            ~~~
+          schema:
+            type: object
+            properties:
+              approved:
+                type: boolean
+                title: Deactivate this access key
+                default: false
+              notes:
+                type: string
+                title: Analyst notes
+            required:
+              - approved
+
+      # The mutation and bounded verification polling are gated on approval.
+      - name: deactivate_when_approved
+        type: if
+        condition: "${{ steps.request_approval.output.response.approved == true }}"
+        steps:
+          - name: deactivate_access_key
+            type: aws.request
+            connector-id: __install__.aws-connector
+            with:
+              service: iam
+              query:
+                Action: UpdateAccessKey
+                Version: "2010-05-08"
+                UserName: "{{ variables.user_name }}"
+                AccessKeyId: "{{ variables.access_key_id }}"
+                Status: Inactive
+
+          # IAM is eventually consistent. Retry only the verification read,
+          # matching the target key and status in the parsed response array.
+          - name: verify_access_key
+            type: while
+            condition: "${{ variables.verification_state != 'inactive' }}"
+            max-iterations:
+              limit: 3
+              on-limit: continue
+            steps:
+              - name: verification_backoff
+                type: wait
+                with:
+                  duration: 2s
+
+              - name: list_access_keys_after
+                type: aws.request
+                connector-id: __install__.aws-connector
+                with:
+                  service: iam
+                  headers:
+                    Accept: application/json
+                  query:
+                    Action: ListAccessKeys
+                    Version: "2010-05-08"
+                    UserName: "{{ variables.user_name }}"
+
+              - name: classify_verification
+                type: data.set
+                with:
+                  verification_state: >-
+                    {% assign state = 'missing' -%}
+                    {% assign keys = steps.list_access_keys_after.output.data.ListAccessKeysResponse.ListAccessKeysResult.AccessKeyMetadata -%}
+                    {% for key in keys -%}
+                      {% if key.AccessKeyId == variables.access_key_id -%}
+                        {% if key.Status == 'Inactive' -%}{% assign state = 'inactive' -%}{% else -%}{% assign state = 'not_inactive' -%}{% endif -%}
+                      {% endif -%}
+                    {% endfor -%}
+                    {{ state }}
+
+          - name: classify_approved_result
+            type: if
+            condition: "${{ variables.verification_state == 'inactive' }}"
+            steps:
+              - name: log_verified_deactivation
+                type: console
+                with:
+                  message: |-
+                    Outcome: verified; AWS IAM access key {{ variables.access_key_id }} is Inactive for user {{ variables.user_name }}.
+                    Alert: {{ variables.alert_id }}.
+                    Approved: {{ steps.request_approval.output.response.approved }}.
+                    Responder: {{ steps.request_approval.output.respondedBy }}.
+                    Notes: {{ steps.request_approval.output.response.notes | default: '(none)' }}.
+                    Verification ListAccessKeys response:
+                    {{ steps.list_access_keys_after.output.data | json }}
+            else:
+              - name: log_failed_verification
+                type: console
+                with:
+                  message: |-
+                    Outcome: verification_failed; UpdateAccessKey was approved, but the exact access key was not confirmed Inactive in the follow-up ListAccessKeys response.
+                    User: {{ variables.user_name }}.
+                    Access key: {{ variables.access_key_id }}.
+                    Observed verification state: {{ variables.verification_state }}.
+                    Alert: {{ variables.alert_id }}.
+                    Approved: {{ steps.request_approval.output.response.approved }}.
+                    Responder: {{ steps.request_approval.output.respondedBy }}.
+                    Notes: {{ steps.request_approval.output.response.notes | default: '(none)' }}.
+                    Verification ListAccessKeys response:
+                    {{ steps.list_access_keys_after.output.data | json }}
+              - name: fail_failed_verification
+                type: workflow.fail
+                with:
+                  message: >-
+                    AWS IAM access key {{ variables.access_key_id }} for user
+                    {{ variables.user_name }} was not verified Inactive after
+                    three ListAccessKeys attempts.
+                  reason: access_key_not_verified_inactive
+        else:
+          - name: log_rejected_result
+            type: console
+            with:
+              message: |-
+                Outcome: no_change; no UpdateAccessKey request was made for AWS IAM access key {{ variables.access_key_id }} because deactivation was rejected.
+                User: {{ variables.user_name }}.
+                Alert: {{ variables.alert_id }}.
+                Approved: {{ steps.request_approval.output.response.approved }}.
+                Responder: {{ steps.request_approval.output.respondedBy }}.
+                Notes: {{ steps.request_approval.output.response.notes | default: '(none)' }}.
+                Pre-approval ListAccessKeys response:
+                {{ steps.list_access_keys_before.output.data | json }}
+    else:
+      - name: log_missing_target
+        type: console
+        with:
+          message: >-
+            AWS IAM access-key remediation skipped because user.name/user_name
+            or aws.cloudtrail.user_identity.access_key_id/access_key_id was missing.
+      - name: fail_missing_target
+        type: workflow.fail
+        with:
+          message: >-
+            AWS IAM access-key deactivation requires an IAM user name and a
+            long-term access key ID.

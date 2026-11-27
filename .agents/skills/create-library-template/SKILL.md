@@ -11,6 +11,17 @@ description: Author or modify a Workflow Template Library template. Use when cre
 
 Templates live at `library/workflows/<slug>/<slug>.yaml` — one directory per slug; directory, file name, and `template-metadata.slug` must match.
 
+## Common review findings — check every one
+
+**Validation passing does not mean the template works.** Schema validation and `npm run build:catalog` pass on templates with every issue in CONTRIBUTING.md § "Common review findings", and those are what reviewers request changes for most. Walk that list item by item before opening the PR. The ones that come back the most:
+
+1. `{{ steps.x.output }}` inside a string renders `[object Object]`, and arrays render with no separator. Use `| json` and `| join: ", "`.
+2. A scheduled `ai.agent` with no deterministic gate, or with `create-conversation: true`.
+3. A full `PUT` of dashboards or other saved objects on every run, which overwrites user edits. `GET` first and create only when `error.message` starts with `HTTP 404:` (`HTTP*404*` also matches other errors), and `workflow.fail` on any other error.
+4. Demo, promotional, or Serverless-only copy, and an `availability` range that doesn't match the features the template uses.
+5. An alert path that only reads `event.alerts[0]`, reads `inputs.*`, or reads fields that the target rule's alerts don't carry.
+6. `concurrency` without a `key`, and step timeouts that don't fit inside `settings.timeout`.
+
 ## Migration references
 
 Some templates were migrated from a plain workflow in `examples/`. Study a pair or two before authoring — the diff shows exactly what "templatizing" means (add the `template-metadata` block, promote operator-specific values and connector ids to `install.form`, drop banner comments, tidy step comments):
@@ -32,4 +43,5 @@ Some templates were migrated from a plain workflow in `examples/`. Study a pair 
 1. Read the CONTRIBUTING.md sections above.
 2. Pick the closest migration pair from the table and mirror its structure.
 3. Author the template; follow every rule in § "Authoring a template" (especially the `__install__.*` rendering rules).
-4. Validate per § "Validating locally" and open the PR per § "Pull request flow", including the validation output and a test plan.
+4. Walk CONTRIBUTING.md § "Common review findings" against the template, item by item.
+5. Validate per § "Validating locally" and open the PR per § "Pull request flow", including the validation output and a test plan.

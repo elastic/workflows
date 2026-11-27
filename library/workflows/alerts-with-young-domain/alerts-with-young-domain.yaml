@@ -1,0 +1,465 @@
+template-metadata:
+  slug: alerts-with-young-domain
+  version: "1.0.0"
+  availability: ">=9.5.0"
+  name: "Alerts with Young Domain"
+  description: >-
+    Every hour, and on demand, find security alerts from the last hour that
+    carry dns.question.name or destination.domain, look up WHOIS registration
+    age, and open a Security case when the domain was registered within the
+    configured maximum age (default 90 days). Alerts are read from this
+    workflow's Kibana space. Names ending in .local or
+    .internal are not sent to WHOIS. One open case per agent and observed
+    domain.
+  solutions: [security]
+  categories: [detection, hunting, case-management]
+  install:
+    form:
+      - name: max-domain-age-days
+        label: "Maximum domain age (days)"
+        description: >-
+          Open a case when the WHOIS registration date is this many days old
+          or newer. The default of 90 flags recently registered domains.
+        inputType: number
+        required: true
+        default: 90
+
+name: Alerts with Young Domain
+description: >
+  Query security alerts from the last hour for dns.question.name and
+  destination.domain, check WHOIS registration age, and open a Security case
+  for each young domain. Alerts are read from this workflow's Kibana space.
+  Names ending in .local or .internal are not sent to
+  WHOIS. Runs every hour and can be started manually. An open case for the
+  same agent and domain is left as-is. Closing that case allows a later run
+  to open a new one if the domain shows up again.
+enabled: true
+tags:
+  - security
+  - young-domain
+  - whois
+
+triggers:
+  - type: scheduled
+    with:
+      every: 1h
+  - type: manual
+
+settings:
+  timeout: 20m
+  concurrency:
+    key: "{{ workflow.id }}"
+    strategy: drop
+    max: 1
+
+consts:
+  max_domain_age_days: __install__.max-domain-age-days
+  lookback: 1 hour
+  # who-dat has no dedicated connector. Cap each run so a noisy hour cannot
+  # exhaust the public WHOIS proxy. Raise this in consts if lookups stay fast.
+  max_domains_per_run: 50
+  whois_base_url: https://who-dat.as93.net/v1/whois
+  # Also open a case when dates.updated falls inside max_domain_age_days.
+  # Leave false: registrars refresh that date on renewal, so old domains look
+  # recently updated. Registration age is the case gate either way.
+  flag_recent_whois_update: false
+  # Last two labels are the registrable domain, except these multi-part
+  # suffixes, which take the last three. This is not the public suffix list;
+  # extend the comma-separated value in consts when a TLD is missing.
+  multi_part_suffixes: "co.uk,org.uk,ac.uk,gov.uk,net.uk,co.jp,ne.jp,or.jp,ac.jp,go.jp,com.au,net.au,org.au,edu.au,co.nz,org.nz,net.nz,com.br,com.mx,com.ar,com.tr,com.sg,com.hk,com.tw,com.cn,co.in,net.in,org.in,co.za,org.za,com.co,com.pe,co.kr,or.kr,com.my,com.ph,co.id,com.vn,co.il,org.il,com.eg,com.sa,com.pk,com.ng"
+
+steps:
+  # Liquid turns a non-numeric max_domain_age_days into 0, which would skip
+  # every domain. Fall back to 90 unless the const is a positive number.
+  - name: set_age_threshold
+    type: data.set
+    with:
+      max_domain_age_days: "{% assign max_age = consts.max_domain_age_days | plus: 0 %}{% if max_age > 0 %}{{ max_age }}{% else %}90{% endif %}"
+
+  - name: set_alerts_index
+    type: data.set
+    with:
+      # .alerts-security.alerts-* would also read other spaces and copy those
+      # alerts into a case in this space.
+      alerts_index: ".alerts-security.alerts-{{ workflow.spaceId | default: 'default' }}"
+
+  - name: log_run_start
+    type: console
+    with:
+      message: |
+        Alerts with Young Domain — run start
+        execution.id={{ execution.id }}
+        lookback={{ consts.lookback }}
+        max_domain_age_days={{ steps.set_age_threshold.output.max_domain_age_days }}
+        max_domains_per_run={{ consts.max_domains_per_run }}
+        alerts_index={{ steps.set_alerts_index.output.alerts_index }}
+
+  - name: init_counters
+    type: data.set
+    with:
+      domains_checked: 0
+      young_domains: 0
+      cases_opened: 0
+
+  # Columns consumed as foreach.item[N]:
+  #   [0] observed_domain  [1] agent.id  [2] alert_count
+  #   [3] host_ids         [4] rule_names  [5] rule_ids
+  # Both domain fields are expanded so an alert with only destination.domain
+  # is not dropped when other alerts in the hour also have dns.question.name.
+  - name: query_alert_domains
+    type: elasticsearch.esql.query
+    with:
+      query: |
+        FROM {{ steps.set_alerts_index.output.alerts_index }}
+        | WHERE @timestamp > NOW() - {{ consts.lookback }}
+          AND (dns.question.name IS NOT NULL OR destination.domain IS NOT NULL)
+        | EVAL observed_domain = CASE(
+            dns.question.name IS NOT NULL AND destination.domain IS NOT NULL, MV_DEDUPE(MV_APPEND(dns.question.name, destination.domain)),
+            dns.question.name IS NOT NULL, dns.question.name,
+            destination.domain
+          )
+        | WHERE observed_domain IS NOT NULL
+        | MV_EXPAND observed_domain
+        | EVAL observed_domain = TO_LOWER(observed_domain)
+        | EVAL observed_domain = REPLACE(REPLACE(REPLACE(observed_domain, "。", "."), "．", "."), "｡", ".")
+        | WHERE NOT ENDS_WITH(observed_domain, ".local")
+            AND NOT ENDS_WITH(observed_domain, ".local.")
+            AND NOT ENDS_WITH(observed_domain, ".internal")
+            AND NOT ENDS_WITH(observed_domain, ".internal.")
+        | STATS
+            alert_count = COUNT(*),
+            host_ids = VALUES(host.id),
+            rule_names = VALUES(kibana.alert.rule.name),
+            rule_ids = VALUES(kibana.alert.rule.rule_id)
+          BY observed_domain, agent.id
+        | KEEP observed_domain, agent.id, alert_count, host_ids, rule_names, rule_ids
+        | SORT alert_count DESC
+        | LIMIT {{ consts.max_domains_per_run }}
+
+  - name: when_domains_found
+    type: if
+    condition: "steps.query_alert_domains.output.values.length > 0"
+    steps:
+      - name: log_domain_count
+        type: console
+        with:
+          message: "Young-domain alert check — {{ steps.query_alert_domains.output.values | size }} domain row(s) from {{ steps.set_alerts_index.output.alerts_index }} over the last {{ consts.lookback }}."
+
+      - name: per_domain
+        type: foreach
+        foreach: "{{ steps.query_alert_domains.output.values }}"
+        on-failure:
+          continue: true
+        steps:
+          - name: set_domain_context
+            type: data.set
+            with:
+              observed_domain: "{{ foreach.item[0] | strip }}"
+              agent_id: "{% if foreach.item[1] != blank %}{{ foreach.item[1] }}{% else %}unknown{% endif %}"
+              alert_count: "{{ foreach.item[2] | default: 0 }}"
+              host_ids: "{{ foreach.item[3] | default: 'unknown' | join: ', ' }}"
+              rule_names: "{{ foreach.item[4] | default: 'unknown' | join: ', ' }}"
+              rule_ids: "{{ foreach.item[5] | default: 'unknown' | join: ', ' }}"
+              dedup_tag: "agent-domain:{% if foreach.item[1] != blank %}{{ foreach.item[1] }}{% else %}unknown{% endif %}:{{ foreach.item[0] | strip }}"
+              whois_domain: >-
+                {% assign host = foreach.item[0] | strip -%}
+                {% assign parts = host | split: '.' -%}
+                {% assign n = parts.size -%}
+                {% assign last2 = parts | slice: -2, 2 | join: '.' -%}
+                {% assign suffix_list = ',' | append: consts.multi_part_suffixes | append: ',' -%}
+                {% assign suffix_needle = ',' | append: last2 | append: ',' -%}
+                {% if n >= 3 and suffix_list contains suffix_needle -%}
+                {{ parts | slice: -3, 3 | join: '.' -}}
+                {% elsif n >= 2 -%}
+                {{ last2 -}}
+                {% else -%}
+                {{ host -}}
+                {% endif %}
+
+          # .local and .internal are not sent to the public WHOIS proxy.
+          - name: set_lookup_gate
+            type: data.set
+            with:
+              allowed: |-
+                {%- assign sent = steps.set_domain_context.output.whois_domain | default: '' | downcase | strip | replace: '。', '.' | replace: '．', '.' | replace: '｡', '.' -%}
+                {%- assign observed = steps.set_domain_context.output.observed_domain | default: '' | downcase | strip | replace: '。', '.' | replace: '．', '.' | replace: '｡', '.' -%}
+                {%- assign sent_last = sent | slice: -1, 1 -%}
+                {%- if sent_last == '.' -%}
+                {%- assign sent_len = sent.size | minus: 1 -%}
+                {%- assign sent = sent | slice: 0, sent_len -%}
+                {%- endif -%}
+                {%- assign obs_last = observed | slice: -1, 1 -%}
+                {%- if obs_last == '.' -%}
+                {%- assign obs_len = observed.size | minus: 1 -%}
+                {%- assign observed = observed | slice: 0, obs_len -%}
+                {%- endif -%}
+                {%- assign sent_local = sent | slice: -6, 6 -%}
+                {%- assign sent_internal = sent | slice: -9, 9 -%}
+                {%- assign obs_local = observed | slice: -6, 6 -%}
+                {%- assign obs_internal = observed | slice: -9, 9 -%}
+                {%- if sent_local == '.local' -%}no
+                {%- elsif sent_internal == '.internal' -%}no
+                {%- elsif obs_local == '.local' -%}no
+                {%- elsif obs_internal == '.internal' -%}no
+                {%- else -%}yes
+                {%- endif -%}
+
+          - name: when_public_domain
+            type: if
+            condition: "steps.set_lookup_gate.output.allowed: yes"
+            steps:
+              - name: count_domain_checked
+                type: data.set
+                with:
+                  domains_checked: "{{ variables.domains_checked | plus: 1 }}"
+
+              # Public WHOIS proxy. Retry only on 429; other failures skip this domain.
+              - name: whois_lookup
+                type: http
+                timeout: 30s
+                on-failure:
+                  retry:
+                    max-attempts: 3
+                    delay: 10s
+                    condition: "steps.self.error.status : 429"
+                  continue: true
+                with:
+                  method: GET
+                  url: "{{ consts.whois_base_url }}/{{ steps.set_domain_context.output.whois_domain }}"
+                  headers:
+                    Accept: "application/json"
+
+              - name: when_whois_ok
+                type: if
+                condition: "not steps.whois_lookup.error: * and steps.whois_lookup.output.data.dates.created: *"
+                steps:
+                  - name: set_whois_meta
+                    type: data.set
+                    with:
+                      registration_date: "{{ steps.whois_lookup.output.data.dates.created }}"
+                      updated_date: "{% if steps.whois_lookup.output.data.dates.updated != blank %}{{ steps.whois_lookup.output.data.dates.updated }}{% else %}unknown{% endif %}"
+                      expires_date: "{% if steps.whois_lookup.output.data.dates.expires != blank %}{{ steps.whois_lookup.output.data.dates.expires }}{% else %}unknown{% endif %}"
+                      registrar: "{{ steps.whois_lookup.output.data.registrar.name | default: 'unknown' }}"
+                      whois_source: "{{ steps.whois_lookup.output.data.meta.source | default: 'unknown' }}"
+                      domain_age_days: >-
+                        {% assign reg = steps.whois_lookup.output.data.dates.created | default: '' -%}
+                        {% assign reg_s = reg | date: '%s' | plus: 0 -%}
+                        {% assign now_s = 'now' | date: '%s' | plus: 0 -%}
+                        {{ now_s | minus: reg_s | divided_by: 86400 | floor }}
+                      domain_updated_days: >-
+                        {% assign upd = steps.whois_lookup.output.data.dates.updated -%}
+                        {% if upd != blank -%}
+                        {% assign upd_s = upd | date: '%s' | plus: 0 -%}
+                        {% assign now_s = 'now' | date: '%s' | plus: 0 -%}
+                        {{ now_s | minus: upd_s | divided_by: 86400 | floor -}}
+                        {% else -%}
+                        unknown
+                        {% endif %}
+                      is_young_domain: >-
+                        {% assign reg = steps.whois_lookup.output.data.dates.created | default: '' -%}
+                        {% assign upd = steps.whois_lookup.output.data.dates.updated -%}
+                        {% assign max_age = steps.set_age_threshold.output.max_domain_age_days | plus: 0 -%}
+                        {% assign young = false -%}
+                        {% if reg != '' -%}
+                        {% assign reg_s = reg | date: '%s' | plus: 0 -%}
+                        {% assign now_s = 'now' | date: '%s' | plus: 0 -%}
+                        {% assign age = now_s | minus: reg_s | divided_by: 86400 | floor -%}
+                        {% if age >= 0 and age <= max_age -%}
+                        {% assign young = true -%}
+                        {% endif -%}
+                        {% endif -%}
+                        {% if consts.flag_recent_whois_update == true and upd != blank -%}
+                        {% assign upd_s = upd | date: '%s' | plus: 0 -%}
+                        {% assign now_s = 'now' | date: '%s' | plus: 0 -%}
+                        {% assign upd_age = now_s | minus: upd_s | divided_by: 86400 | floor -%}
+                        {% if upd_age >= 0 and upd_age <= max_age -%}
+                        {% assign young = true -%}
+                        {% endif -%}
+                        {% endif -%}
+                        {% if young -%}yes{% else -%}no{% endif %}
+                      domain_age_trigger: >-
+                        {% assign reg = steps.whois_lookup.output.data.dates.created | default: '' -%}
+                        {% assign upd = steps.whois_lookup.output.data.dates.updated -%}
+                        {% assign max_age = steps.set_age_threshold.output.max_domain_age_days | plus: 0 -%}
+                        {% assign young_reg = false -%}
+                        {% assign young_upd = false -%}
+                        {% if reg != '' -%}
+                        {% assign reg_s = reg | date: '%s' | plus: 0 -%}
+                        {% assign now_s = 'now' | date: '%s' | plus: 0 -%}
+                        {% assign age = now_s | minus: reg_s | divided_by: 86400 | floor -%}
+                        {% if age >= 0 and age <= max_age -%}
+                        {% assign young_reg = true -%}
+                        {% endif -%}
+                        {% endif -%}
+                        {% if consts.flag_recent_whois_update == true and upd != blank -%}
+                        {% assign upd_s = upd | date: '%s' | plus: 0 -%}
+                        {% assign now_s = 'now' | date: '%s' | plus: 0 -%}
+                        {% assign upd_age = now_s | minus: upd_s | divided_by: 86400 | floor -%}
+                        {% if upd_age >= 0 and upd_age <= max_age -%}
+                        {% assign young_upd = true -%}
+                        {% endif -%}
+                        {% endif -%}
+                        {% if young_reg and young_upd -%}registration_and_update{% elsif young_reg -%}registration{% elsif young_upd -%}update{% else -%}none{% endif %}
+
+                  - name: log_whois_result
+                    type: console
+                    with:
+                      message: >-
+                        agent.id={{ steps.set_domain_context.output.agent_id }}
+                        domain={{ steps.set_domain_context.output.observed_domain }}
+                        whois_domain={{ steps.set_domain_context.output.whois_domain }}
+                        registration={{ steps.set_whois_meta.output.registration_date }}
+                        age_days={{ steps.set_whois_meta.output.domain_age_days }}
+                        updated_days={{ steps.set_whois_meta.output.domain_updated_days }}
+                        trigger={{ steps.set_whois_meta.output.domain_age_trigger }}
+                        young={{ steps.set_whois_meta.output.is_young_domain }}
+
+                  - name: when_young_domain
+                    type: if
+                    condition: "steps.set_whois_meta.output.is_young_domain: yes"
+                    steps:
+                      - name: count_young_domain
+                        type: data.set
+                        with:
+                          young_domains: "{{ variables.young_domains | plus: 1 }}"
+
+                      # One tag per agent and observed domain, so "evil.com" does not match "notevil.com".
+                      - name: find_open_case
+                        type: cases.findCases
+                        with:
+                          owner: [securitySolution]
+                          status: [open]
+                          tags:
+                            - "{{ steps.set_domain_context.output.dedup_tag }}"
+                          page: 1
+                          perPage: 1
+                          sortField: createdAt
+                          sortOrder: desc
+                        on-failure:
+                          continue: true
+
+                      - name: decide_create_case
+                        type: data.set
+                        with:
+                          should_create: "{% if steps.find_open_case.error %}no{% elsif steps.find_open_case.output.total > 0 or steps.find_open_case.output.cases.size > 0 %}no{% else %}yes{% endif %}"
+                          skip_reason: "{% if steps.find_open_case.error %}case lookup failed{% elsif steps.find_open_case.output.total > 0 or steps.find_open_case.output.cases.size > 0 %}open case exists{% endif %}"
+
+                      - name: when_should_create_case
+                        type: if
+                        condition: "steps.decide_create_case.output.should_create: yes"
+                        steps:
+                          - name: create_young_domain_case
+                            type: cases.createCase
+                            on-failure:
+                              continue: true
+                            with:
+                              title: "Alert from young domain {{ steps.set_domain_context.output.observed_domain }} ({{ steps.set_domain_context.output.agent_id }})"
+                              description: |
+                                Domain registration age is within {{ steps.set_age_threshold.output.max_domain_age_days }} days. This is a lead from alert telemetry, not a confirmed incident.
+
+                                | Field | Value |
+                                |---|---|
+                                | **Observed domain** | `{{ steps.set_domain_context.output.observed_domain }}` |
+                                | **WHOIS domain** | `{{ steps.set_domain_context.output.whois_domain }}` |
+                                | **agent.id** | `{{ steps.set_domain_context.output.agent_id }}` |
+                                | **host.id** | `{{ steps.set_domain_context.output.host_ids }}` |
+                                | **Rule name** | {{ steps.set_domain_context.output.rule_names }} |
+                                | **Rule id** | `{{ steps.set_domain_context.output.rule_ids }}` |
+                                | **Alerts in window** | {{ steps.set_domain_context.output.alert_count }} |
+                                | **Registration date** | `{{ steps.set_whois_meta.output.registration_date }}` |
+                                | **Domain age (days)** | {{ steps.set_whois_meta.output.domain_age_days }} |
+                                | **Last updated** | `{{ steps.set_whois_meta.output.updated_date }}` |
+                                | **Days since update** | {{ steps.set_whois_meta.output.domain_updated_days }} |
+                                | **Expiry** | `{{ steps.set_whois_meta.output.expires_date }}` |
+                                | **Registrar** | {{ steps.set_whois_meta.output.registrar }} |
+                                | **WHOIS source** | {{ steps.set_whois_meta.output.whois_source }} |
+                                | **Trigger** | {{ steps.set_whois_meta.output.domain_age_trigger }} |
+                                | **Threshold (days)** | {{ steps.set_age_threshold.output.max_domain_age_days }} |
+                                | **Execution** | `{{ execution.id }}` |
+
+                                WHOIS queried `{{ steps.set_domain_context.output.whois_domain }}`{% if steps.set_domain_context.output.whois_domain != steps.set_domain_context.output.observed_domain %} (registrable domain for `{{ steps.set_domain_context.output.observed_domain }}`){% endif %} via who-dat.as93.net.
+                              owner: securitySolution
+                              severity: high
+                              tags:
+                                - young-domain
+                                - alerts-with-young-domain
+                                - "{{ steps.set_domain_context.output.dedup_tag }}"
+                              settings:
+                                syncAlerts: false
+
+                          - name: when_case_created
+                            type: if
+                            condition: "not steps.create_young_domain_case.error: * and steps.create_young_domain_case.output.case.id: *"
+                            steps:
+                              - name: count_case_opened
+                                type: data.set
+                                with:
+                                  cases_opened: "{{ variables.cases_opened | plus: 1 }}"
+
+                              - name: log_case_created
+                                type: console
+                                with:
+                                  message: >-
+                                    Opened case {{ steps.create_young_domain_case.output.case.id }}
+                                    for agent.id={{ steps.set_domain_context.output.agent_id }}
+                                    domain={{ steps.set_domain_context.output.observed_domain }}
+                                    age_days={{ steps.set_whois_meta.output.domain_age_days }}.
+                                    {{ kibanaUrl }}/app/security/cases/{{ steps.create_young_domain_case.output.case.id }}
+                            else:
+                              - name: log_case_failed
+                                type: console
+                                with:
+                                  message: >-
+                                    Case creation failed for agent.id={{ steps.set_domain_context.output.agent_id }}
+                                    domain={{ steps.set_domain_context.output.observed_domain }}
+                                    err={{ steps.create_young_domain_case.error.message }}
+                        else:
+                          - name: log_case_skipped
+                            type: console
+                            with:
+                              message: >-
+                                Case skipped ({{ steps.decide_create_case.output.skip_reason | default: "not created" }})
+                                for agent.id={{ steps.set_domain_context.output.agent_id }}
+                                domain={{ steps.set_domain_context.output.observed_domain }}.
+                    else:
+                      - name: log_skip_old_domain
+                        type: console
+                        with:
+                          message: >-
+                            Skipped — registration {{ steps.set_whois_meta.output.domain_age_days }}d ago
+                            (threshold {{ steps.set_age_threshold.output.max_domain_age_days }}d)
+                            for {{ steps.set_domain_context.output.observed_domain }}
+                            on agent.id {{ steps.set_domain_context.output.agent_id }}.
+                else:
+                  - name: log_whois_failed
+                    type: console
+                    with:
+                      message: >-
+                        WHOIS lookup failed for agent.id={{ steps.set_domain_context.output.agent_id }}
+                        domain={{ steps.set_domain_context.output.observed_domain }}
+                        whois_domain={{ steps.set_domain_context.output.whois_domain }}
+                        {% if steps.whois_lookup.error.status == 429 %}err=429 rate-limited{% elsif steps.whois_lookup.error %}err={{ steps.whois_lookup.error.message }}{% elsif steps.whois_lookup.output.data.error.message %}err={{ steps.whois_lookup.output.data.error.message }}{% else %}err=no dates.created in response{% endif %}
+            else:
+              - name: log_skip_private_domain
+                type: console
+                with:
+                  message: >-
+                    Skipped WHOIS for agent.id={{ steps.set_domain_context.output.agent_id }}
+                    domain={{ steps.set_domain_context.output.observed_domain }}
+                    whois_domain={{ steps.set_domain_context.output.whois_domain }}
+                    — name ends with .local or .internal.
+    else:
+      - name: log_no_domains
+        type: console
+        with:
+          message: "No dns.question.name or destination.domain values on security alerts in the last {{ consts.lookback }}."
+
+  - name: log_done
+    type: console
+    with:
+      message: |
+        Alerts with Young Domain finished.
+        execution.id={{ execution.id }}
+        domains_checked={{ variables.domains_checked }}
+        young_domains={{ variables.young_domains }}
+        cases_opened={{ variables.cases_opened }}
