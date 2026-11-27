@@ -1,0 +1,250 @@
+template-metadata:
+  slug: terminate-genai-process
+  version: "1.0.0"
+  availability: ">=9.5.0"
+  name: "Terminate GenAI Process Activity"
+  description: >-
+        Terminate a process attributed to a known AI agent or its descendants
+        (process.ai_agent.name / is_descendant) with Elastic Defend
+        kill_process. Requires process.ai_agent fields from Elastic Endpoint
+        (Linux 9.5+; macOS and Windows 9.6+) with AI event enrichment enabled
+        (Linux on by default in 9.5; use Defend AI data collection / advanced
+        genai_observability on other OS or older policies). Alert or manual.
+        Requires process.entity_id — PID-only targets are always refused
+        (PID reuse risk). Audit by default; enable enforce to submit kill,
+        poll completion, and verify. Optional host isolate is a separate
+        install toggle and runs only after a verified kill. Needs Defend
+        kill_process (and isolate if enabled). Refuses targets without
+        AI-agent attribution. Multi-alert batches are rejected; configure
+        rule actions for per-alert mode.
+  solutions: [security]
+  categories: [response]
+  install:
+    form:
+      - name: enable-enforce
+        label: "Enforce process kill"
+        description: >-
+          When true, submit Defend kill_process for a verified target. Leave false
+          for audit-only.
+        inputType: boolean
+        required: true
+        default: false
+      - name: enable-isolate
+        label: "Optional host isolate after kill"
+        description: >-
+          When true and enforce is enabled, also submit Defend isolate. Leaves the
+          host network-cut; use only on disposable or approved hosts.
+        inputType: boolean
+        required: true
+        default: false
+
+name: Terminate GenAI Process Activity
+description: >-
+  Terminate a process attributed to a known AI agent or its descendants via
+  process.ai_agent.name / process.ai_agent.is_descendant. Needs those fields
+  from Elastic Endpoint (Linux 9.5+; macOS and Windows 9.6+) with AI event
+  enrichment enabled (Linux on by default in 9.5; Defend AI data collection /
+  advanced genai_observability elsewhere). Alert or manual. Requires
+  process.entity_id — PID-only targets are always refused (PID reuse risk).
+  Audit by default; enforce submits Defend kill_process, polls completion, and
+  logs verification. Optional isolate runs only after a verified kill. Needs
+  Defend kill_process (and isolate if enabled). Multi-alert batches are
+  rejected; configure rule actions for per-alert mode. Targets without
+  AI-agent attribution are skipped.
+enabled: true
+tags:
+  - security
+  - elastic-defend
+  - hunting
+  - response
+  - genai
+settings:
+  timeout: 15m
+  concurrency:
+    key: "{{ workflow.id }}-{{ inputs.agent_id | default: event.alerts[0].agent.id | default: event.alerts[0].elastic.agent.id | default: '' }}-{{ inputs.entity_id | default: event.alerts[0].process.entity_id | default: inputs.pid | default: event.alerts[0].process.pid | default: '' }}"
+    strategy: drop
+    max: 1
+consts:
+  enable_enforce: __install__.enable-enforce
+  enable_isolate: __install__.enable-isolate
+  kill_descendants: false
+  action_poll_limit: 36
+triggers:
+  - type: alert
+  - type: manual
+    inputs:
+      - name: agent_id
+        type: string
+        required: true
+        description: Elastic Defend agent.id / endpoint id
+      - name: entity_id
+        type: string
+        required: false
+        default: ""
+        description: Required process.entity_id (PID-only refused)
+      - name: pid
+        type: number
+        required: false
+        default: 0
+        description: Display-only PID; kill always requires entity_id
+      - name: process_name
+        type: string
+        required: false
+        default: ""
+      - name: host_name
+        type: string
+        required: false
+        default: ""
+      - name: ai_agent_name
+        type: string
+        required: false
+        default: ""
+        description: >-
+          process.ai_agent.name when running manually without an alert (e.g.
+          cursor, claude_code, copilot)
+      - name: ai_agent_is_descendant
+        type: boolean
+        required: false
+        default: false
+        description: >-
+          Set true on manual runs when the target is a descendant of a known
+          AI-agent process (process.ai_agent.is_descendant)
+steps:
+  - name: set_context
+    type: data.set
+    with:
+      agent_id: "{% if event.alerts[0].agent.id != '' and event.alerts[0].agent.id != null %}{{ event.alerts[0].agent.id }}{% elsif event.alerts[0].elastic.agent.id != '' and event.alerts[0].elastic.agent.id != null %}{{ event.alerts[0].elastic.agent.id }}{% else %}{{ inputs.agent_id }}{% endif %}"
+      entity_id: "{% if event.alerts[0].process.entity_id != '' and event.alerts[0].process.entity_id != null %}{{ event.alerts[0].process.entity_id }}{% elsif event.alerts[0]._id == '' or event.alerts[0]._id == null %}{% if inputs.entity_id != '' and inputs.entity_id != null %}{{ inputs.entity_id }}{% endif %}{% endif %}"
+      process_pid: "{% if event.alerts[0].process.pid != '' and event.alerts[0].process.pid != null %}{{ event.alerts[0].process.pid }}{% elsif event.alerts[0]._id == '' or event.alerts[0]._id == null %}{% if inputs.pid and inputs.pid != 0 %}{{ inputs.pid }}{% endif %}{% endif %}"
+      process_name: "{% if event.alerts[0].process.name != '' and event.alerts[0].process.name != null %}{{ event.alerts[0].process.name }}{% elsif event.alerts[0]._id == '' or event.alerts[0]._id == null %}{% if inputs.process_name != '' %}{{ inputs.process_name }}{% endif %}{% endif %}"
+      host_name: "{% if event.alerts[0].host.name != '' and event.alerts[0].host.name != null %}{{ event.alerts[0].host.name }}{% elsif event.alerts[0]._id == '' or event.alerts[0]._id == null %}{% if inputs.host_name != '' %}{{ inputs.host_name }}{% endif %}{% endif %}"
+      ai_agent_name: "{% if event.alerts[0].process.ai_agent.name != '' and event.alerts[0].process.ai_agent.name != null %}{{ event.alerts[0].process.ai_agent.name }}{% elsif event.alerts[0]._id == '' or event.alerts[0]._id == null %}{% if inputs.ai_agent_name != '' and inputs.ai_agent_name != null %}{{ inputs.ai_agent_name }}{% endif %}{% endif %}"
+      ai_agent_is_descendant: "{% if event.alerts[0].process.ai_agent.is_descendant == true or event.alerts[0].process.ai_agent.is_descendant == 'true' %}true{% elsif event.alerts[0]._id == '' or event.alerts[0]._id == null %}{% if inputs.ai_agent_is_descendant == true or inputs.ai_agent_is_descendant == 'true' %}true{% else %}false{% endif %}{% else %}false{% endif %}"
+      alert_id: "{% if event.alerts[0].kibana.alert.uuid != '' and event.alerts[0].kibana.alert.uuid != null %}{{ event.alerts[0].kibana.alert.uuid }}{% elsif event.alerts[0]._id != '' and event.alerts[0]._id != null %}{{ event.alerts[0]._id }}{% else %}{% endif %}"
+      rule_name: "{% if event.alerts[0].kibana.alert.rule.name != '' and event.alerts[0].kibana.alert.rule.name != null %}{{ event.alerts[0].kibana.alert.rule.name }}{% else %}manual{% endif %}"
+      run_mode: "{% if event.alerts[0]._id != '' and event.alerts[0]._id != null %}alert{% else %}manual{% endif %}"
+      alert_count: "{{ event.alerts | size | default: 0 }}"
+  - name: reject_multi_alert
+    type: if
+    condition: 'steps.set_context.output.run_mode: "alert" AND not steps.set_context.output.alert_count: "0" AND not steps.set_context.output.alert_count: "1"'
+    steps:
+      - name: log_multi_alert
+        type: console
+        with:
+          message: "skipped - received {{ steps.set_context.output.alert_count }} alerts; this workflow handles one alert per run. Configure the rule action for per-alert mode. outcome=skipped"
+    else:
+      - name: validate
+        type: if
+        condition: 'steps.set_context.output.agent_id: "" OR (steps.set_context.output.entity_id: "" AND steps.set_context.output.process_pid: "")'
+        steps:
+          - name: log_skip
+            type: console
+            with:
+              message: "skipped - need agent_id and process.entity_id (PID-only refused). outcome=skipped"
+        else:
+          - name: require_ai_agent
+            type: if
+            condition: 'steps.set_context.output.ai_agent_name: "" AND not steps.set_context.output.ai_agent_is_descendant: "true"'
+            steps:
+              - name: log_skip_not_ai_agent
+                type: console
+                with:
+                  message: "skipped - need process.ai_agent.name or process.ai_agent.is_descendant=true (host={{ steps.set_context.output.host_name }} process={{ steps.set_context.output.process_name }} entity_id={{ steps.set_context.output.entity_id }} pid={{ steps.set_context.output.process_pid }}). outcome=skipped"
+            else:
+              - name: require_entity_id
+                type: if
+                condition: 'steps.set_context.output.entity_id: ""'
+                steps:
+                  - name: log_refuse_pid_only
+                    type: console
+                    with:
+                      message: "skipped - requires process.entity_id (PID-only refused due to PID reuse risk). host={{ steps.set_context.output.host_name }} pid={{ steps.set_context.output.process_pid }} outcome=skipped"
+                else:
+                  - name: decide_enforce
+                    type: data.set
+                    with:
+                      enforce: "{% if consts.enable_enforce %}true{% else %}false{% endif %}"
+                  - name: audit_path
+                    type: if
+                    condition: 'steps.decide_enforce.output.enforce: "false"'
+                    steps:
+                      - name: log_audit
+                        type: console
+                        with:
+                          message: "audited - would kill host={{ steps.set_context.output.host_name }} agent={{ steps.set_context.output.agent_id }} process={{ steps.set_context.output.process_name }} ai_agent={{ steps.set_context.output.ai_agent_name }} is_descendant={{ steps.set_context.output.ai_agent_is_descendant }} entity_id={{ steps.set_context.output.entity_id }} rule={{ steps.set_context.output.rule_name }} outcome=audited"
+                    else:
+                      - name: kill_process_entity
+                        type: kibana.request
+                        on-failure:
+                          continue: true
+                        with:
+                          method: POST
+                          path: /api/endpoint/action/kill_process
+                          headers:
+                            kbn-xsrf: "true"
+                          body:
+                            agent_type: endpoint
+                            endpoint_ids:
+                              - "{{ steps.set_context.output.agent_id }}"
+                            parameters:
+                              entity_id: "{{ steps.set_context.output.entity_id }}"
+                              kill_descendants: "{{ consts.kill_descendants }}"
+                            comment: "terminate-genai-process ai_agent={{ steps.set_context.output.ai_agent_name }} alert={{ steps.set_context.output.alert_id }}"
+                      - name: remember_kill_action
+                        type: data.set
+                        with:
+                          kill_action_id: "{{ steps.kill_process_entity.output.data.id | default: steps.kill_process_entity.output.id | default: '' }}"
+                      - name: init_poll
+                        type: data.set
+                        with:
+                          kill_completed: false
+                          kill_action_id: "{{ steps.remember_kill_action.output.kill_action_id | default: '' }}"
+                      - name: poll_kill
+                        type: while
+                        condition: 'variables.kill_action_id: * and not variables.kill_action_id: "" and not variables.kill_completed: true'
+                        max-iterations:
+                          limit: 36
+                          on-limit: continue
+                        steps:
+                          - name: wait_kill
+                            type: wait
+                            with:
+                              duration: 5s
+                          - name: fetch_kill_details
+                            type: kibana.request
+                            on-failure:
+                              continue: true
+                            with:
+                              method: GET
+                              path: /api/endpoint/action/{{ variables.kill_action_id | url_encode }}
+                          - name: mark_kill_completed
+                            type: data.set
+                            with:
+                              kill_completed: "{%- assign d = steps.fetch_kill_details.output.data -%}{%- if variables.kill_action_id != '' and d.id == variables.kill_action_id and d.isCompleted -%}true{%- else -%}false{%- endif -%}"
+                        if: 'variables.kill_action_id: * and not variables.kill_action_id: ""'
+                      - name: summarize_kill
+                        type: console
+                        with:
+                          message: "submitted kill_action_id={{ variables.kill_action_id }} completed={{ variables.kill_completed }} wasSuccessful={{ steps.fetch_kill_details.output.data.wasSuccessful }} agent={{ steps.set_context.output.agent_id }} ai_agent={{ steps.set_context.output.ai_agent_name }} is_descendant={{ steps.set_context.output.ai_agent_is_descendant }} entity_id={{ steps.set_context.output.entity_id }} pid={{ steps.set_context.output.process_pid }} outcome={% if variables.kill_action_id == '' %}failed{% elsif variables.kill_completed == 'true' and steps.fetch_kill_details.output.data.wasSuccessful %}verified{% elsif variables.kill_completed == 'true' %}failed{% else %}unknown{% endif %}"
+                      - name: isolate_gate
+                        type: if
+                        condition: 'consts.enable_isolate: true AND variables.kill_completed: "true" AND steps.fetch_kill_details.output.data.wasSuccessful: true'
+                        steps:
+                          - name: isolate_host
+                            type: kibana.request
+                            on-failure:
+                              continue: true
+                            with:
+                              method: POST
+                              path: /api/endpoint/action/isolate
+                              headers:
+                                kbn-xsrf: "true"
+                              body:
+                                agent_type: endpoint
+                                endpoint_ids:
+                                  - "{{ steps.set_context.output.agent_id }}"
+                                comment: "terminate-genai-process optional isolate ai_agent={{ steps.set_context.output.ai_agent_name }} alert={{ steps.set_context.output.alert_id }}"
+                          - name: log_isolate
+                            type: console
+                            with:
+                              message: "isolate {% if steps.isolate_host.output.data.id != '' and steps.isolate_host.output.data.id != null %}submitted action_id={{ steps.isolate_host.output.data.id }}{% else %}rejected{% endif %} agent={{ steps.set_context.output.agent_id }} error={{ steps.isolate_host.error }}"
