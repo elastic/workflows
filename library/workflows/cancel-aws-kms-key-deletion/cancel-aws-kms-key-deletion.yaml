@@ -1,0 +1,472 @@
+template-metadata:
+  slug: cancel-aws-kms-key-deletion
+  version: "1.0.0"
+  availability: ">=9.7.0"
+  name: "Cancel AWS KMS Key Deletion"
+  description: >-
+    Cancel scheduled deletion for an AWS KMS key after confirming
+    PendingDeletion or PendingReplicaDeletion, canonicalizing the key ARN,
+    verifying all account and resource coordinates, and receiving explicit
+    analyst approval. Alert runs require per-alert action mode and the AWS
+    integration's request-parameter retention mode to be All or Flattened.
+  solutions: [security]
+  categories: [response]
+  install:
+    form:
+      - name: aws-connector
+        label: "AWS connector"
+        description: >-
+          AWS connector whose credentials belong to the expected account.
+          GetCallerIdentity requires no IAM allow; grant kms:DescribeKey and
+          kms:CancelKeyDeletion only on the KMS key ARNs this workflow may
+          remediate, and ensure the KMS key policies permit those actions.
+        inputType: connector
+        connectorType: .aws
+        required: true
+      - name: expected-account-id
+        label: "Expected AWS account ID"
+        description: >-
+          Twelve-digit AWS account ID that must own the connector credentials
+          and any alert target processed by this workflow.
+        inputType: text
+        required: true
+
+name: Cancel AWS KMS Key Deletion
+description: |
+  Resolve one AWS KMS key ID and Region from one alert or manual input, verify
+  the connector and resource account, confirm PendingDeletion or
+  PendingReplicaDeletion, require analyst approval, then revalidate the exact
+  partition, Region, account, key identity, state, deletion date, and pending
+  deletion window before cancelling deletion with the trusted KeyMetadata ARN.
+  Alert actions must run per alert with summaryMode:false; batches fail closed.
+
+consts:
+  expected_account_id: "__install__.expected-account-id"
+
+triggers:
+  - type: alert
+  - type: manual
+    inputs:
+      - name: key_id
+        type: string
+        description: AWS KMS key ID whose scheduled deletion will be cancelled.
+        required: true
+        default: ""
+      - name: region
+        type: string
+        description: AWS Region containing the KMS key.
+        required: true
+        default: ""
+
+steps:
+  - name: classify_invocation
+    type: data.set
+    with:
+      batch_status: >-
+        {% if event.alerts and event.alerts.size > 1 %}multiple{% else %}single_or_manual{% endif %}
+      alert_count: >-
+        {% if event.alerts %}{{ event.alerts.size }}{% else %}0{% endif %}
+
+  - name: resolve_target
+    type: data.parseJson
+    source: |
+      {% assign alert_present = false -%}
+      {% if event.alerts and event.alerts.size > 0 -%}
+        {% assign alert_present = true -%}
+      {% endif -%}
+      {% assign requested_key_id = inputs.key_id | default: "" | strip -%}
+      {% assign region = inputs.region | default: "" | strip | downcase -%}
+      {% assign recipient_account_id = consts.expected_account_id | default: "" | strip -%}
+      {% assign fallback_candidates = "" | split: "" -%}
+      {% assign fallback_valid = false -%}
+      {% assign direct_key_supplied = false -%}
+      {% if alert_present -%}
+        {% assign requested_key_id = event.alerts[0].aws.cloudtrail.flattened.request_parameters.keyId | default: "" | strip -%}
+        {% if requested_key_id != "" -%}
+          {% assign direct_key_supplied = true -%}
+        {% endif -%}
+        {% assign region = event.alerts[0].cloud.region | default: "" | strip | downcase -%}
+        {% assign recipient_account_id = event.alerts[0].aws.cloudtrail.recipient_account_id | default: "" | strip -%}
+        {% if requested_key_id == "" and event.alerts[0].aws.cloudtrail.resources -%}
+          {% for resource in event.alerts[0].aws.cloudtrail.resources -%}
+            {% assign resource_type = resource.type | default: "" | strip -%}
+            {% assign resource_arn = resource.arn | default: "" | strip -%}
+            {% if resource_type == "AWS::KMS::Key" and resource_arn != "" -%}
+              {% assign fallback_candidates = fallback_candidates | push: resource_arn -%}
+            {% endif -%}
+          {% endfor -%}
+          {% assign fallback_candidates = fallback_candidates | uniq -%}
+          {% if fallback_candidates.size == 1 -%}
+            {% assign candidate_arn = fallback_candidates | first -%}
+            {% assign candidate_parts = candidate_arn | split: ":" -%}
+            {% assign candidate_resource = candidate_parts[5] | default: "" | split: "/" -%}
+            {% if candidate_parts.size == 6 and candidate_parts[0] == "arn" and candidate_parts[1] != blank and candidate_parts[2] == "kms" and candidate_parts[3] == region and candidate_parts[4] == recipient_account_id and candidate_resource.size == 2 and candidate_resource[0] == "key" and candidate_resource[1] != blank -%}
+              {% assign requested_key_id = candidate_arn -%}
+              {% assign fallback_valid = true -%}
+            {% endif -%}
+          {% endif -%}
+        {% endif -%}
+      {% endif -%}
+      {
+        "requested_key_id": {{ requested_key_id | json }},
+        "region": {{ region | json }},
+        "recipient_account_id": {{ recipient_account_id | json }},
+        "expected_account_id": {{ consts.expected_account_id | default: "" | strip | json }},
+        "invocation_kind": {% if alert_present %}"cloudtrail_alert"{% else %}"manual"{% endif %},
+        "fallback_candidate_count": {{ fallback_candidates.size | json }},
+        "target_resolution_valid": "{% if requested_key_id != "" %}{% if alert_present and direct_key_supplied == false %}{{ fallback_valid }}{% else %}true{% endif %}{% else %}false{% endif %}"
+      }
+
+  - name: normalize_target
+    type: data.set
+    with:
+      requested_key_id: "{{ steps.resolve_target.output.requested_key_id }}"
+      region: "{{ steps.resolve_target.output.region }}"
+      recipient_account_id: "{{ steps.resolve_target.output.recipient_account_id }}"
+      expected_account_id: "{{ steps.resolve_target.output.expected_account_id }}"
+      invocation_kind: "{{ steps.resolve_target.output.invocation_kind }}"
+      fallback_candidate_count: "{{ steps.resolve_target.output.fallback_candidate_count }}"
+      target_resolution_valid: "{{ steps.resolve_target.output.target_resolution_valid }}"
+
+  - name: get_caller_identity
+    type: aws.request
+    if: "${{ steps.classify_invocation.output.batch_status == 'single_or_manual' and variables.target_resolution_valid == 'true' and variables.requested_key_id != blank and variables.region != blank and variables.recipient_account_id != blank and variables.expected_account_id != blank }}"
+    connector-id: __install__.aws-connector
+    on-failure:
+      continue: true
+    with:
+      service: sts
+      region: "{{ variables.region }}"
+      headers:
+        Accept: application/json
+      query:
+        Action: GetCallerIdentity
+        Version: "2011-06-15"
+
+  - name: parse_caller_identity
+    type: data.set
+    with:
+      connector_account_id: "{{ steps.get_caller_identity.output.data.GetCallerIdentityResponse.GetCallerIdentityResult.Account | default: '' | strip }}"
+
+  - name: validate_target
+    type: if
+    condition: "${{ steps.classify_invocation.output.batch_status == 'single_or_manual' and variables.target_resolution_valid == 'true' and variables.requested_key_id != blank and variables.region != blank and variables.recipient_account_id != blank and variables.recipient_account_id == variables.expected_account_id and steps.get_caller_identity.error == nil and variables.connector_account_id == variables.expected_account_id }}"
+    steps:
+      - name: describe_key_before
+        type: aws.request
+        connector-id: __install__.aws-connector
+        on-failure:
+          continue: true
+        with:
+          service: kms
+          region: "{{ variables.region }}"
+          method: POST
+          headers:
+            Content-Type: application/x-amz-json-1.1
+            X-Amz-Target: TrentService.DescribeKey
+          body:
+            KeyId: "{{ variables.requested_key_id }}"
+
+      - name: canonicalize_key_before
+        type: data.set
+        with:
+          trusted_arn: "{{ steps.describe_key_before.output.data.KeyMetadata.Arn | default: '' }}"
+          metadata_account_id: "{{ steps.describe_key_before.output.data.KeyMetadata.AWSAccountId | default: '' }}"
+          key_state: "{{ steps.describe_key_before.output.data.KeyMetadata.KeyState | default: '' }}"
+          metadata_key_id: "{{ steps.describe_key_before.output.data.KeyMetadata.KeyId | default: '' }}"
+          arn_partition: "{% assign parts = steps.describe_key_before.output.data.KeyMetadata.Arn | default: '' | split: ':' %}{{ parts[1] | default: '' }}"
+          arn_service: "{% assign parts = steps.describe_key_before.output.data.KeyMetadata.Arn | default: '' | split: ':' %}{{ parts[2] | default: '' }}"
+          arn_region: "{% assign parts = steps.describe_key_before.output.data.KeyMetadata.Arn | default: '' | split: ':' %}{{ parts[3] | default: '' }}"
+          arn_account_id: "{% assign parts = steps.describe_key_before.output.data.KeyMetadata.Arn | default: '' | split: ':' %}{{ parts[4] | default: '' }}"
+          arn_resource: "{% assign parts = steps.describe_key_before.output.data.KeyMetadata.Arn | default: '' | split: ':' %}{{ parts[5] | default: '' }}"
+          arn_key_id: "{% assign parts = steps.describe_key_before.output.data.KeyMetadata.Arn | default: '' | split: ':' %}{% assign resource = parts[5] | default: '' | split: '/' %}{{ resource[1] | default: '' }}"
+          arn_valid: >-
+            {% assign arn = steps.describe_key_before.output.data.KeyMetadata.Arn | default: '' -%}
+            {% assign parts = arn | split: ':' -%}
+            {% assign resource = parts[5] | default: '' | split: '/' -%}
+            {% if parts.size == 6 and parts[0] == 'arn' and parts[1] != blank and parts[2] == 'kms' and parts[3] == variables.region and parts[4] == variables.expected_account_id and resource.size == 2 and resource[0] == 'key' and resource[1] != blank and resource[1] == steps.describe_key_before.output.data.KeyMetadata.KeyId and steps.describe_key_before.output.data.KeyMetadata.AWSAccountId == variables.expected_account_id and variables.recipient_account_id == variables.expected_account_id and variables.connector_account_id == variables.expected_account_id %}true{% else %}false{% endif %}
+
+      - name: continue_for_successful_pre_read
+        type: if
+        condition: "${{ steps.describe_key_before.error == nil and steps.canonicalize_key_before.output.arn_valid == 'true' }}"
+        steps:
+          - name: classify_key_state
+            type: if
+            condition: "${{ variables.key_state == 'PendingDeletion' or variables.key_state == 'PendingReplicaDeletion' }}"
+            steps:
+              - name: request_approval
+                type: waitForInput
+                timeout: 1h
+                with:
+                  message: |-
+                    Approve cancelling scheduled deletion for AWS KMS key
+                    {{ variables.trusted_arn }}?
+
+                    Partition: {{ variables.arn_partition }}
+                    Account: {{ variables.metadata_account_id }}
+                    Region: {{ variables.arn_region }}
+                    Key ID: {{ variables.arn_key_id }}
+                    State: {{ variables.key_state }}
+                    Scheduled deletion date: {{ steps.describe_key_before.output.data.KeyMetadata.DeletionDate | default: '(not reported)' }}
+                    Pending deletion window days: {{ steps.describe_key_before.output.data.KeyMetadata.PendingDeletionWindowInDays | default: '(not reported)' }}
+                    CancelKeyDeletion leaves the key Disabled. Re-enabling it is
+                    a separate, explicitly authorized EnableKey action.
+                  schema:
+                    type: object
+                    properties:
+                      approved:
+                        type: boolean
+                        title: Cancel scheduled KMS key deletion
+                        default: false
+                      notes:
+                        type: string
+                        title: Analyst notes
+                    required:
+                      - approved
+
+              - name: apply_when_approved
+                type: if
+                condition: "${{ steps.request_approval.output.response.approved == true }}"
+                steps:
+                  - name: get_caller_identity_fresh
+                    type: aws.request
+                    connector-id: __install__.aws-connector
+                    on-failure:
+                      continue: true
+                    with:
+                      service: sts
+                      region: "{{ variables.region }}"
+                      headers:
+                        Accept: application/json
+                      query:
+                        Action: GetCallerIdentity
+                        Version: "2011-06-15"
+
+                  - name: parse_caller_identity_fresh
+                    type: data.set
+                    with:
+                      fresh_connector_account_id: "{{ steps.get_caller_identity_fresh.output.data.GetCallerIdentityResponse.GetCallerIdentityResult.Account | default: '' | strip }}"
+
+                  - name: describe_key_fresh
+                    type: aws.request
+                    if: "${{ steps.get_caller_identity_fresh.error == nil and variables.fresh_connector_account_id == variables.expected_account_id }}"
+                    connector-id: __install__.aws-connector
+                    on-failure:
+                      continue: true
+                    with:
+                      service: kms
+                      region: "{{ variables.region }}"
+                      method: POST
+                      headers:
+                        Content-Type: application/x-amz-json-1.1
+                        X-Amz-Target: TrentService.DescribeKey
+                      body:
+                        KeyId: "{{ variables.trusted_arn }}"
+
+                  - name: validate_fresh_approved_tuple
+                    type: data.set
+                    with:
+                      valid: >-
+                        {% assign fresh_arn = steps.describe_key_fresh.output.data.KeyMetadata.Arn | default: '' -%}
+                        {% assign parts = fresh_arn | split: ':' -%}
+                        {% assign resource = parts[5] | default: '' | split: '/' -%}
+                        {% assign fresh_state = steps.describe_key_fresh.output.data.KeyMetadata.KeyState | default: '' -%}
+                        {% if steps.get_caller_identity_fresh.error == nil and variables.fresh_connector_account_id == variables.expected_account_id and steps.describe_key_fresh.error == nil and fresh_arn == variables.trusted_arn and parts.size == 6 and parts[0] == 'arn' and parts[1] == variables.arn_partition and parts[2] == 'kms' and parts[3] == variables.arn_region and parts[4] == variables.arn_account_id and resource.size == 2 and resource[0] == 'key' and resource[1] == variables.arn_key_id and steps.describe_key_fresh.output.data.KeyMetadata.KeyId == variables.metadata_key_id and steps.describe_key_fresh.output.data.KeyMetadata.AWSAccountId == variables.metadata_account_id and variables.metadata_account_id == variables.expected_account_id and variables.recipient_account_id == variables.expected_account_id and fresh_state == variables.key_state and steps.describe_key_fresh.output.data.KeyMetadata.DeletionDate == steps.describe_key_before.output.data.KeyMetadata.DeletionDate and steps.describe_key_fresh.output.data.KeyMetadata.PendingDeletionWindowInDays == steps.describe_key_before.output.data.KeyMetadata.PendingDeletionWindowInDays %}true{% else %}false{% endif %}
+
+                  - name: continue_for_unchanged_approved_tuple
+                    type: if
+                    condition: "${{ steps.validate_fresh_approved_tuple.output.valid == 'true' }}"
+                    steps:
+                      - name: cancel_key_deletion
+                        type: aws.request
+                        connector-id: __install__.aws-connector
+                        on-failure:
+                          continue: true
+                        with:
+                          service: kms
+                          region: "{{ variables.region }}"
+                          method: POST
+                          headers:
+                            Content-Type: application/x-amz-json-1.1
+                            X-Amz-Target: TrentService.CancelKeyDeletion
+                          body:
+                            KeyId: "{{ variables.trusted_arn }}"
+
+                      - name: classify_mutation_response
+                        type: if
+                        condition: "${{ steps.cancel_key_deletion.error == nil and steps.cancel_key_deletion.output.data.KeyId == variables.trusted_arn }}"
+                        steps:
+                          - name: initialize_verification
+                            type: data.set
+                            with:
+                              verification_state: pending
+
+                          # Retry only DescribeKey; never retry CancelKeyDeletion.
+                          - name: verify_cancellation
+                            type: while
+                            condition: "${{ variables.verification_state != 'verified' }}"
+                            max-iterations:
+                              limit: 3
+                              on-limit: continue
+                            steps:
+                              - name: verification_backoff
+                                type: wait
+                                with:
+                                  duration: 2s
+                              - name: describe_key_after
+                                type: aws.request
+                                connector-id: __install__.aws-connector
+                                on-failure:
+                                  continue: true
+                                with:
+                                  service: kms
+                                  region: "{{ variables.region }}"
+                                  method: POST
+                                  headers:
+                                    Content-Type: application/x-amz-json-1.1
+                                    X-Amz-Target: TrentService.DescribeKey
+                                  body:
+                                    KeyId: "{{ variables.trusted_arn }}"
+                              - name: classify_verification_read
+                                type: data.set
+                                with:
+                                  verification_state: "{% if steps.describe_key_after.error == nil and steps.describe_key_after.output.data.KeyMetadata.Arn == variables.trusted_arn and steps.describe_key_after.output.data.KeyMetadata.KeyId == variables.metadata_key_id and steps.describe_key_after.output.data.KeyMetadata.AWSAccountId == variables.expected_account_id and steps.describe_key_after.output.data.KeyMetadata.KeyState == 'Disabled' and steps.describe_key_after.output.data.KeyMetadata.DeletionDate == nil and steps.describe_key_after.output.data.KeyMetadata.PendingDeletionWindowInDays == nil %}verified{% else %}pending{% endif %}"
+
+                          - name: classify_verification_result
+                            type: if
+                            condition: "${{ variables.verification_state == 'verified' }}"
+                            steps:
+                              - name: log_verified_audit_result
+                                type: console
+                                with:
+                                  message: |-
+                                    Outcome: verified; CancelKeyDeletion returned the trusted ARN and DescribeKey confirmed Disabled with no deletion date or pending deletion window.
+                                    Key ARN: {{ variables.trusted_arn }}.
+                                    Account: {{ variables.expected_account_id }}.
+                                    Region: {{ variables.region }}.
+                                    Responder: {{ steps.request_approval.output.respondedBy }}.
+                                    Notes: {{ steps.request_approval.output.response.notes | default: '(none)' }}.
+                                    Rollback guidance: cancellation leaves the key Disabled. Re-scheduling deletion or enabling the key requires separate authorization.
+                            else:
+                              - name: log_exhausted_verification
+                                type: console
+                                with:
+                                  message: |-
+                                    Outcome: verification_failed; CancelKeyDeletion returned the trusted ARN, but three DescribeKey reads did not verify Disabled with no deletion metadata.
+                                    Any desired state observed later is not attributed to this execution.
+                                    Key ARN: {{ variables.trusted_arn }}.
+                                    Last state: {{ steps.describe_key_after.output.data.KeyMetadata.KeyState | default: '(unavailable)' }}.
+                                    Last error: {{ steps.describe_key_after.error | default: '(none)' | json }}.
+                                    Recovery guidance: inspect current KMS state before any separately authorized follow-up; do not blindly retry cancellation.
+                              - name: fail_exhausted_verification
+                                type: workflow.fail
+                                with:
+                                  message: CancelKeyDeletion post-state was not verified after three DescribeKey attempts.
+                                  reason: kms_cancellation_not_verified
+                        else:
+                          - name: log_mutation_failure
+                            type: console
+                            with:
+                              message: |-
+                                Outcome: mutation_failed_or_unattributed; CancelKeyDeletion errored or did not return the trusted ARN. No resulting state is attributed to this execution.
+                                Key ARN: {{ variables.trusted_arn }}.
+                                Error: {{ steps.cancel_key_deletion.error | json }}.
+                                Returned KeyId: {{ steps.cancel_key_deletion.output.data.KeyId | default: '(missing)' }}.
+                                Recovery guidance: inspect current KMS state before any separately authorized retry.
+                          - name: fail_mutation
+                            type: workflow.fail
+                            with:
+                              message: CancelKeyDeletion failed or returned a KeyId other than the trusted ARN.
+                              reason: kms_cancel_key_deletion_failed
+                    else:
+                      - name: log_stale_precondition
+                        type: console
+                        with:
+                          message: |-
+                            Outcome: no_change_failed; CancelKeyDeletion was not called because the post-approval connector identity or exact approved key tuple was stale or unreadable.
+                            Key ARN: {{ variables.trusted_arn }}.
+                            Fresh connector error: {{ steps.get_caller_identity_fresh.error | default: '(none)' | json }}.
+                            Fresh DescribeKey error: {{ steps.describe_key_fresh.error | default: '(none)' | json }}.
+                            Rollback: none is needed because no mutation was attempted.
+                      - name: fail_stale_precondition
+                        type: workflow.fail
+                        with:
+                          message: The approved KMS key tuple was stale or could not be revalidated.
+                          reason: kms_approved_state_stale
+                else:
+                  - name: log_rejected_audit_result
+                    type: console
+                    with:
+                      message: |-
+                        Outcome: no_change; no CancelKeyDeletion request was made because cancellation was explicitly rejected.
+                        Key ARN: {{ variables.trusted_arn }}.
+                        Responder: {{ steps.request_approval.output.respondedBy }}.
+                        Notes: {{ steps.request_approval.output.response.notes | default: '(none)' }}.
+                        Rollback: none is needed because no mutation was attempted.
+            else:
+              - name: classify_already_safe
+                type: if
+                condition: "${{ variables.key_state == 'Disabled' and steps.describe_key_before.output.data.KeyMetadata.DeletionDate == nil and steps.describe_key_before.output.data.KeyMetadata.PendingDeletionWindowInDays == nil }}"
+                steps:
+                  - name: log_already_safe
+                    type: console
+                    with:
+                      message: |-
+                        Outcome: no_change_success; the trusted KMS key is already Disabled with no deletion metadata.
+                        Key ARN: {{ variables.trusted_arn }}.
+                        Rollback: none is needed because no mutation was attempted.
+                else:
+                  - name: log_ineligible_state
+                    type: console
+                    with:
+                      message: |-
+                        Outcome: no_change_failed; CancelKeyDeletion does not apply to the observed key state.
+                        Key ARN: {{ variables.trusted_arn }}.
+                        State: {{ variables.key_state | default: '(missing)' }}.
+                        Deletion date: {{ steps.describe_key_before.output.data.KeyMetadata.DeletionDate | default: '(not reported)' }}.
+                        Pending deletion window days: {{ steps.describe_key_before.output.data.KeyMetadata.PendingDeletionWindowInDays | default: '(not reported)' }}.
+                        Rollback: none is needed because no mutation was attempted.
+                  - name: fail_ineligible_state
+                    type: workflow.fail
+                    with:
+                      message: The KMS key is neither pending deletion nor verified already safe.
+                      reason: kms_key_state_not_remediable
+        else:
+          - name: log_pre_read_failure
+            type: console
+            with:
+              message: |-
+                Outcome: no_change_failed; DescribeKey failed or returned KeyMetadata whose ARN, AWSAccountId, Region, account, or key identity did not match the approved expected tuple.
+                Requested key: {{ variables.requested_key_id }}.
+                Returned ARN: {{ steps.describe_key_before.output.data.KeyMetadata.Arn | default: '(missing)' }}.
+                Error: {{ steps.describe_key_before.error | default: '(none)' | json }}.
+                Rollback: none is needed because no mutation was attempted.
+          - name: fail_pre_read
+            type: workflow.fail
+            with:
+              message: DescribeKey failed or returned untrusted KMS key metadata.
+              reason: kms_pre_read_untrusted
+    else:
+      - name: log_unsafe_target
+        type: console
+        with:
+          message: >-
+            Outcome: no_change; KMS deletion cancellation was skipped because
+            validation failed before any KMS resource request or approval.
+            Alert count: {{ steps.classify_invocation.output.alert_count }}
+            (configure the Run Workflow action with summaryMode:false); key:
+            {{ variables.requested_key_id | default: '(missing)' }}; Region:
+            {{ variables.region | default: '(missing)' }}; expected account:
+            {{ variables.expected_account_id | default: '(missing)' }};
+            connector account:
+            {{ variables.connector_account_id | default: '(missing)' }};
+            CloudTrail recipient account:
+            {{ variables.recipient_account_id | default: '(missing)' }};
+            fallback KMS ARN candidates:
+            {{ variables.fallback_candidate_count | default: 0 }}.
+            Rollback: none is needed because no mutation was attempted.
+      - name: fail_unsafe_target
+        type: workflow.fail
+        with:
+          message: The KMS target, batch, resource account, or connector account failed validation.
+          reason: kms_target_validation_failed
