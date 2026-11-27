@@ -74,8 +74,9 @@ triggers:
         required: false
         default: ""
         description: >-
-          Alert to keep open. Duplicates are closed only for this alert's group.
-          Leave empty to use the alert this workflow was started from.
+          Alert that selects the group. The oldest triaged alert in that
+          group stays open. Leave empty to use the alert this workflow was
+          started from.
 
 settings:
   timeout: 10m
@@ -100,7 +101,7 @@ steps:
     with:
       closed_count: "0"
 
-  # The alert passed into this run is the one that must stay open.
+  # The alert passed into this run only selects the group.
   - name: set_selected_alert
     type: data.set
     with:
