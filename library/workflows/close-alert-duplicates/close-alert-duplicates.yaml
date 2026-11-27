@@ -1,0 +1,304 @@
+template-metadata:
+  slug: close-alert-duplicates
+  version: "1.0.0"
+  availability: ">=9.5.0"
+  name: "Close Alert Duplicates Automatically"
+  description: >-
+    Close open detection alerts that repeat the same rule and the same
+    identity values, including the same values on different hosts. Cloud
+    alerts group by source.ip and user.id. Malicious file alerts group by
+    file.hash.sha256. Other file alerts group by process.executable and
+    file.path. Registry alerts group by process.executable and registry.path.
+    Alerts with a process executable and a DNS question name group by those
+    two fields. Other process alerts group by executable, parent executable,
+    and command line. Every pattern also requires the same event.action
+    values. The search is limited to the Kibana space this workflow runs in.
+    The alert left open is the oldest acknowledged or in-progress alert in
+    the group, or the oldest open alert when every member is still open.
+    Each closed alert is marked duplicate and tagged with the id of the
+    alert that stayed open.
+  solutions: [security]
+  categories: [response]
+
+# Groups are cross-host on purpose. host.id is not part of the key.
+# Each alert is placed in one group, first match:
+#   cloud: rule tag "Domain: Cloud" plus source.ip and user.id
+#   file: event.code malicious_file plus file.hash.sha256
+#   file_path: process.executable plus file.path, except malicious_file
+#   registry: process.executable plus registry.path
+#   dns: process.executable plus dns.question.name
+#   process: process.executable, process.parent.executable, process.command_line
+# event.action is multi-valued. Every pattern also requires the same action
+# set. The group key is the sorted unique actions joined with "|".
+# The alert left open is the oldest acknowledged or in-progress alert in the
+# group, or the oldest open alert when every member is still open. That alert
+# is never closed. A run started from an alert uses that alert only to choose
+# the group, then closes the other open members, including the new alert when
+# an older one is kept. A scheduled run closes other groups only when
+# consts.close_all_groups is yes. The search reads only this Kibana space.
+# Each pattern is searched on its own. consts.lookback_hours, consts.max_groups,
+# and consts.max_ids_per_group bound a run. Newest groups are closed first.
+name: Close Alert Duplicates Automatically
+description: >
+  On a schedule or from an alert, close open detection alerts that repeat the
+  same kibana.alert.rule.name and the same identity values, including matches
+  on different hosts. Cloud alerts (rule tag Domain: Cloud) match on source.ip
+  and user.id. Malicious file alerts match on file.hash.sha256. Other file
+  alerts match on process.executable and file.path. Registry alerts match on
+  process.executable and registry.path. Alerts with process.executable and
+  dns.question.name match on those fields. Remaining process alerts match on
+  process.executable, process.parent.executable, and process.command_line.
+  Every pattern also requires the same event.action values. The search reads
+  only this Kibana space. A run started from an alert closes other open
+  alerts in that alert's group. The alert left open is the oldest
+  acknowledged or in-progress alert in the group, or the oldest open alert
+  when none are triaged. Other groups are closed only when
+  consts.close_all_groups is yes.
+  The close reason is duplicate. Closed alerts are tagged Duplicate and
+  duplicate-of:<original alert uuid>.
+enabled: true
+tags:
+  - security
+  - response
+  - alert-triage
+
+triggers:
+  - type: alert
+  - type: scheduled
+    with:
+      every: 15m
+  - type: manual
+    inputs:
+      - name: alert_id
+        type: string
+        required: false
+        default: ""
+        description: >-
+          Alert that selects the group. The oldest triaged alert in that
+          group stays open. Leave empty to use the alert this workflow was
+          started from.
+
+settings:
+  timeout: 10m
+  concurrency:
+    key: "{{ workflow.id }}"
+    strategy: queue
+    max: 1
+
+consts:
+  lookback_hours: "24"
+  # yes closes every duplicate group when no alert was selected. no leaves
+  # those groups open, so a scheduled run does not close unrelated alerts.
+  close_all_groups: "no"
+  # Newest groups kept per pattern before any alert is closed.
+  max_groups: "25"
+  # MV_SLICE end index, inclusive. 10 keeps the first 11 ids in the group.
+  max_ids_per_group: "10"
+
+steps:
+  - name: init_counters
+    type: data.set
+    with:
+      closed_count: "0"
+
+  # The alert passed into this run only selects the group.
+  - name: set_selected_alert
+    type: data.set
+    with:
+      alert_id: |
+        {%- assign typed = inputs.alert_id | default: '' | append: '' | strip -%}
+        {%- if typed == '<your_input>' -%}
+        {%- assign typed = '' -%}
+        {%- endif -%}
+        {%- if typed != '' -%}
+        {{- typed -}}
+        {%- else -%}
+        {{- event.alerts[0].kibana.alert.uuid | default: event.alerts[0]._id | default: '' | append: '' | strip -}}
+        {%- endif -%}
+
+  - name: log_scope
+    type: console
+    with:
+      message: "{% assign selected_id = steps.set_selected_alert.output.alert_id | default: '' | append: '' | strip %}{% if selected_id != '' %}Selected alert {{ selected_id }} chooses the group. The oldest triaged alert stays open, or the oldest open alert when none are triaged.{% elsif consts.close_all_groups == 'yes' %}No selected alert. Closing every duplicate group in the last {{ consts.lookback_hours }} hours.{% else %}No selected alert. Duplicate groups were not closed. Set consts.close_all_groups to yes to close every group.{% endif %}"
+
+  - name: set_alerts_index
+    type: data.set
+    with:
+      alerts_index: ".alerts-security.alerts-{{ workflow.spaceId | default: 'default' }}"
+
+  - name: set_patterns
+    type: data.set
+    with:
+      patterns: "${{ 'cloud,file,file_path,registry,dns,process' | split: ',' }}"
+
+  # One search per pattern so a large process group cannot crowd out dns,
+  # file, or cloud duplicates. Newest groups are kept. open_ids is the alert
+  # to close. original_id is the alert left open in that group.
+  - name: per_pattern
+    type: foreach
+    foreach: "{{ steps.set_patterns.output.patterns }}"
+    on-failure:
+      continue: true
+    steps:
+      - name: query_duplicates
+        type: elasticsearch.esql.query
+        on-failure:
+          continue: true
+        with:
+          format: json
+          query: |
+            FROM {{ steps.set_alerts_index.output.alerts_index }}
+            | WHERE @timestamp >= NOW() - {{ consts.lookback_hours }} hours
+            | WHERE kibana.alert.workflow_status IN ("open", "acknowledged", "in-progress")
+            | EVAL rule_name = MV_FIRST(kibana.alert.rule.name),
+                event_code = TO_LOWER(MV_FIRST(event.code)),
+                file_hash = TO_LOWER(MV_FIRST(file.hash.sha256)),
+                file_path = MV_FIRST(file.path),
+                registry_path = MV_FIRST(registry.path),
+                executable = MV_FIRST(process.executable),
+                parent_executable = MV_FIRST(process.parent.executable),
+                command_line = MV_FIRST(process.command_line),
+                dns_name = MV_FIRST(dns.question.name),
+                source_ip = TO_STRING(MV_FIRST(source.ip)),
+                user_id = MV_FIRST(user.id),
+                status = MV_FIRST(kibana.alert.workflow_status),
+                alert_id = MV_FIRST(kibana.alert.uuid),
+                event_action = COALESCE(MV_CONCAT(MV_SORT(MV_DEDUPE(event.action)), "|"), "")
+            | EVAL pattern = CASE(
+                MV_CONTAINS(kibana.alert.rule.tags, "Domain: Cloud") AND source_ip IS NOT NULL AND source_ip != "" AND user_id IS NOT NULL AND user_id != "" AND rule_name IS NOT NULL AND rule_name != "",
+                "cloud",
+                event_code == "malicious_file" AND file_hash IS NOT NULL AND file_hash != "" AND rule_name IS NOT NULL AND rule_name != "",
+                "file",
+                executable IS NOT NULL AND executable != "" AND file_path IS NOT NULL AND file_path != "" AND (event_code IS NULL OR event_code != "malicious_file") AND rule_name IS NOT NULL AND rule_name != "",
+                "file_path",
+                executable IS NOT NULL AND executable != "" AND registry_path IS NOT NULL AND registry_path != "" AND rule_name IS NOT NULL AND rule_name != "",
+                "registry",
+                executable IS NOT NULL AND executable != "" AND dns_name IS NOT NULL AND dns_name != "" AND rule_name IS NOT NULL AND rule_name != "",
+                "dns",
+                executable IS NOT NULL AND executable != "" AND parent_executable IS NOT NULL AND parent_executable != "" AND command_line IS NOT NULL AND command_line != "" AND rule_name IS NOT NULL AND rule_name != "",
+                "process",
+                "none"
+              )
+            | WHERE pattern == "{{ foreach.item }}"
+            | EVAL key_a = CASE(pattern == "cloud", source_ip, pattern == "file", file_hash, executable),
+                key_b = CASE(pattern == "cloud", user_id, pattern == "dns", dns_name, pattern == "file_path", file_path, pattern == "registry", registry_path, pattern == "process", parent_executable, ""),
+                key_c = CASE(pattern == "process", command_line, ""),
+                keep_sort = CASE(status == "open", @timestamp + 365 days, @timestamp),
+                is_selected = CASE(alert_id == ?1 AND ?1 != "", 1, 0)
+            | STATS alert_count = COUNT(*),
+                original_id = FIRST(alert_id, keep_sort),
+                selected_present = MAX(is_selected),
+                open_ids = VALUES(alert_id) WHERE status == "open",
+                latest = MAX(@timestamp)
+              BY pattern, rule_name, key_a, key_b, key_c, event_action
+            | WHERE alert_count > 1
+            | WHERE key_a IS NOT NULL AND key_a != ""
+            | WHERE pattern == "file" OR (key_b IS NOT NULL AND key_b != "")
+            | WHERE pattern != "process" OR (key_c IS NOT NULL AND key_c != "")
+            | WHERE (?1 != "" AND selected_present > 0) OR (?1 == "" AND "{{ consts.close_all_groups }}" == "yes")
+            | SORT latest DESC
+            | LIMIT {{ consts.max_groups }}
+            | EVAL open_ids = MV_SLICE(open_ids, 0, {{ consts.max_ids_per_group }})
+            | MV_EXPAND open_ids
+            | WHERE open_ids IS NOT NULL AND open_ids != "" AND open_ids != original_id
+            | KEEP pattern, rule_name, original_id, open_ids
+          params:
+            - "{{ steps.set_selected_alert.output.alert_id }}"
+
+      - name: count_rows
+        type: data.set
+        with:
+          row_count: "{{ steps.query_duplicates.output.values | size | default: 0 }}"
+
+      - name: when_query_ok
+        type: if
+        condition: "not steps.query_duplicates.error: *"
+        steps:
+          - name: when_duplicates_found
+            type: if
+            condition: "steps.count_rows.output.row_count > 0"
+            steps:
+              - name: log_pattern
+                type: console
+                with:
+                  message: "Pattern {{ foreach.item }} has {{ steps.count_rows.output.row_count }} duplicate alert(s) to close."
+              - name: per_duplicate
+                type: foreach
+                foreach: "{{ steps.query_duplicates.output.values }}"
+                on-failure:
+                  continue: true
+                steps:
+                  - name: classify_row
+                    type: data.set
+                    with:
+                      close_this: |
+                        {%- assign duplicate_id = foreach.item[3] | default: '' | append: '' | strip -%}
+                        {%- assign original_id = foreach.item[2] | default: '' | append: '' | strip -%}
+                        {%- assign close_this = 'yes' -%}
+                        {%- if duplicate_id == '' -%}
+                        {%- assign close_this = 'no' -%}
+                        {%- endif -%}
+                        {%- if duplicate_id == original_id -%}
+                        {%- assign close_this = 'no' -%}
+                        {%- endif -%}
+                        {{- close_this -}}
+                  - name: when_should_close
+                    type: if
+                    condition: 'steps.classify_row.output.close_this: "yes"'
+                    steps:
+                      - name: close_duplicate
+                        type: security.setAlertStatus
+                        on-failure:
+                          continue: true
+                        with:
+                          status: closed
+                          close_reason: duplicate
+                          alert_ids:
+                            - "{{ foreach.item[3] }}"
+                      - name: when_closed
+                        type: if
+                        condition: "not steps.close_duplicate.error: *"
+                        steps:
+                          - name: tag_duplicate
+                            type: security.setAlertTags
+                            on-failure:
+                              continue: true
+                            with:
+                              alert_ids:
+                                - "{{ foreach.item[3] }}"
+                              tags_to_add:
+                                - Duplicate
+                                - "duplicate-of:{{ foreach.item[2] }}"
+                          - name: count_closed
+                            type: data.set
+                            with:
+                              closed_count: "{{ variables.closed_count | default: 0 | plus: 1 }}"
+                          - name: log_closed
+                            type: console
+                            with:
+                              message: "Closed {{ foreach.item[3] }} as duplicate of {{ foreach.item[2] }}. pattern={{ foreach.item[0] }} rule={{ foreach.item[1] }}."
+                        else:
+                          - name: log_close_failed
+                            type: console
+                            with:
+                              message: "Did not close {{ foreach.item[3] }} (duplicate of {{ foreach.item[2] }}). {{ steps.close_duplicate.error.message }}"
+                    else:
+                      - name: log_kept
+                        type: console
+                        with:
+                          message: "Left {{ foreach.item[3] }} open. It is the original alert for this group."
+            else:
+              - name: log_none
+                type: console
+                with:
+                  message: "Pattern {{ foreach.item }} has no duplicate alerts in the last {{ consts.lookback_hours }} hours."
+        else:
+          - name: log_query_failed
+            type: console
+            with:
+              message: "Duplicate search failed for {{ foreach.item }}. {{ steps.query_duplicates.error.message }}"
+
+  - name: log_done
+    type: console
+    with:
+      message: "Duplicate close finished. closed={{ variables.closed_count | default: 0 }} lookback_hours={{ consts.lookback_hours }} max_groups={{ consts.max_groups }}."
